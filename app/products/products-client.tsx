@@ -77,12 +77,12 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
         try {
           const count = await importProducts(rows)
           toast.success(`Imported ${count} products`)
-        } catch (err: any) {
-          toast.error(err.message)
+        } catch (err: unknown) {
+          toast.error(err instanceof Error ? err.message : 'Import failed')
         }
       })
-    } catch {
-      toast.error('Failed to parse file')
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to parse file')
     }
     e.target.value = ''
   }

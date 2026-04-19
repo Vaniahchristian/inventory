@@ -3,6 +3,19 @@
 import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 
+/** Terminal logs when importing: dev server, or set DEBUG_PRODUCT_IMPORT=1 / NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT=1 */
+function importDebug(): boolean {
+  return (
+    process.env.NODE_ENV === 'development' ||
+    process.env.DEBUG_PRODUCT_IMPORT === '1' ||
+    process.env.NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT === '1'
+  )
+}
+
+function logImport(...args: unknown[]) {
+  if (importDebug()) console.log('[product-import]', ...args)
+}
+
 export async function getProducts() {
   const { data, error } = await supabase
     .from('products')
@@ -125,6 +138,27 @@ export async function importProducts(rows: Record<string, unknown>[]) {
   const isPackingList =
     allKeys.has('MARKS') || allKeys.has('T.QTY') || allKeys.has('U.PRICE (RMB)')
 
+  logImport('importProducts: incoming rows=', rows.length, 'isPackingList=', isPackingList)
+  logImport(
+    'column keys (sample):',
+    [...allKeys].filter(k => !k.startsWith('__col')).slice(0, 24),
+    'has __col*',
+    [...allKeys].some(k => k.startsWith('__col'))
+  )
+  if (rows[0]) {
+    logImport('first raw row keys:', Object.keys(rows[0]), 'MARKS=', String(rows[0].MARKS ?? '').slice(0, 40))
+  }
+
+  let skippedInvalidMarks = 0
+  const invalidMarksSamples: string[] = []
+  const zeroOrBad: {
+    sku: string | null
+    quantity: number
+    cost_price: number
+    isShifted: boolean
+    raw: Record<string, unknown>
+  }[] = []
+
   type MappedRow = {
     sku: string | null
     name: string | null
@@ -150,7 +184,12 @@ export async function importProducts(rows: Record<string, unknown>[]) {
       const rawSku = str(r['MARKS'] ?? '')
 
       // Skip non-product rows: totals, payment lines, page headers, blank rows
-      if (!isValidMarks(rawSku)) continue
+      if (!isValidMarks(rawSku)) {
+        skippedInvalidMarks++
+        if (invalidMarksSamples.length < 10)
+          invalidMarksSamples.push(String(rawSku).replace(/\n/g, '\\n').slice(0, 120))
+        continue
+      }
 
       const skuMatch = rawSku.match(/([A-Z]{2,3}-[A-Z]-\d+(?:-\d+)*)/)
       const sku = skuMatch ? skuMatch[1] : rawSku.split('\n')[0].trim() || null
@@ -217,6 +256,24 @@ export async function importProducts(rows: Record<string, unknown>[]) {
         selling_price: 0,
         reorder_level: 0,
       })
+
+      if (quantity === 0 || cost_price === 0) {
+        if (zeroOrBad.length < 25)
+          zeroOrBad.push({
+            sku,
+            quantity,
+            cost_price,
+            isShifted,
+            raw: {
+              PACKING: r['PACKING'],
+              'T.CTN': r['T.CTN'],
+              'T.QTY': r['T.QTY'],
+              'T.CBM': r['T.CBM'],
+              'U.PRICE (RMB)': r['U.PRICE (RMB)'],
+              'T.AMOUNT': r['T.AMOUNT'],
+            },
+          })
+      }
     } else {
       // Standard exported format (column names from our own Excel export)
       const name = str(r['name'] ?? r['Name']) || null
@@ -240,6 +297,31 @@ export async function importProducts(rows: Record<string, unknown>[]) {
         reorder_level: intOrNull(r['reorder_level'] ?? r['Reorder Level']) ?? 0,
       })
     }
+  }
+
+  logImport(
+    'mapped rows:',
+    mapped.length,
+    'skipped (invalid MARKS):',
+    skippedInvalidMarks,
+    invalidMarksSamples.length ? 'samples:' : '',
+    invalidMarksSamples
+  )
+  if (zeroOrBad.length)
+    logImport(
+      'rows with quantity=0 OR cost_price=0 (first 25):',
+      zeroOrBad.length,
+      zeroOrBad
+    )
+  if (isPackingList && mapped.length && importDebug()) {
+    const s = mapped[0]
+    logImport('first mapped product:', {
+      sku: s.sku,
+      quantity: s.quantity,
+      cost_price: s.cost_price,
+      packing: s.packing,
+      cartons: s.cartons,
+    })
   }
 
   if (mapped.length === 0) throw new Error('No valid product rows found in file')
