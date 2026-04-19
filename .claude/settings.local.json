@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx shadcn@canary init -d)"
+      "Bash(npx shadcn@canary init -d)",
+      "Bash(npx shadcn@canary add table badge input label select textarea dialog dropdown-menu sheet separator skeleton toast)",
+      "Bash(npx shadcn@canary add sonner card tabs)",
+      "Bash(npx shadcn@canary add table badge input label select textarea dialog dropdown-menu sheet separator skeleton)",
+      "Bash(npx shadcn@canary add table badge input select)",
+      "Bash(npm run *)"
     ]
   }
 }
