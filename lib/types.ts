@@ -17,8 +17,8 @@ export type Supplier = {
 
 export type Product = {
   id: string
-  name: string
-  sku: string
+  name: string | null
+  sku: string | null
   description: string | null
   category_id: string | null
   supplier_id: string | null
@@ -27,6 +27,7 @@ export type Product = {
   selling_price: number
   quantity: number
   reorder_level: number
+  image_url: string | null
   created_at: string
   updated_at: string
   categories?: Category | null
