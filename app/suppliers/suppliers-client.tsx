@@ -90,10 +90,8 @@ export function SuppliersClient({ suppliers }: { suppliers: Supplier[] }) {
                   <TableCell className="max-w-[200px] truncate">{s.address ?? '-'}</TableCell>
                   <TableCell>
                     <DropdownMenu>
-                      <DropdownMenuTrigger>
-                        <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreHorizontal className="h-3.5 w-3.5" />
-                        </Button>
+                      <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7" />}>
+                        <MoreHorizontal className="h-3.5 w-3.5" />
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem onClick={() => setEditing(s)}>

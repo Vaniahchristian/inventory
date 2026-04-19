@@ -76,10 +76,8 @@ export function StockClient({
             />
           </div>
           <DropdownMenu>
-            <DropdownMenuTrigger>
-              <Button variant="outline" size="sm" className="h-8 gap-1.5">
-                <Download className="h-3.5 w-3.5" /> Export
-              </Button>
+            <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-8 gap-1.5" />}>
+              <Download className="h-3.5 w-3.5" /> Export
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onClick={() => exportMovementsToExcel(movements)}>

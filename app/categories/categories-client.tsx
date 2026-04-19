@@ -87,10 +87,8 @@ export function CategoriesClient({ categories }: { categories: Category[] }) {
                   <TableCell>{formatDate(c.created_at)}</TableCell>
                   <TableCell>
                     <DropdownMenu>
-                      <DropdownMenuTrigger>
-                        <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreHorizontal className="h-3.5 w-3.5" />
-                        </Button>
+                      <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7" />}>
+                        <MoreHorizontal className="h-3.5 w-3.5" />
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem onClick={() => setEditing(c)}>
