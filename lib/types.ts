@@ -28,6 +28,13 @@ export type Product = {
   quantity: number
   reorder_level: number
   image_url: string | null
+  packing: string | null
+  cartons: number | null
+  cbm: number | null
+  unit_weight: string | null
+  total_weight: string | null
+  total_amount_rmb: number | null
+  shop_name: string | null
   created_at: string
   updated_at: string
   categories?: Category | null

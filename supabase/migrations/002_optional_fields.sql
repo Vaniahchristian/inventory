@@ -18,3 +18,13 @@ VALUES (
   ARRAY['image/jpeg','image/png','image/webp','image/gif']
 )
 ON CONFLICT (id) DO NOTHING;
+
+-- Packing list additional fields
+ALTER TABLE products
+  ADD COLUMN IF NOT EXISTS packing        text,
+  ADD COLUMN IF NOT EXISTS cartons        integer,
+  ADD COLUMN IF NOT EXISTS cbm            numeric(10,4),
+  ADD COLUMN IF NOT EXISTS unit_weight    text,
+  ADD COLUMN IF NOT EXISTS total_weight   text,
+  ADD COLUMN IF NOT EXISTS total_amount_rmb numeric(14,2),
+  ADD COLUMN IF NOT EXISTS shop_name      text;

@@ -6,18 +6,31 @@ import { formatDateTime } from './utils'
 
 export function exportProductsToExcel(products: Product[]) {
   const rows = products.map(p => ({
-    SKU: p.sku ?? '',
+    'MARKS / SKU': p.sku ?? '',
     Name: p.name ?? '',
+    'SHOP#': p.shop_name ?? '',
+    Description: p.description ?? '',
     Category: p.categories?.name ?? '',
     Supplier: p.suppliers?.name ?? '',
+    Packing: p.packing ?? '',
+    'T.CTN': p.cartons ?? '',
     Unit: p.unit,
-    'Cost Price': p.cost_price,
-    'Selling Price': p.selling_price,
-    Quantity: p.quantity,
-    'Reorder Level': p.reorder_level,
-    Description: p.description ?? '',
+    'T.QTY': p.quantity,
+    'T.CBM': p.cbm ?? '',
+    'UNIT WEIGHT': p.unit_weight ?? '',
+    'T.WEIGHT': p.total_weight ?? '',
+    'U.PRICE (RMB)': p.cost_price || '',
+    'T.AMOUNT (RMB)': p.total_amount_rmb ?? '',
+    'Selling Price': p.selling_price || '',
+    'Reorder Level': p.reorder_level || '',
   }))
   const ws = XLSX.utils.json_to_sheet(rows)
+  // Column widths
+  ws['!cols'] = [
+    { wch: 16 }, { wch: 28 }, { wch: 14 }, { wch: 30 }, { wch: 16 }, { wch: 16 },
+    { wch: 14 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 12 },
+    { wch: 12 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 12 },
+  ]
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, 'Products')
   XLSX.writeFile(wb, `products_${Date.now()}.xlsx`)
@@ -43,27 +56,76 @@ export function exportMovementsToExcel(movements: StockMovement[]) {
 export function exportProductsToPdf(products: Product[]) {
   import('jspdf').then(async ({ default: jsPDF }) => {
     const { default: autoTable } = await import('jspdf-autotable')
-    const doc = new jsPDF({ orientation: 'landscape' })
-    doc.setFontSize(14)
-    doc.text('Product Inventory Report', 14, 15)
-    doc.setFontSize(9)
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 22)
+    const doc = new jsPDF({ orientation: 'landscape', format: 'a3' })
+    doc.setFontSize(13)
+    doc.text('Product Inventory Report', 14, 14)
+    doc.setFontSize(8)
+    doc.text(`Generated: ${new Date().toLocaleString()}  |  ${products.length} items`, 14, 20)
+
+    const totalCbm = products.reduce((s, p) => s + (p.cbm ?? 0), 0)
+    const totalWeight = products.reduce((s, p) => s + parseFloat(String(p.total_weight ?? '0').replace(/[^\d.]/g, '') || '0'), 0)
+    const totalCartons = products.reduce((s, p) => s + (p.cartons ?? 0), 0)
+    const totalAmount = products.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+
     autoTable(doc, {
-      startY: 27,
-      head: [['SKU', 'Name', 'Category', 'Unit', 'Cost', 'Selling', 'Qty', 'Reorder']],
-      body: products.map(p => [
-        p.sku ?? '-',
-        p.name ?? '-',
-        p.categories?.name ?? '-',
-        p.unit,
-        p.cost_price,
-        p.selling_price,
-        p.quantity,
-        p.reorder_level,
-      ]),
-      styles: { fontSize: 8, cellPadding: 2 },
-      headStyles: { fillColor: [30, 41, 59] },
+      startY: 25,
+      head: [[
+        'MARKS / SKU', 'Name', 'Description', 'SHOP#', 'Packing',
+        'CTN', 'Qty', 'CBM', 'U.Wt', 'T.Wt',
+        'Unit Price ¥', 'T.Amount ¥',
+      ]],
+      body: [
+        ...products.map(p => [
+          p.sku ?? '-',
+          p.name ?? '-',
+          p.description ?? '-',
+          p.shop_name ?? p.suppliers?.name ?? '-',
+          p.packing ?? '-',
+          p.cartons ?? '-',
+          `${p.quantity} ${p.unit}`,
+          p.cbm != null ? p.cbm.toFixed(3) : '-',
+          p.unit_weight ?? '-',
+          p.total_weight ?? '-',
+          p.cost_price > 0 ? `¥${p.cost_price.toLocaleString()}` : '-',
+          p.total_amount_rmb != null ? `¥${p.total_amount_rmb.toLocaleString()}` : '-',
+        ]),
+        // Totals row
+        [
+          { content: 'TOTALS', styles: { fontStyle: 'bold' } },
+          '', '', '',
+          '',
+          { content: String(totalCartons || '-'), styles: { fontStyle: 'bold' } },
+          '',
+          { content: totalCbm > 0 ? totalCbm.toFixed(3) : '-', styles: { fontStyle: 'bold' } },
+          '',
+          { content: totalWeight > 0 ? `${totalWeight.toFixed(1)} KGS` : '-', styles: { fontStyle: 'bold' } },
+          '',
+          { content: totalAmount > 0 ? `¥${totalAmount.toLocaleString()}` : '-', styles: { fontStyle: 'bold' } },
+        ],
+      ],
+      styles: { fontSize: 7, cellPadding: 1.5, overflow: 'linebreak' },
+      headStyles: { fillColor: [30, 41, 59], fontSize: 7, cellPadding: 2 },
       alternateRowStyles: { fillColor: [248, 250, 252] },
+      columnStyles: {
+        0: { cellWidth: 22 },   // SKU
+        1: { cellWidth: 38 },   // Name
+        2: { cellWidth: 38 },   // Description
+        3: { cellWidth: 20 },   // Shop
+        4: { cellWidth: 18 },   // Packing
+        5: { cellWidth: 10 },   // CTN
+        6: { cellWidth: 14 },   // Qty
+        7: { cellWidth: 14 },   // CBM
+        8: { cellWidth: 14 },   // U.Wt
+        9: { cellWidth: 16 },   // T.Wt
+        10: { cellWidth: 18 },  // Unit Price
+        11: { cellWidth: 20 },  // T.Amount
+      },
+      didParseCell: (data) => {
+        // Bold totals row
+        if (data.row.index === products.length) {
+          data.cell.styles.fillColor = [226, 232, 240]
+        }
+      },
     })
     doc.save(`products_${Date.now()}.pdf`)
   })

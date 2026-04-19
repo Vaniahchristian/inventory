@@ -7,7 +7,7 @@ export async function getProducts() {
   const { data, error } = await supabase
     .from('products')
     .select('*, categories(id,name), suppliers(id,name)')
-    .order('name')
+    .order('sku', { nullsFirst: false })
   if (error) throw new Error(error.message)
   return data
 }
@@ -88,17 +88,24 @@ export async function deleteProduct(id: string) {
   revalidatePath('/')
 }
 
+// ── helpers ──────────────────────────────────────────────────────────────────
+
 function str(v: unknown): string {
   return String(v ?? '').trim()
 }
 
 function num(v: unknown): number {
-  // Strip currency symbols, commas, spaces and any non-numeric prefix chars
   return parseFloat(str(v).replace(/[^\d.-]/g, '')) || 0
 }
 
-function qty(v: unknown): number {
-  return parseInt(str(v).replace(/[^\d]/g, '')) || 0
+function numOrNull(v: unknown): number | null {
+  const n = parseFloat(str(v).replace(/[^\d.-]/g, ''))
+  return isNaN(n) ? null : n
+}
+
+function intOrNull(v: unknown): number | null {
+  const s = str(v).replace(/[^\d]/g, '')
+  return s ? parseInt(s) : null
 }
 
 function parseUnit(packing: string): string {
@@ -106,60 +113,137 @@ function parseUnit(packing: string): string {
   return m ? m[1].toLowerCase() : 'pcs'
 }
 
+/** True if col 0 of a data row looks like a valid product MARKS value */
+function isValidMarks(raw: string): boolean {
+  return /^[A-Z]{2,3}-[A-Z]-\d/.test(raw.split('\n')[0].trim())
+}
+
+// ── import ────────────────────────────────────────────────────────────────────
+
 export async function importProducts(rows: Record<string, unknown>[]) {
-  // Detect format by scanning column keys across all rows
   const allKeys = new Set(rows.flatMap(r => Object.keys(r)))
   const isPackingList =
-    allKeys.has('MARKS') ||
-    allKeys.has('T.QTY') ||
-    allKeys.has('U.PRICE (RMB)') ||
-    allKeys.has('ITEM NO.')
+    allKeys.has('MARKS') || allKeys.has('T.QTY') || allKeys.has('U.PRICE (RMB)')
 
-  const mapped = rows.map(r => {
+  type MappedRow = {
+    sku: string | null
+    name: string | null
+    description: string | null
+    shop_name: string | null
+    unit: string
+    packing: string | null
+    cartons: number | null
+    quantity: number
+    cbm: number | null
+    unit_weight: string | null
+    total_weight: string | null
+    cost_price: number
+    total_amount_rmb: number | null
+    selling_price: number
+    reorder_level: number
+  }
+
+  const mapped: MappedRow[] = []
+
+  for (const r of rows) {
     if (isPackingList) {
-      // CSV has "ITEM NO." with a newline in the header → stored as "ITEM NO."
-      // Column 6 (index 6) has no header — it's the unnamed Chinese product name column
-      // We reconstruct by checking unnamed/empty headers
       const rawSku = str(r['MARKS'] ?? '')
-      const skuMatch = rawSku.match(/([A-Z]{2}-[A-Z]-\d+(?:-\d+)?)/)
+
+      // Skip non-product rows: totals, payment lines, page headers, blank rows
+      if (!isValidMarks(rawSku)) continue
+
+      const skuMatch = rawSku.match(/([A-Z]{2,3}-[A-Z]-\d+(?:-\d+)*)/)
       const sku = skuMatch ? skuMatch[1] : rawSku.split('\n')[0].trim() || null
 
       const descGoods = str(r['DESCRIPTION OF GOODS'] ?? '')
-      // Column 6 (between DESCRIPTION OF GOODS and PACKING) holds the specific product name.
-      // Our parser names unnamed headers __colN where N is the 0-based column index.
-      const col6 = str(r['__col6'] ?? r['__col3'] ?? r['__col4'] ?? '')
+      // Column __col6 (index 6) holds the specific product name in most rows.
+      const col6val = str(r['__col6'] ?? '')
+      const shop = str(r['SHOP#'] ?? '') || null
 
-      const name = col6 || descGoods || null
-      const packing = str(r['PACKING'] ?? '')
+      // CSV conversion sometimes shifts columns when a cell is merged.
+      // Detection: a valid PACKING value contains a slash (e.g. "15pcs/ctn").
+      // If PACKING has no slash, the Chinese product name ended up there and
+      // the real packing/qty/cbm/price columns are each shifted one to the right.
+      const packingField = str(r['PACKING'] ?? '')
+      const isShifted = !!packingField && !/\//.test(packingField)
 
-      return {
-        sku: sku || null,
+      let name: string | null
+      let packing: string | null
+      let cartons: number | null
+      let quantity: number
+      let cbm: number | null
+      let unit_weight: string | null
+      let total_weight: string | null
+      let cost_price: number
+      let total_amount_rmb: number | null
+
+      if (isShifted) {
+        // packingField actually contains the Chinese product name; real data shifts right
+        name = packingField || col6val || descGoods || null
+        packing = str(r['T.CTN'] ?? '') || null
+        cartons = intOrNull(r['T.QTY'])
+        quantity = intOrNull(r['T.CBM']) ?? 0
+        cbm = numOrNull(r['UNIT WEIGHT'])
+        unit_weight = str(r['T.WEIGHT'] ?? '') || null
+        total_weight = str(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? '') || null
+        cost_price = num(r['T.AMOUNT'])
+        total_amount_rmb = numOrNull(r['__col15'] ?? r['__col14'] ?? '')
+      } else {
+        name = col6val || descGoods || null
+        packing = packingField || null
+        cartons = intOrNull(r['T.CTN'])
+        quantity = intOrNull(r['T.QTY']) ?? 0
+        cbm = numOrNull(r['T.CBM'])
+        unit_weight = str(r['UNIT WEIGHT'] ?? '') || null
+        total_weight = str(r['T.WEIGHT'] ?? '') || null
+        cost_price = num(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? '')
+        total_amount_rmb = numOrNull(r['T.AMOUNT'])
+      }
+
+      mapped.push({
+        sku,
         name,
-        description: [descGoods, col6].filter(Boolean).join(' – ') || null,
-        unit: parseUnit(packing),
-        quantity: qty(r['T.QTY']),
-        cost_price: num(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? r['U.PRICE (RMB) ']),
+        description: [descGoods, col6val].filter(Boolean).join(' – ') || null,
+        shop_name: shop,
+        unit: packing ? parseUnit(packing) : 'pcs',
+        packing,
+        cartons,
+        quantity,
+        cbm,
+        unit_weight,
+        total_weight,
+        cost_price,
+        total_amount_rmb,
         selling_price: 0,
         reorder_level: 0,
-      }
+      })
+    } else {
+      // Standard exported format (column names from our own Excel export)
+      const name = str(r['name'] ?? r['Name']) || null
+      const sku = str(r['sku'] ?? r['SKU']) || null
+      if (!name && !sku) continue
+      mapped.push({
+        sku,
+        name,
+        description: str(r['description'] ?? r['Description']) || null,
+        shop_name: null,
+        unit: str(r['unit'] ?? r['Unit']) || 'pcs',
+        packing: null,
+        cartons: null,
+        quantity: intOrNull(r['quantity'] ?? r['Quantity']) ?? 0,
+        cbm: null,
+        unit_weight: null,
+        total_weight: null,
+        cost_price: num(r['cost_price'] ?? r['Cost Price']),
+        total_amount_rmb: null,
+        selling_price: num(r['selling_price'] ?? r['Selling Price']),
+        reorder_level: intOrNull(r['reorder_level'] ?? r['Reorder Level']) ?? 0,
+      })
     }
+  }
 
-    // Standard exported format
-    return {
-      name: str(r['name'] ?? r['Name']) || null,
-      sku: str(r['sku'] ?? r['SKU']) || null,
-      description: str(r['description'] ?? r['Description']) || null,
-      unit: str(r['unit'] ?? r['Unit']) || 'pcs',
-      cost_price: num(r['cost_price'] ?? r['Cost Price']),
-      selling_price: num(r['selling_price'] ?? r['Selling Price']),
-      quantity: qty(r['quantity'] ?? r['Quantity']),
-      reorder_level: qty(r['reorder_level'] ?? r['Reorder Level']),
-    }
-  }).filter(r => r.name || r.sku)
+  if (mapped.length === 0) throw new Error('No valid product rows found in file')
 
-  if (mapped.length === 0) throw new Error('No valid rows found in file')
-
-  // Rows with SKU → upsert; rows without SKU → insert
   const withSku = mapped.filter(r => r.sku)
   const withoutSku = mapped.filter(r => !r.sku)
 
