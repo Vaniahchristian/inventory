@@ -244,19 +244,29 @@ export async function importProducts(rows: Record<string, unknown>[]) {
 
   if (mapped.length === 0) throw new Error('No valid product rows found in file')
 
-  const withSku = mapped.filter(r => r.sku)
-  const withoutSku = mapped.filter(r => !r.sku)
+  // Deduplicate by SKU — later rows in the file win (last-write-wins per batch)
+  const skuMap = new Map<string, MappedRow>()
+  const withoutSku: MappedRow[] = []
+  for (const row of mapped) {
+    if (row.sku) skuMap.set(row.sku, row)
+    else withoutSku.push(row)
+  }
+  const withSku = Array.from(skuMap.values())
 
-  if (withSku.length > 0) {
-    const { error } = await supabase.from('products').upsert(withSku, { onConflict: 'sku' })
+  // Batch upserts in chunks of 50 to stay within Supabase request limits
+  const CHUNK = 50
+  for (let i = 0; i < withSku.length; i += CHUNK) {
+    const chunk = withSku.slice(i, i + CHUNK)
+    const { error } = await supabase.from('products').upsert(chunk, { onConflict: 'sku' })
     if (error) throw new Error(error.message)
   }
-  if (withoutSku.length > 0) {
-    const { error } = await supabase.from('products').insert(withoutSku)
+  for (let i = 0; i < withoutSku.length; i += CHUNK) {
+    const chunk = withoutSku.slice(i, i + CHUNK)
+    const { error } = await supabase.from('products').insert(chunk)
     if (error) throw new Error(error.message)
   }
 
   revalidatePath('/products')
   revalidatePath('/')
-  return mapped.length
+  return skuMap.size + withoutSku.length
 }

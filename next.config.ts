@@ -4,8 +4,12 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: __dirname,
   },
+  experimental: {
+    serverActions: {
+      bodySizeLimit: '10mb',
+    },
+  },
   webpack: (config) => {
-    // pdfjs-dist needs canvas as optional
     config.resolve.alias.canvas = false
     return config
   },
