@@ -101,7 +101,7 @@ function SidebarContent({ onNav }: { onNav?: () => void }) {
       <div className="px-4 py-4">
         <div className="flex items-center gap-2">
           <Boxes className="h-5 w-5 text-slate-300" />
-          <span className="font-bold text-white tracking-tight">Kato Inventory</span>
+          <span className="font-bold text-white tracking-tight">KizitoInventory</span>
         </div>
       </div>
       <Separator className="bg-slate-700" />
