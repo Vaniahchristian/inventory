@@ -93,7 +93,8 @@ function str(v: unknown): string {
 }
 
 function num(v: unknown): number {
-  return parseFloat(str(v).replace(/[¥,\s]/g, '')) || 0
+  // Strip currency symbols, commas, spaces and any non-numeric prefix chars
+  return parseFloat(str(v).replace(/[^\d.-]/g, '')) || 0
 }
 
 function qty(v: unknown): number {
@@ -106,30 +107,44 @@ function parseUnit(packing: string): string {
 }
 
 export async function importProducts(rows: Record<string, unknown>[]) {
-  const mapped = rows.map(r => {
-    // Support both standard column names and packing-list column names
-    const isPackingList = 'MARKS' in r || 'T.QTY' in r || 'U.PRICE (RMB)' in r
+  // Detect format by scanning column keys across all rows
+  const allKeys = new Set(rows.flatMap(r => Object.keys(r)))
+  const isPackingList =
+    allKeys.has('MARKS') ||
+    allKeys.has('T.QTY') ||
+    allKeys.has('U.PRICE (RMB)') ||
+    allKeys.has('ITEM NO.')
 
+  const mapped = rows.map(r => {
     if (isPackingList) {
+      // CSV has "ITEM NO." with a newline in the header → stored as "ITEM NO."
+      // Column 6 (index 6) has no header — it's the unnamed Chinese product name column
+      // We reconstruct by checking unnamed/empty headers
       const rawSku = str(r['MARKS'] ?? '')
       const skuMatch = rawSku.match(/([A-Z]{2}-[A-Z]-\d+(?:-\d+)?)/)
       const sku = skuMatch ? skuMatch[1] : rawSku.split('\n')[0].trim() || null
+
       const descGoods = str(r['DESCRIPTION OF GOODS'] ?? '')
-      const col6 = str(r['Col6'] ?? r['col6'] ?? '')
+      // Column 6 (between DESCRIPTION OF GOODS and PACKING) holds the specific product name.
+      // Our parser names unnamed headers __colN where N is the 0-based column index.
+      const col6 = str(r['__col6'] ?? r['__col3'] ?? r['__col4'] ?? '')
+
       const name = col6 || descGoods || null
       const packing = str(r['PACKING'] ?? '')
+
       return {
         sku: sku || null,
         name,
         description: [descGoods, col6].filter(Boolean).join(' – ') || null,
         unit: parseUnit(packing),
         quantity: qty(r['T.QTY']),
-        cost_price: num(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)']),
+        cost_price: num(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? r['U.PRICE (RMB) ']),
         selling_price: 0,
         reorder_level: 0,
       }
     }
 
+    // Standard exported format
     return {
       name: str(r['name'] ?? r['Name']) || null,
       sku: str(r['sku'] ?? r['SKU']) || null,

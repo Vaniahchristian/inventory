@@ -99,10 +99,58 @@ export function exportMovementsToPdf(movements: StockMovement[]) {
 }
 
 export async function parseExcelFile(file: File): Promise<Record<string, unknown>[]> {
-  const buffer = await file.arrayBuffer()
-  const wb = XLSX.read(buffer)
+  let wb: XLSX.WorkBook
+  if (file.name.toLowerCase().endsWith('.csv')) {
+    // Use browser's native UTF-8 decoding for CSV so ¥ and CJK chars survive
+    const text = await file.text()
+    wb = XLSX.read(text, { type: 'string' })
+  } else {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    wb = XLSX.read(bytes, { type: 'array' })
+  }
   const ws = wb.Sheets[wb.SheetNames[0]]
-  return XLSX.utils.sheet_to_json(ws)
+
+  // Read everything as raw rows first
+  const allRows: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })
+
+  // Find the header row: the row where the first non-empty cell is "MARKS"
+  // (packing list format) or where we see standard inventory column names
+  const headerIdx = allRows.findIndex(row => {
+    const first = String(row[0] ?? '').trim().toUpperCase()
+    if (first === 'MARKS') return true
+    // Standard exported format
+    const cols = row.map(c => String(c ?? '').trim().toLowerCase())
+    return cols.includes('sku') || cols.includes('name')
+  })
+
+  if (headerIdx === -1) {
+    // Fallback: let xlsx auto-detect (original behaviour)
+    return XLSX.utils.sheet_to_json(ws, { defval: '' })
+  }
+
+  const rawHeaders = (allRows[headerIdx] as unknown[]).map(h =>
+    String(h ?? '').trim().replace(/\n/g, ' ')
+  )
+  // Give unnamed columns a stable placeholder so their data isn't lost
+  const headers = rawHeaders.map((h, i) => h || `__col${i}`)
+
+  const result: Record<string, unknown>[] = []
+  for (let i = headerIdx + 1; i < allRows.length; i++) {
+    const row = allRows[i] as unknown[]
+    // Skip completely empty rows
+    const nonEmpty = row.filter(c => String(c ?? '').trim())
+    if (nonEmpty.length === 0) continue
+    // Skip section-header rows like "NEW ORDER" (single non-MARKS cell in col 0)
+    if (nonEmpty.length === 1 && !String(row[0] ?? '').match(/^[A-Z]{2,3}-/)) continue
+
+    const obj: Record<string, unknown> = {}
+    headers.forEach((h, idx) => {
+      obj[h] = row[idx] ?? ''
+    })
+    result.push(obj)
+  }
+
+  return result
 }
 
 /** Parse a packing-list PDF exported from the container manifest format.
