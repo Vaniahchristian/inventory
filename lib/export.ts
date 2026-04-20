@@ -173,12 +173,133 @@ export function exportMovementsToPdf(movements: StockMovement[]) {
   })
 }
 
+function isPdfFile(file: File): boolean {
+  const name = file.name.trim().toLowerCase()
+  const type = (file.type ?? '').toLowerCase()
+  return name.endsWith('.pdf') || type === 'application/pdf'
+}
+
+function isCsvFile(file: File): boolean {
+  const name = file.name.trim().toLowerCase()
+  const type = (file.type ?? '').toLowerCase()
+  return name.endsWith('.csv') || type === 'text/csv'
+}
+
+/** Packing-list MARKS pattern, e.g. "MS-T-201-1" (first line of cell 0) */
+const PACKING_MARKS_RE = /^[A-Z]{2,3}-[A-Z]-\d/
+
+/**
+ * Packing-list rows arrive with varying column alignments across pages
+ * (the source PDF repeats its header on every page with a different number of
+ * merged/blank padding cells, and some rows have item-no+description merged
+ * into a single cell). Extract fields by *pattern* from each cell, so we
+ * don't depend on a single positional header map.
+ *
+ * Returns null for non-product rows (headers, totals, payment lines, blanks).
+ */
+function extractPackingListRow(cells: unknown[]): Record<string, unknown> | null {
+  const txt = cells.map(c => String(c ?? '').trim())
+  const marks = txt[0] ?? ''
+  if (!PACKING_MARKS_RE.test(marks.split('\n')[0].trim())) return null
+
+  const shop = txt[1] ?? ''
+  const used = new Set<number>([0, 1])
+
+  let packing = ''
+  let tCtn = ''
+  let tQty = ''
+  let tCbm = ''
+  let uWt = ''
+  let tWt = ''
+  let uPrice = ''
+  let tAmount = ''
+
+  for (let i = 2; i < txt.length; i++) {
+    const t = txt[i]
+    if (!t) continue
+    if (!packing && /\d+\s*[A-Za-z]+\s*\/\s*ctn/i.test(t)) { packing = t; used.add(i); continue }
+    if (!tCtn && /^\s*\d+\s*CTNS?\s*$/i.test(t))            { tCtn = t;    used.add(i); continue }
+    if (!tQty && /^\s*\d+\s*pcs\s*$/i.test(t))              { tQty = t;    used.add(i); continue }
+    if (!tCbm && /^\s*[\d.]+\s*CBM\s*$/i.test(t))           { tCbm = t;    used.add(i); continue }
+    if (/^\s*[\d.]+\s*KGS\s*$/i.test(t)) {
+      if (!uWt) { uWt = t; used.add(i); continue }
+      if (!tWt) { tWt = t; used.add(i); continue }
+    }
+    if (/^\s*[¥￥]\s*[\d,]+(?:\.\d+)?\s*$/.test(t)) {
+      if (!uPrice)  { uPrice = t;  used.add(i); continue }
+      if (!tAmount) { tAmount = t; used.add(i); continue }
+    }
+  }
+
+  // Worst-case: the matched PACKING cell is a multi-line blob that also
+  // contains item no., description, and Chinese detail (PDF merged them into
+  // a single cell). Split out the real "NNpcs/ctn" token and feed the
+  // surrounding text through the leftovers pipeline below.
+  const extraLeftovers: string[] = []
+  if (packing && (/[\n\r]/.test(packing) || !/^\s*\d+\s*[A-Za-z]+\s*\/\s*ctn\s*$/i.test(packing))) {
+    const lines = packing.split(/[\n\r]+/).map(s => s.trim()).filter(Boolean)
+    const packingLine = lines.find(l => /\d+\s*[A-Za-z]+\s*\/\s*ctn/i.test(l)) ?? packing
+    const pToken = packingLine.match(/\d+\s*[A-Za-z]+\s*\/\s*ctn/i)?.[0]
+    if (pToken) {
+      const prefix = packingLine.replace(pToken, '').trim()
+      packing = pToken.replace(/\s+/g, '')
+      for (const l of lines) if (l !== packingLine) extraLeftovers.push(l)
+      if (prefix) extraLeftovers.push(prefix)
+    }
+  }
+
+  // Cells between index 2 and the first matched data column usually hold
+  // item-no. (pure digits), English description, and a Chinese detail blob.
+  const matchedIdxs = [...used].filter(i => i >= 2)
+  const firstMatched = matchedIdxs.length ? Math.min(...matchedIdxs) : txt.length
+  const leftovers = [...txt.slice(2, firstMatched).filter(Boolean), ...extraLeftovers]
+
+  let itemNo = ''
+  let desc = ''
+  let detail = ''
+
+  const assignMerged = (c: string): boolean => {
+    const m = c.match(/^(\d+)?\s*([A-Za-z][A-Za-z0-9\s.()\/-]*?)?\s*([\u4e00-\u9fff][\s\S]*)?$/)
+    if (!m || (!m[1] && !m[2] && !m[3])) return false
+    // Require at least two of {digits, english, chinese} to consider it "merged"
+    const parts = [m[1], m[2]?.trim(), m[3]?.trim()].filter(Boolean).length
+    if (parts < 2) return false
+    if (!itemNo && m[1]) itemNo = m[1]
+    if (!desc && m[2]) desc = m[2].trim()
+    if (m[3]) detail = detail ? `${detail} ${m[3].trim()}` : m[3].trim()
+    return true
+  }
+
+  for (const c of leftovers) {
+    if (!itemNo && /^\s*\d+\s*$/.test(c)) { itemNo = c.trim(); continue }
+    if (!desc && /^[A-Za-z][A-Za-z0-9\s.()\/-]*$/.test(c)) { desc = c; continue }
+    if (assignMerged(c)) continue
+    detail = detail ? `${detail} ${c}` : c
+  }
+
+  return {
+    MARKS: marks,
+    'SHOP#': shop,
+    'ITEM NO.': itemNo,
+    'DESCRIPTION OF GOODS': desc,
+    __col6: detail,
+    PACKING: packing,
+    'T.CTN': tCtn,
+    'T.QTY': tQty,
+    'T.CBM': tCbm,
+    'UNIT WEIGHT': uWt,
+    'T.WEIGHT': tWt,
+    'U.PRICE (RMB)': uPrice,
+    'T.AMOUNT': tAmount,
+  }
+}
+
 export async function parseExcelFile(file: File): Promise<Record<string, unknown>[]> {
   let allRows: unknown[][]
   /** Only set for binary .xlsx/.xls — used if header detection fails */
   let wsFallback: XLSX.WorkSheet | undefined
 
-  if (file.name.toLowerCase().endsWith('.csv')) {
+  if (isCsvFile(file)) {
     // RFC 4180 CSV with quoted newlines (MARKS cell, headers). SheetJS splits those rows wrong.
     const text = await file.text()
     allRows = parseCsvRows(text)
@@ -194,6 +315,48 @@ export async function parseExcelFile(file: File): Promise<Record<string, unknown
     logImport('Excel/CSV', file.name, 'sheets:', wb.SheetNames.join(', '))
     wsFallback = wb.Sheets[wb.SheetNames[0]]
     allRows = XLSX.utils.sheet_to_json(wsFallback, { header: 1, defval: '' })
+  }
+
+  // Packing-list fast path: if any row's first cell starts with a valid MARKS
+  // SKU (e.g. "MS-T-201-1"), this is a packing list. These files repeat the
+  // header across pages with inconsistent column padding, so we bypass the
+  // positional header map and extract every field by pattern per row.
+  const packingCandidates = allRows.filter(r => {
+    const first = String(((r as unknown[])?.[0]) ?? '').split('\n')[0].trim()
+    return PACKING_MARKS_RE.test(first)
+  })
+  if (packingCandidates.length >= 2) {
+    const isExcelBinary = /\.xlsx?$/i.test(file.name)
+    const maxCols = Math.max(0, ...allRows.map(r => (r as unknown[])?.length ?? 0))
+    if (isExcelBinary && maxCols <= 2) {
+      const sheetRef = wsFallback?.['!ref'] ?? 'unknown'
+      throw new Error(
+        `This Excel workbook only stores two columns (${sheetRef}). Columns like PACKING, T.QTY, and prices are missing from the file itself — often caused by exporting or saving only part of the sheet. Import the full .csv packing list instead, or re-export the spreadsheet so all columns (through T.AMOUNT) are saved in Excel.`
+      )
+    }
+    logImport(
+      'packing-list mode: detected',
+      packingCandidates.length,
+      'MARKS rows — extracting fields per-row by pattern'
+    )
+    const extracted: Record<string, unknown>[] = []
+    for (const row of allRows) {
+      const r = extractPackingListRow(row as unknown[])
+      if (r) extracted.push(r)
+    }
+    if (extracted[0]) {
+      logImport('packing-list first extracted row:', {
+        MARKS: String(extracted[0].MARKS).slice(0, 40),
+        'DESCRIPTION OF GOODS': extracted[0]['DESCRIPTION OF GOODS'],
+        PACKING: extracted[0].PACKING,
+        'T.CTN': extracted[0]['T.CTN'],
+        'T.QTY': extracted[0]['T.QTY'],
+        'U.PRICE (RMB)': extracted[0]['U.PRICE (RMB)'],
+        'T.AMOUNT': extracted[0]['T.AMOUNT'],
+      })
+    }
+    logImport('packing-list extracted rows:', extracted.length)
+    return extracted
   }
 
   // Find the header row: any cell equals "MARKS" (handles merged cells / shifted export)
@@ -440,9 +603,16 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
 
   const Y_BUCKET = 4
 
+  const pageTextBlobs: string[] = []
+
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum)
     const content = await page.getTextContent()
+    pageTextBlobs.push(
+      content.items
+        .map(item => ('str' in item ? String((item as { str?: string }).str ?? '') : ''))
+        .join('\n')
+    )
 
     const lineMap = new Map<number, { x: number; text: string }[]>()
     for (const item of content.items) {
@@ -520,12 +690,35 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
       : '(none)'
   )
 
+  if (rows.length === 0) {
+    // Fallback parser for PDFs whose glyph coordinates are too fragmented for Y-bucketing.
+    const text = pageTextBlobs.join('\n')
+    const chunks = text
+      .split(/(?=MS-[A-Z]-\d+(?:-\d+)*)/g)
+      .map(s => s.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+    const fallbackRows: Record<string, unknown>[] = []
+    for (const chunk of chunks) {
+      const result = parsePdfTableLineResult(chunk)
+      if (result.ok) fallbackRows.push(result.row)
+    }
+    if (fallbackRows.length) {
+      logImport('PDF fallback parsed rows:', fallbackRows.length, 'sample:', {
+        MARKS: String(fallbackRows[0].MARKS ?? '').slice(0, 40),
+        PACKING: fallbackRows[0].PACKING,
+        'T.QTY': fallbackRows[0]['T.QTY'],
+        'U.PRICE (RMB)': fallbackRows[0]['U.PRICE (RMB)'],
+      })
+      return fallbackRows
+    }
+  }
+
   return rows
 }
 
 /** Accept .xlsx/.xls/.csv or .pdf; images are handled separately as product thumbnails */
 export async function parseImportFile(file: File): Promise<Record<string, unknown>[]> {
-  const rows = file.name.endsWith('.pdf')
+  const rows = isPdfFile(file)
     ? await parsePdfFile(file)
     : await parseExcelFile(file)
   logImport('parseImportFile done:', file.name, '→', rows.length, 'rows')

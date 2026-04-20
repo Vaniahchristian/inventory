@@ -73,6 +73,9 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
 
     try {
       const rows = await parseImportFile(file)
+      if (rows.length === 0) {
+        throw new Error('No rows detected from file. If this is a PDF, re-export it as text-searchable PDF or CSV.')
+      }
       startTransition(async () => {
         try {
           const count = await importProducts(rows)
