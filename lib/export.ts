@@ -679,23 +679,20 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
   const unitPriceStr = yenMatches[0] ? `¥${yenMatches[0][1]}` : ''
   const totalAmtStr = yenMatches[1] ? `¥${yenMatches[1][1]}` : ''
 
-  // Shop: between SANCARGO and PACKING (strip trailing item index like "… 12")
+  // Shop + Description: PDF renderers sometimes insert spaces within Chinese
+  // characters (e.g. "龙凤保温 瓶"), breaking the \S+ single-token approach.
+  // Use Unicode CJK range to capture the full Chinese shop name, then extract
+  // the English/mixed description that follows the optional item number.
   let shop = ''
-  const shopPack = line.match(/\bSANCARGO\s+(.+?)\s+(\d+\s*\w+\/ctn)/i)
-  if (shopPack) {
-    shop = shopPack[1]
-      .replace(/\s+\d+\s*$/, '')
-      .trim()
-  }
-
-  // Description: between item index and PACKING (English + Chinese blob)
   let descMain = ''
   let descDetail = ''
-  const itemAndDesc = line.match(
-    /\bSANCARGO\s+\S+\s+(\d+)\s+(.+?)\s+\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn/i
+
+  const shopDescM = line.match(
+    /\bSANCARGO\s+((?:[\u4e00-\u9fff]\s*)+)\s*(?:\d+\s+)?(.+?)\s+\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn/i
   )
-  if (itemAndDesc) {
-    const blob = itemAndDesc[2].trim()
+  if (shopDescM) {
+    shop = shopDescM[1].replace(/\s+/g, '').trim()
+    const blob = shopDescM[2].trim()
     const parts = blob.split(/\s+(?=[\u4e00-\u9fff])/)
     if (parts.length >= 2) {
       descMain = parts[0]
@@ -705,7 +702,32 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
       if (cut > 0) {
         descMain = blob.slice(0, cut).trim()
         descDetail = blob.slice(cut).trim()
-      } else descMain = blob
+      } else {
+        descMain = blob
+      }
+    }
+  } else {
+    // Fallback for rows with non-Chinese shop names
+    const shopPack = line.match(/\bSANCARGO\s+(.+?)\s+(\d+\s*\w+\/ctn)/i)
+    if (shopPack) {
+      shop = shopPack[1].replace(/\s+\d+\s*$/, '').trim()
+    }
+    const itemAndDesc = line.match(
+      /\bSANCARGO\s+\S+\s+(\d+)\s+(.+?)\s+\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn/i
+    )
+    if (itemAndDesc) {
+      const blob = itemAndDesc[2].trim()
+      const parts = blob.split(/\s+(?=[\u4e00-\u9fff])/)
+      if (parts.length >= 2) {
+        descMain = parts[0]
+        descDetail = parts.slice(1).join(' ')
+      } else {
+        const cut = blob.search(/[\u4e00-\u9fff]/)
+        if (cut > 0) {
+          descMain = blob.slice(0, cut).trim()
+          descDetail = blob.slice(cut).trim()
+        } else descMain = blob
+      }
     }
   }
 

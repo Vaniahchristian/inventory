@@ -104,15 +104,6 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
     e.target.value = ''
   }
 
-  // Compute totals from displayed products
-  const totals = {
-    cartons: filtered.reduce((s, p) => s + (p.cartons ?? 0), 0),
-    qty: filtered.reduce((s, p) => s + p.quantity, 0),
-    cbm: filtered.reduce((s, p) => s + (p.cbm ?? 0), 0),
-    weight: filtered.reduce((s, p) => s + parseFloat(p.total_weight ?? '0'), 0),
-    cost: filtered.reduce((s, p) => s + p.cost_price * p.quantity, 0),
-    amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
-  }
 
   return (
     <div className="p-6 space-y-4">
@@ -268,8 +259,8 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                 )
               })
             )}
-            {/* Yellow totals row */}
-            {filtered.length > 0 && (
+            {/* Yellow totals row — values from PDF (importMeta), not computed */}
+            {importMeta && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
                 <TableCell />
                 <TableCell />
@@ -278,22 +269,20 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                 <TableCell />
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {totals.cartons > 0 ? `${totals.cartons} CTNS` : ''}
+                  {importMeta.total_carton != null ? `${fmt(importMeta.total_carton, 0)} CTNS` : ''}
                 </TableCell>
+                <TableCell />
+                <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {totals.qty > 0 ? totals.qty.toLocaleString() : ''}
+                  {importMeta.total_cbm != null ? `${fmt(importMeta.total_cbm, 4)} CBM` : ''}
                 </TableCell>
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {totals.cbm > 0 ? `${totals.cbm.toFixed(4)} CBM` : ''}
+                  {importMeta.total_weight_kgs != null ? `${fmt(importMeta.total_weight_kgs, 1)} KGS` : ''}
                 </TableCell>
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {totals.weight > 0 ? `${totals.weight.toFixed(1)} KGS` : ''}
-                </TableCell>
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {totals.amount > 0 ? `¥${fmt(totals.amount, 2)}` : ''}
+                  {importMeta.total_cost_rmb != null ? `¥${fmt(importMeta.total_cost_rmb, 2)}` : ''}
                 </TableCell>
                 <TableCell />
                 <TableCell />
