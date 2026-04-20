@@ -118,6 +118,13 @@ export async function deleteProduct(id: string) {
   revalidatePath('/')
 }
 
+export async function deleteAllProducts() {
+  const { error } = await supabase.from('products').delete().not('id', 'is', null)
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+  revalidatePath('/')
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function str(v: unknown): string {

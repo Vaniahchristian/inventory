@@ -23,7 +23,7 @@ import {
   Plus, Search, MoreHorizontal, Pencil, Trash2,
   Download, Upload, FileSpreadsheet, FileText, ImageIcon,
 } from 'lucide-react'
-import { createProduct, updateProduct, deleteProduct, importProducts } from '@/app/actions/products'
+import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts } from '@/app/actions/products'
 import { exportProductsToExcel, exportProductsToPdf, parseImportFile } from '@/lib/export'
 import { formatCurrency, stockStatus } from '@/lib/utils'
 import { useFilter } from '@/hooks/use-inventory'
@@ -55,6 +55,19 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
       try {
         await deleteProduct(id)
         toast.success('Product deleted')
+      } catch (e: any) {
+        toast.error(e.message)
+      }
+    })
+  }
+
+  function handleDeleteAll() {
+    if (!products.length) return
+    if (!confirm(`Delete ALL ${products.length} products? This cannot be undone.`)) return
+    startTransition(async () => {
+      try {
+        await deleteAllProducts()
+        toast.success(`Deleted ${products.length} products`)
       } catch (e: any) {
         toast.error(e.message)
       }
@@ -139,6 +152,15 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
           </DropdownMenu>
           <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => fileInputRef.current?.click()}>
             <Upload className="h-3.5 w-3.5" /> Import
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+            onClick={handleDeleteAll}
+            disabled={isPending || products.length === 0}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete All
           </Button>
           <Button size="sm" className="h-8 gap-1.5 bg-slate-900 hover:bg-slate-700" onClick={() => setAdding(true)}>
             <Plus className="h-3.5 w-3.5" /> Add Product
