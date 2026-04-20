@@ -48,9 +48,17 @@ export async function createProduct(formData: FormData) {
     category_id: (formData.get('category_id') as string) || null,
     supplier_id: (formData.get('supplier_id') as string) || null,
     unit: (formData.get('unit') as string) || 'pcs',
+    shop_name: (formData.get('shop_name') as string) || null,
+    packing: (formData.get('packing') as string) || null,
+    cartons: intOrNull(formData.get('cartons')),
     cost_price: parseFloat(formData.get('cost_price') as string) || 0,
     selling_price: parseFloat(formData.get('selling_price') as string) || 0,
     quantity: parseInt(formData.get('quantity') as string) || 0,
+    unit_cbm: numOrNull(formData.get('unit_cbm')),
+    cbm: numOrNull(formData.get('cbm')),
+    unit_weight: (formData.get('unit_weight') as string) || null,
+    total_weight: (formData.get('total_weight') as string) || null,
+    total_amount_rmb: numOrNull(formData.get('total_amount_rmb')),
     reorder_level: parseInt(formData.get('reorder_level') as string) || 0,
     image_url,
   })
@@ -82,8 +90,17 @@ export async function updateProduct(id: string, formData: FormData) {
     category_id: (formData.get('category_id') as string) || null,
     supplier_id: (formData.get('supplier_id') as string) || null,
     unit: (formData.get('unit') as string) || 'pcs',
+    shop_name: (formData.get('shop_name') as string) || null,
+    packing: (formData.get('packing') as string) || null,
+    cartons: intOrNull(formData.get('cartons')),
     cost_price: parseFloat(formData.get('cost_price') as string) || 0,
     selling_price: parseFloat(formData.get('selling_price') as string) || 0,
+    quantity: parseInt(formData.get('quantity') as string) || 0,
+    unit_cbm: numOrNull(formData.get('unit_cbm')),
+    cbm: numOrNull(formData.get('cbm')),
+    unit_weight: (formData.get('unit_weight') as string) || null,
+    total_weight: (formData.get('total_weight') as string) || null,
+    total_amount_rmb: numOrNull(formData.get('total_amount_rmb')),
     reorder_level: parseInt(formData.get('reorder_level') as string) || 0,
   }
   if (image_url !== undefined) update.image_url = image_url
@@ -128,7 +145,29 @@ function parseUnit(packing: string): string {
 
 /** True if col 0 of a data row looks like a valid product MARKS value */
 function isValidMarks(raw: string): boolean {
-  return /^[A-Z]{2,3}-[A-Z]-\d/.test(raw.split('\n')[0].trim())
+  const first = raw.split('\n')[0].trim()
+  if (!first) return false
+  if (first.length < 3) return false
+  if (/\s/.test(first)) return false
+  if (/[¥￥]/.test(first)) return false
+  if (/[\\/]/.test(first)) return false
+  const upper = first.toUpperCase()
+  return !(
+    upper.includes('MARKS') ||
+    upper.includes('PACKING') ||
+    upper.includes('ITEM') ||
+    upper.includes('SHOP') ||
+    upper.includes('CLIENT DETAILS') ||
+    upper.includes('CONTAINER NO') ||
+    upper.includes('NEW ORDER') ||
+    upper.includes('GOODS LEFT') ||
+    upper.includes('GOODS BALANCE') ||
+    upper.includes('TOTAL ') ||
+    upper.includes('PCS') ||
+    upper.includes('CTN') ||
+    upper.includes('CBM') ||
+    upper.includes('KGS')
+  )
 }
 
 // ── import ────────────────────────────────────────────────────────────────────
@@ -168,6 +207,7 @@ export async function importProducts(rows: Record<string, unknown>[]) {
     packing: string | null
     cartons: number | null
     quantity: number
+    unit_cbm: number | null
     cbm: number | null
     unit_weight: string | null
     total_weight: string | null
@@ -191,8 +231,7 @@ export async function importProducts(rows: Record<string, unknown>[]) {
         continue
       }
 
-      const skuMatch = rawSku.match(/([A-Z]{2,3}-[A-Z]-\d+(?:-\d+)*)/)
-      const sku = skuMatch ? skuMatch[1] : rawSku.split('\n')[0].trim() || null
+      const sku = rawSku.split('\n')[0].trim() || null
 
       const descGoods = str(r['DESCRIPTION OF GOODS'] ?? '')
       // Column __col6 (index 6) holds the specific product name in most rows.
@@ -210,6 +249,7 @@ export async function importProducts(rows: Record<string, unknown>[]) {
       let packing: string | null
       let cartons: number | null
       let quantity: number
+      let unit_cbm: number | null
       let cbm: number | null
       let unit_weight: string | null
       let total_weight: string | null
@@ -222,6 +262,7 @@ export async function importProducts(rows: Record<string, unknown>[]) {
         packing = str(r['T.CTN'] ?? '') || null
         cartons = intOrNull(r['T.QTY'])
         quantity = intOrNull(r['T.CBM']) ?? 0
+        unit_cbm = numOrNull(r['UNIT CBM'])
         cbm = numOrNull(r['UNIT WEIGHT'])
         unit_weight = str(r['T.WEIGHT'] ?? '') || null
         total_weight = str(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? '') || null
@@ -232,6 +273,7 @@ export async function importProducts(rows: Record<string, unknown>[]) {
         packing = packingField || null
         cartons = intOrNull(r['T.CTN'])
         quantity = intOrNull(r['T.QTY']) ?? 0
+        unit_cbm = numOrNull(r['UNIT CBM'])
         cbm = numOrNull(r['T.CBM'])
         unit_weight = str(r['UNIT WEIGHT'] ?? '') || null
         total_weight = str(r['T.WEIGHT'] ?? '') || null
@@ -248,6 +290,7 @@ export async function importProducts(rows: Record<string, unknown>[]) {
         packing,
         cartons,
         quantity,
+        unit_cbm,
         cbm,
         unit_weight,
         total_weight,
@@ -288,6 +331,7 @@ export async function importProducts(rows: Record<string, unknown>[]) {
         packing: null,
         cartons: null,
         quantity: intOrNull(r['quantity'] ?? r['Quantity']) ?? 0,
+        unit_cbm: numOrNull(r['unit_cbm'] ?? r['Unit CBM']),
         cbm: null,
         unit_weight: null,
         total_weight: null,

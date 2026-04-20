@@ -170,7 +170,8 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
               <TableHead>Packing</TableHead>
               <TableHead className="text-right">CTN</TableHead>
               <TableHead className="text-right">Qty</TableHead>
-              <TableHead className="text-right">CBM</TableHead>
+              <TableHead className="text-right">U.CBM</TableHead>
+              <TableHead className="text-right">T.CBM</TableHead>
               <TableHead className="text-right">U.Weight</TableHead>
               <TableHead className="text-right">T.Weight</TableHead>
               <TableHead className="text-right">Unit Price</TableHead>
@@ -182,7 +183,7 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={15} className="text-center text-slate-400 py-10">
+                <TableCell colSpan={16} className="text-center text-slate-400 py-10">
                   No products found.
                 </TableCell>
               </TableRow>
@@ -207,6 +208,7 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
                     <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
                     <TableCell className="text-right">{p.cartons ?? '-'}</TableCell>
                     <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
+                    <TableCell className="text-right">{p.unit_cbm != null ? p.unit_cbm.toFixed(3) : '-'}</TableCell>
                     <TableCell className="text-right">{p.cbm != null ? p.cbm.toFixed(3) : '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.unit_weight ?? '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.total_weight ?? '-'}</TableCell>
@@ -316,11 +318,12 @@ function ProductDialog({
             <Field label="Packing" name="packing" defaultValue={product?.packing ?? ''} placeholder="e.g. 15pcs/ctn" />
             <Field label="Cartons (T.CTN)" name="cartons" type="number" defaultValue={String(product?.cartons ?? '')} />
           </div>
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-5 gap-3">
             <SelectField label="Unit" name="unit" defaultValue={product?.unit ?? 'pcs'}
               options={UNITS.map(u => ({ value: u, label: u }))} placeholder="pcs" />
             <Field label="Qty (T.QTY)" name="quantity" type="number" defaultValue={String(product?.quantity ?? 0)} />
-            <Field label="CBM (T.CBM)" name="cbm" type="number" step="0.0001" defaultValue={String(product?.cbm ?? '')} />
+            <Field label="U.CBM" name="unit_cbm" type="number" step="0.0001" defaultValue={String(product?.unit_cbm ?? '')} />
+            <Field label="T.CBM" name="cbm" type="number" step="0.0001" defaultValue={String(product?.cbm ?? '')} />
             <Field label="Reorder Level" name="reorder_level" type="number" defaultValue={String(product?.reorder_level ?? 0)} />
           </div>
           <div className="grid grid-cols-3 gap-3">

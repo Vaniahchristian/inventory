@@ -185,8 +185,31 @@ function isCsvFile(file: File): boolean {
   return name.endsWith('.csv') || type === 'text/csv'
 }
 
-/** Packing-list MARKS pattern, e.g. "MS-T-201-1" (first line of cell 0) */
-const PACKING_MARKS_RE = /^[A-Z]{2,3}-[A-Z]-\d/
+function isLikelyMarksCell(raw: string): boolean {
+  const v = raw.split('\n')[0].trim()
+  if (!v) return false
+  if (v.length < 3) return false
+  if (/\s/.test(v)) return false
+  const u = v.toUpperCase()
+  if (/[¥￥]/.test(v)) return false
+  if (/[\\/]/.test(v)) return false
+  return !(
+    u.includes('MARKS') ||
+    u.includes('PACKING') ||
+    u.includes('ITEM') ||
+    u.includes('SHOP') ||
+    u.includes('CLIENT DETAILS') ||
+    u.includes('CONTAINER NO') ||
+    u.includes('NEW ORDER') ||
+    u.includes('GOODS LEFT') ||
+    u.includes('GOODS BALANCE') ||
+    u.includes('TOTAL ') ||
+    u.includes('PCS') ||
+    u.includes('CTN') ||
+    u.includes('CBM') ||
+    u.includes('KGS')
+  )
+}
 
 /**
  * Packing-list rows arrive with varying column alignments across pages
@@ -200,7 +223,7 @@ const PACKING_MARKS_RE = /^[A-Z]{2,3}-[A-Z]-\d/
 function extractPackingListRow(cells: unknown[]): Record<string, unknown> | null {
   const txt = cells.map(c => String(c ?? '').trim())
   const marks = txt[0] ?? ''
-  if (!PACKING_MARKS_RE.test(marks.split('\n')[0].trim())) return null
+  if (!isLikelyMarksCell(marks)) return null
 
   const shop = txt[1] ?? ''
   const used = new Set<number>([0, 1])
@@ -208,6 +231,7 @@ function extractPackingListRow(cells: unknown[]): Record<string, unknown> | null
   let packing = ''
   let tCtn = ''
   let tQty = ''
+  let unitCbm = ''
   let tCbm = ''
   let uWt = ''
   let tWt = ''
@@ -220,7 +244,10 @@ function extractPackingListRow(cells: unknown[]): Record<string, unknown> | null
     if (!packing && /\d+\s*[A-Za-z]+\s*\/\s*ctn/i.test(t)) { packing = t; used.add(i); continue }
     if (!tCtn && /^\s*\d+\s*CTNS?\s*$/i.test(t))            { tCtn = t;    used.add(i); continue }
     if (!tQty && /^\s*\d+\s*pcs\s*$/i.test(t))              { tQty = t;    used.add(i); continue }
-    if (!tCbm && /^\s*[\d.]+\s*CBM\s*$/i.test(t))           { tCbm = t;    used.add(i); continue }
+    if (/^\s*[\d.]+\s*CBM\s*$/i.test(t)) {
+      if (!unitCbm) { unitCbm = t; used.add(i); continue }
+      if (!tCbm) { tCbm = t; used.add(i); continue }
+    }
     if (/^\s*[\d.]+\s*KGS\s*$/i.test(t)) {
       if (!uWt) { uWt = t; used.add(i); continue }
       if (!tWt) { tWt = t; used.add(i); continue }
@@ -286,6 +313,7 @@ function extractPackingListRow(cells: unknown[]): Record<string, unknown> | null
     PACKING: packing,
     'T.CTN': tCtn,
     'T.QTY': tQty,
+    'UNIT CBM': unitCbm,
     'T.CBM': tCbm,
     'UNIT WEIGHT': uWt,
     'T.WEIGHT': tWt,
@@ -323,15 +351,28 @@ export async function parseExcelFile(file: File): Promise<Record<string, unknown
   // positional header map and extract every field by pattern per row.
   const packingCandidates = allRows.filter(r => {
     const first = String(((r as unknown[])?.[0]) ?? '').split('\n')[0].trim()
-    return PACKING_MARKS_RE.test(first)
+    return isLikelyMarksCell(first)
   })
   if (packingCandidates.length >= 2) {
     const isExcelBinary = /\.xlsx?$/i.test(file.name)
     const maxCols = Math.max(0, ...allRows.map(r => (r as unknown[])?.length ?? 0))
     if (isExcelBinary && maxCols <= 2) {
+      const textBlob = allRows
+        .flatMap(r => (r as unknown[]).map(c => String(c ?? '').trim()))
+        .filter(Boolean)
+        .join('\n')
+      const recovered = parsePackingRowsFromTextBlob(textBlob)
+      if (recovered.length) {
+        logImport(
+          'packing-list 2-column excel recovery:',
+          recovered.length,
+          'rows recovered from text blob'
+        )
+        return recovered
+      }
       const sheetRef = wsFallback?.['!ref'] ?? 'unknown'
       throw new Error(
-        `This Excel workbook only stores two columns (${sheetRef}). Columns like PACKING, T.QTY, and prices are missing from the file itself — often caused by exporting or saving only part of the sheet. Import the full .csv packing list instead, or re-export the spreadsheet so all columns (through T.AMOUNT) are saved in Excel.`
+        `This Excel workbook only stores two columns (${sheetRef}) and no recoverable packing-list rows were found. Import the full .csv packing list instead, or re-export the spreadsheet so all columns (through T.AMOUNT) are saved in Excel.`
       )
     }
     logImport(
@@ -427,9 +468,22 @@ export async function parseExcelFile(file: File): Promise<Record<string, unknown
     headers.some(h => /PACKING/i.test(String(h))) ||
     headers.includes('T.QTY')
   if (isExcelBinary && marksLike && !hasPackingListQtyColumns) {
+    const textBlob = allRows
+      .flatMap(r => (r as unknown[]).map(c => String(c ?? '').trim()))
+      .filter(Boolean)
+      .join('\n')
+    const recovered = parsePackingRowsFromTextBlob(textBlob)
+    if (recovered.length) {
+      logImport(
+        'header-mode 2-column excel recovery:',
+        recovered.length,
+        'rows recovered from text blob'
+      )
+      return recovered
+    }
     const sheetRef = wsFallback?.['!ref'] ?? 'unknown'
     throw new Error(
-      `This Excel workbook only stores two columns (${sheetRef}). Columns like PACKING, T.QTY, and prices are missing from the file itself — often caused by exporting or saving only part of the sheet. Import the full .csv packing list instead, or re-export the spreadsheet so all columns (through T.AMOUNT) are saved in Excel.`
+      `This Excel workbook only stores two columns (${sheetRef}) and no recoverable packing-list rows were found. Import the full .csv packing list instead, or re-export the spreadsheet so all columns (through T.AMOUNT) are saved in Excel.`
     )
   }
 
@@ -440,7 +494,7 @@ export async function parseExcelFile(file: File): Promise<Record<string, unknown
     const nonEmpty = row.filter(c => String(c ?? '').trim())
     if (nonEmpty.length === 0) continue
     // Skip section-header rows like "NEW ORDER" (single non-MARKS cell in col 0)
-    if (nonEmpty.length === 1 && !String(row[0] ?? '').match(/^[A-Z]{2,3}-/)) continue
+    if (nonEmpty.length === 1 && !isLikelyMarksCell(String(row[0] ?? ''))) continue
 
     const obj: Record<string, unknown> = {}
     headers.forEach((h, idx) => {
@@ -464,8 +518,26 @@ export async function parseExcelFile(file: File): Promise<Record<string, unknown
   return result
 }
 
-/** SKU pattern used on SANCARGO packing lists */
-const MARKS_SKU_RE = /\b(MS-[A-Z]-\d+(?:-\d+)*)\b/
+function extractMarksFromPdfLine(line: string): string | null {
+  const m = line.match(/^\s*(.+?)\s*SANCARGO\b/i)
+  if (m && isLikelyMarksCell(m[1])) return m[1].trim()
+  const first = line.split(/\s+/)[0]?.trim() ?? ''
+  return isLikelyMarksCell(first) ? first : null
+}
+
+function extractPackingTextBlocks(text: string): string[] {
+  const compact = text.replace(/\r/g, '')
+  const blocks: string[] = []
+  const re = /([^\s\n]{3,})\s*SANCARGO([\s\S]*?)(?=(?:[^\s\n]{3,}\s*SANCARGO)|$)/gi
+  for (const m of compact.matchAll(re)) {
+    const marks = (m[1] ?? '').trim()
+    const body = (m[2] ?? '').trim()
+    if (!isLikelyMarksCell(marks)) continue
+    const joined = `${marks} SANCARGO ${body}`.replace(/\s+/g, ' ').trim()
+    if (joined) blocks.push(joined)
+  }
+  return blocks
+}
 
 /** Skip PDF boilerplate / totals (not product rows) */
 function shouldSkipPdfLine(joined: string): boolean {
@@ -507,12 +579,11 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
   const line = joined.replace(/\s+/g, ' ').trim()
   if (!line) return { ok: false, skip: 'empty line' }
   if (shouldSkipPdfLine(line)) return { ok: false, skip: 'skipped (header/footer keyword)' }
+  if (!/\bSANCARGO\b/i.test(line)) return { ok: false, skip: 'no SANCARGO anchor' }
 
-  const skuMatch = line.match(MARKS_SKU_RE)
-  if (!skuMatch) return { ok: false, skip: 'no MS-T-* SKU token' }
-
-  const sku = skuMatch[1]
-  const marksDisplay = /\bSANCARGO\b/i.test(line) ? `${sku}\nSANCARGO` : sku
+  const marks = extractMarksFromPdfLine(line)
+  if (!marks) return { ok: false, skip: 'no MARKS token' }
+  const marksDisplay = /\bSANCARGO\b/i.test(line) ? `${marks}\nSANCARGO` : marks
 
   const packingM = line.match(/(\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn)/i)
   if (!packingM)
@@ -528,8 +599,9 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
     ? `${afterCtn[1]}pcs`
     : (line.match(/(\d+)\s*pcs(?!\/)/i)?.[1] ?? '')
 
-  const cbmM = line.match(/([\d.]+)\s*CBM/i)
-  const cbmStr = cbmM ? `${cbmM[1]}CBM` : ''
+  const cbmMatches = [...line.matchAll(/([\d.]+)\s*CBM/gi)]
+  const unitCbmStr = cbmMatches[0] ? `${cbmMatches[0][1]}CBM` : ''
+  const cbmStr = cbmMatches[1] ? `${cbmMatches[1][1]}CBM` : unitCbmStr
 
   const kgsMatches = [...line.matchAll(/([\d.]+)\s*KGS/gi)]
   const unitWt = kgsMatches[0] ? `${kgsMatches[0][1]}KGS` : ''
@@ -580,6 +652,7 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
       PACKING: packing,
       'T.CTN': cartonsStr,
       'T.QTY': qtyStr,
+      'UNIT CBM': unitCbmStr,
       'T.CBM': cbmStr,
       'UNIT WEIGHT': unitWt,
       'T.WEIGHT': totalWt,
@@ -587,6 +660,20 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
       'T.AMOUNT': totalAmtStr,
     },
   }
+}
+
+/**
+ * Recover packing-list rows from flattened text streams (common in some
+ * 2-column .xlsx conversions where all detail cells were collapsed).
+ */
+function parsePackingRowsFromTextBlob(text: string): Record<string, unknown>[] {
+  const chunks = extractPackingTextBlocks(text)
+  const rows: Record<string, unknown>[] = []
+  for (const chunk of chunks) {
+    const result = parsePdfTableLineResult(chunk)
+    if (result.ok) rows.push(result.row)
+  }
+  return rows
 }
 
 /** Parse a packing-list PDF — output matches CSV column keys for importProducts */
@@ -634,13 +721,13 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
       if (joined) rawLines.push(joined)
     }
 
-    // Merge "MS-T-*" line with following "SANCARGO-only" baseline (two-line MARKS cell)
+    // Merge "MARKS-only" line with following "SANCARGO-only" baseline (two-line MARKS cell)
     const merged: string[] = []
     for (let i = 0; i < rawLines.length; i++) {
       const cur = rawLines[i]
       const next = rawLines[i + 1]
       if (
-        MARKS_SKU_RE.test(cur) &&
+        isLikelyMarksCell(cur) &&
         next &&
         /^\s*SANCARGO\s*$/i.test(next) &&
         !/\bSANCARGO\b/i.test(cur)
@@ -693,10 +780,7 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
   if (rows.length === 0) {
     // Fallback parser for PDFs whose glyph coordinates are too fragmented for Y-bucketing.
     const text = pageTextBlobs.join('\n')
-    const chunks = text
-      .split(/(?=MS-[A-Z]-\d+(?:-\d+)*)/g)
-      .map(s => s.replace(/\s+/g, ' ').trim())
-      .filter(Boolean)
+    const chunks = extractPackingTextBlocks(text)
     const fallbackRows: Record<string, unknown>[] = []
     for (const chunk of chunks) {
       const result = parsePdfTableLineResult(chunk)

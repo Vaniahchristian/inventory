@@ -30,6 +30,7 @@ export type Product = {
   image_url: string | null
   packing: string | null
   cartons: number | null
+  unit_cbm: number | null
   cbm: number | null
   unit_weight: string | null
   total_weight: string | null
