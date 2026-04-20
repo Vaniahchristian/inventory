@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition, useRef } from 'react'
+import React, { useState, useTransition, useRef } from 'react'
 import { toast } from 'sonner'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -24,15 +24,16 @@ import {
   Download, Upload, FileSpreadsheet, FileText, ImageIcon,
 } from 'lucide-react'
 import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts } from '@/app/actions/products'
-import { exportProductsToExcel, exportProductsToPdf, parseImportFile } from '@/lib/export'
+import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
 import { formatCurrency, stockStatus } from '@/lib/utils'
 import { useFilter } from '@/hooks/use-inventory'
-import type { Product, Category, Supplier } from '@/lib/types'
+import type { Product, Category, Supplier, ImportMeta } from '@/lib/types'
 
 type Props = {
   products: Product[]
   categories: Category[]
   suppliers: Supplier[]
+  importMeta: ImportMeta | null
 }
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
@@ -42,7 +43,7 @@ function fmt(n: number | null | undefined, decimals = 2) {
   return n.toLocaleString('en-UG', { minimumFractionDigits: 0, maximumFractionDigits: decimals })
 }
 
-export function ProductsClient({ products, categories, suppliers }: Props) {
+export function ProductsClient({ products, categories, suppliers, importMeta }: Props) {
   const [editing, setEditing] = useState<Product | null>(null)
   const [adding, setAdding] = useState(false)
   const [isPending, startTransition] = useTransition()
@@ -85,13 +86,13 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
     }
 
     try {
-      const rows = await parseImportFile(file)
+      const { rows, importMeta } = await parseImportFileDetailed(file)
       if (rows.length === 0) {
         throw new Error('No rows detected from file. If this is a PDF, re-export it as text-searchable PDF or CSV.')
       }
       startTransition(async () => {
         try {
-          const count = await importProducts(rows)
+          const count = await importProducts(rows, importMeta)
           toast.success(`Imported ${count} products`)
         } catch (err: unknown) {
           toast.error(err instanceof Error ? err.message : 'Import failed')
@@ -108,6 +109,7 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
     cartons: filtered.reduce((s, p) => s + (p.cartons ?? 0), 0),
     qty: filtered.reduce((s, p) => s + p.quantity, 0),
     cbm: filtered.reduce((s, p) => s + (p.cbm ?? 0), 0),
+    weight: filtered.reduce((s, p) => s + parseFloat(p.total_weight ?? '0'), 0),
     cost: filtered.reduce((s, p) => s + p.cost_price * p.quantity, 0),
     amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
   }
@@ -168,14 +170,11 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
         </div>
       </div>
 
-      {/* Summary strip */}
-      {filtered.length > 0 && (
-        <div className="flex gap-4 text-xs text-slate-500 flex-wrap">
-          {totals.cartons > 0 && <span><span className="font-semibold text-slate-700">{totals.cartons}</span> CTN</span>}
-          <span><span className="font-semibold text-slate-700">{totals.qty.toLocaleString()}</span> pcs</span>
-          {totals.cbm > 0 && <span><span className="font-semibold text-slate-700">{totals.cbm.toFixed(3)}</span> CBM</span>}
-          {totals.amount > 0 && <span>¥<span className="font-semibold text-slate-700">{totals.amount.toLocaleString('en-UG', { maximumFractionDigits: 2 })}</span> RMB</span>}
-          {totals.cost > 0 && <span className="ml-auto">{formatCurrency(totals.cost)} value</span>}
+      {importMeta && (
+        <div className="rounded-md border bg-amber-50 border-amber-200 px-3 py-2 text-xs flex flex-wrap gap-x-6 gap-y-0.5 items-center">
+          <span className="font-semibold text-slate-800">CLIENT DETAILS: <span className="text-amber-800">{importMeta.client_details ?? '-'}</span></span>
+          <span className="font-semibold text-slate-800">CONTAINER NO: <span className="text-amber-800">{importMeta.container_no ?? '-'}</span></span>
+          <span className="text-slate-500 text-[10px] ml-auto">{importMeta.source_file_name}</span>
         </div>
       )}
 
@@ -269,9 +268,91 @@ export function ProductsClient({ products, categories, suppliers }: Props) {
                 )
               })
             )}
+            {/* Yellow totals row */}
+            {filtered.length > 0 && (
+              <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
+                <TableCell />
+                <TableCell />
+                <TableCell />
+                <TableCell />
+                <TableCell />
+                <TableCell />
+                <TableCell className="text-right text-slate-900">
+                  {totals.cartons > 0 ? `${totals.cartons} CTNS` : ''}
+                </TableCell>
+                <TableCell className="text-right text-slate-900">
+                  {totals.qty > 0 ? totals.qty.toLocaleString() : ''}
+                </TableCell>
+                <TableCell />
+                <TableCell className="text-right text-slate-900">
+                  {totals.cbm > 0 ? `${totals.cbm.toFixed(4)} CBM` : ''}
+                </TableCell>
+                <TableCell />
+                <TableCell className="text-right text-slate-900">
+                  {totals.weight > 0 ? `${totals.weight.toFixed(1)} KGS` : ''}
+                </TableCell>
+                <TableCell />
+                <TableCell className="text-right text-slate-900">
+                  {totals.amount > 0 ? `¥${fmt(totals.amount, 2)}` : ''}
+                </TableCell>
+                <TableCell />
+                <TableCell />
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </div>
+
+      {/* Financial summary — mirrors PDF bottom section */}
+      {importMeta && (
+        <div className="rounded-md border bg-white overflow-hidden text-xs">
+          <div className="grid grid-cols-2 divide-x divide-slate-200">
+            {/* Left: document-wide weight/volume/cost totals */}
+            <table className="w-full">
+              <tbody>
+                <MetaRow label="TOTAL WEIGHT" value={importMeta.total_weight_kgs != null ? `${fmt(importMeta.total_weight_kgs, 1)} KGS` : '-'} />
+                <MetaRow label="TOTAL CBM" value={importMeta.total_cbm != null ? `${fmt(importMeta.total_cbm, 1)} CBM` : '-'} />
+                <MetaRow label="TOTAL CARTON" value={importMeta.total_carton != null ? `${fmt(importMeta.total_carton, 0)} CTN` : '-'} />
+                <MetaRow
+                  label="TOTAL COST"
+                  value={
+                    <>
+                      {importMeta.total_cost_rmb != null && <span className="mr-3">¥{fmt(importMeta.total_cost_rmb, 2)} RMB</span>}
+                      {importMeta.total_cost_usd != null && <span>${fmt(importMeta.total_cost_usd, 2)} USD</span>}
+                    </>
+                  }
+                />
+              </tbody>
+            </table>
+            {/* Right: balance breakdown */}
+            <table className="w-full">
+              <tbody>
+                {importMeta.payment_date != null && importMeta.payment_usd != null && (
+                  <MetaRow label={`${importMeta.payment_date} PAYMENT`} value={`$${fmt(importMeta.payment_usd, 2)} USD`} />
+                )}
+                {importMeta.goods_balance_usd != null && (
+                  <MetaRow label="GOODS BALANCE" value={`$${fmt(importMeta.goods_balance_usd, 2)} USD`} />
+                )}
+                {importMeta.credit_support_usd != null && (
+                  <MetaRow label="CREDIT SUPPORT TO MOMBASA" value={`$${fmt(importMeta.credit_support_usd, 2)} USD`} />
+                )}
+                {importMeta.pivoc_usd != null && (
+                  <MetaRow label="PIVOC" value={`$${fmt(importMeta.pivoc_usd, 2)} USD`} />
+                )}
+                {importMeta.freight_usd != null && (
+                  <MetaRow label="YIWU-MOMBASA FREIGHT" value={`$${fmt(importMeta.freight_usd, 2)} USD`} />
+                )}
+                {importMeta.total_balance_usd != null && (
+                  <MetaRow label="TOTAL BALANCE" value={`$${fmt(importMeta.total_balance_usd, 2)} USD`} highlight />
+                )}
+                {importMeta.exchange_rate != null && (
+                  <MetaRow label="EXCHANGE RATE" value={`¥${fmt(importMeta.exchange_rate, 2)} RMB`} />
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <ProductDialog
         open={adding || !!editing}
@@ -406,5 +487,18 @@ function SelectField({ label, name, defaultValue, options, placeholder }: {
         </SelectContent>
       </Select>
     </div>
+  )
+}
+
+function MetaRow({ label, value, highlight = false }: {
+  label: string
+  value: React.ReactNode
+  highlight?: boolean
+}) {
+  return (
+    <tr className={highlight ? 'bg-yellow-300 font-bold' : 'border-b border-slate-100'}>
+      <td className="text-right pr-3 py-1.5 pl-4 text-slate-600 whitespace-nowrap w-1/2">{label}</td>
+      <td className="pl-3 py-1.5 pr-4 text-slate-900 font-medium">{value}</td>
+    </tr>
   )
 }

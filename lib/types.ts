@@ -42,6 +42,42 @@ export type Product = {
   suppliers?: Supplier | null
 }
 
+export type ImportMeta = {
+  source_file_name: string
+  source_file_type: 'pdf' | 'excel_or_csv'
+  client_details: string | null
+  container_no: string | null
+  total_weight_kgs: number | null
+  total_cbm: number | null
+  total_carton: number | null
+  total_cost_rmb: number | null
+  total_cost_usd: number | null
+  payment_date: string | null
+  payment_usd: number | null
+  goods_balance_usd: number | null
+  credit_support_usd: number | null
+  pivoc_usd: number | null
+  freight_usd: number | null
+  total_balance_usd: number | null
+  exchange_rate: number | null
+}
+
+export type ImportDocumentMeta = {
+  document_ref: string | null
+  client_details: string | null
+  container_no: string | null
+  total_weight_text: string | null
+  total_cbm_text: string | null
+  total_carton_text: string | null
+  total_cost_text: string | null
+  goods_balance_text: string | null
+  credit_support_text: string | null
+  pivoc_text: string | null
+  freight_text: string | null
+  total_balance_text: string | null
+  exchange_rate_text: string | null
+}
+
 export type MovementType = 'in' | 'out' | 'adjustment'
 
 export type StockMovement = {

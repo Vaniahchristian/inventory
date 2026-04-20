@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
+import type { ImportMeta } from '@/lib/types'
 
 /** Terminal logs when importing: dev server, or set DEBUG_PRODUCT_IMPORT=1 / NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT=1 */
 function importDebug(): boolean {
@@ -23,6 +24,20 @@ export async function getProducts() {
     .order('sku', { nullsFirst: false })
   if (error) throw new Error(error.message)
   return data
+}
+
+export async function getLatestImportMeta() {
+  const { data, error } = await supabase
+    .from('product_import_meta')
+    .select('*')
+    .eq('id', 1)
+    .maybeSingle()
+  if (error) {
+    // Metadata is optional; do not fail the products page on RLS/policy issues.
+    logImport('getLatestImportMeta skipped:', error.message)
+    return null
+  }
+  return data as ImportMeta | null
 }
 
 export async function createProduct(formData: FormData) {
@@ -125,6 +140,20 @@ export async function deleteAllProducts() {
   revalidatePath('/')
 }
 
+async function saveImportMeta(meta: ImportMeta | null | undefined) {
+  if (!meta) return
+  const payload = {
+    id: 1,
+    ...meta,
+    updated_at: new Date().toISOString(),
+  }
+  const { error } = await supabase.from('product_import_meta').upsert(payload, { onConflict: 'id' })
+  if (error) {
+    // Keep import resilient when product_import_meta is protected by RLS.
+    logImport('saveImportMeta skipped:', error.message)
+  }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function str(v: unknown): string {
@@ -179,7 +208,7 @@ function isValidMarks(raw: string): boolean {
 
 // ── import ────────────────────────────────────────────────────────────────────
 
-export async function importProducts(rows: Record<string, unknown>[]) {
+export async function importProducts(rows: Record<string, unknown>[], importMeta?: ImportMeta | null) {
   const allKeys = new Set(rows.flatMap(r => Object.keys(r)))
   const isPackingList =
     allKeys.has('MARKS') || allKeys.has('T.QTY') || allKeys.has('U.PRICE (RMB)')
@@ -398,6 +427,8 @@ export async function importProducts(rows: Record<string, unknown>[]) {
     const { error } = await supabase.from('products').insert(chunk)
     if (error) throw new Error(error.message)
   }
+
+  await saveImportMeta(importMeta)
 
   revalidatePath('/products')
   revalidatePath('/')

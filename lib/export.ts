@@ -2,6 +2,7 @@
 
 import * as XLSX from 'xlsx'
 import type { Product, StockMovement } from './types'
+import type { ImportMeta } from './types'
 import { parseCsvRows } from './csv-parse'
 import { formatDateTime } from './utils'
 
@@ -15,6 +16,73 @@ function importDebug(): boolean {
 
 function logImport(...args: unknown[]) {
   if (importDebug()) console.log('[product-import]', ...args)
+}
+
+function cleanNum(raw: string | undefined): number | null {
+  if (!raw) return null
+  const n = parseFloat(raw.replace(/,/g, '').replace(/[^\d.-]/g, ''))
+  return isNaN(n) ? null : n
+}
+
+function extractImportMetaFromText(text: string, fileName: string, sourceType: 'pdf' | 'excel_or_csv'): ImportMeta {
+  const normalized = text.replace(/\r/g, ' ').replace(/\s+/g, ' ').trim()
+
+  const clientMatch = normalized.match(/CLIENT DETAILS\s*:?\s*([^\n:]+?)\s+CONTAINER NO/i)
+  const containerMatch = normalized.match(/CONTAINER NO\s*:?\s*([A-Z0-9-]+)/i)
+
+  const totalWeightKgs = cleanNum(normalized.match(/TOTAL WEIGHT\s*([\d,]+(?:\.\d+)?)/i)?.[1])
+  const totalCbm = cleanNum(normalized.match(/TOTAL CBM\s*([\d,]+(?:\.\d+)?)/i)?.[1])
+  const totalCarton = cleanNum(normalized.match(/TOTAL CARTON\s*([\d,]+(?:\.\d+)?)/i)?.[1])
+
+  const totalCostRmb = cleanNum(
+    normalized.match(/TOTAL COST\s*[¥￥]?\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const totalCostUsd = cleanNum(
+    normalized.match(/TOTAL COST[\s\S]*?\$\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const paymentDateMatch = normalized.match(/(\d{2}\/\d{2}\/\d{4})\s+PAYMENT/i)
+  const paymentDate = paymentDateMatch?.[1] ?? null
+  const paymentUsd = cleanNum(
+    normalized.match(/\d{2}\/\d{2}\/\d{4}\s+PAYMENT\s*\$?\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const goodsBalanceUsd = cleanNum(
+    normalized.match(/GOODS BALANCE\s*\$?\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const creditSupportUsd = cleanNum(
+    normalized.match(/CREDIT SUPPORT TO MOMBASA\s*\$?\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const pivocUsd = cleanNum(
+    normalized.match(/PIVOC\s*\$?\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const freightUsd = cleanNum(
+    normalized.match(/YIWU[- ]MOMBASA FREIGHT\s*\$?\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const totalBalanceUsd = cleanNum(
+    normalized.match(/TOTAL BALANCE\s*\$?\s*([\d,]+(?:\.\d+)?)/i)?.[1]
+  )
+  const exchangeRate = cleanNum(
+    normalized.match(/EXCHANGE RATE\s*[:=]?\s*[¥]?\s*([\d.]+)\s*(?:RMB)?/i)?.[1]
+  )
+
+  return {
+    source_file_name: fileName,
+    source_file_type: sourceType,
+    client_details: clientMatch?.[1]?.trim() ?? null,
+    container_no: containerMatch?.[1]?.trim() ?? null,
+    total_weight_kgs: totalWeightKgs,
+    total_cbm: totalCbm,
+    total_carton: totalCarton,
+    total_cost_rmb: totalCostRmb,
+    total_cost_usd: totalCostUsd,
+    payment_date: paymentDate,
+    payment_usd: paymentUsd,
+    goods_balance_usd: goodsBalanceUsd,
+    credit_support_usd: creditSupportUsd,
+    pivoc_usd: pivocUsd,
+    freight_usd: freightUsd,
+    total_balance_usd: totalBalanceUsd,
+    exchange_rate: exchangeRate,
+  }
 }
 
 export function exportProductsToExcel(products: Product[]) {
@@ -800,11 +868,45 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
   return rows
 }
 
+async function parsePdfImportMeta(file: File): Promise<ImportMeta> {
+  const pdfjsLib = await import('pdfjs-dist')
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
+  const buffer = await file.arrayBuffer()
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise
+  const pages: string[] = []
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum)
+    const content = await page.getTextContent()
+    pages.push(content.items.map(item => ('str' in item ? String((item as { str?: string }).str ?? '') : '')).join('\n'))
+  }
+  return extractImportMetaFromText(pages.join('\n'), file.name, 'pdf')
+}
+
+async function parseExcelImportMeta(file: File): Promise<ImportMeta> {
+  let text = ''
+  if (isCsvFile(file)) {
+    text = await file.text()
+  } else {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const wb = XLSX.read(bytes, { type: 'array' })
+    const ws = wb.Sheets[wb.SheetNames[0]]
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as unknown[][]
+    text = rows.flat().map(v => String(v ?? '')).join('\n')
+  }
+  return extractImportMetaFromText(text, file.name, 'excel_or_csv')
+}
+
+export async function parseImportFileDetailed(file: File): Promise<{ rows: Record<string, unknown>[]; importMeta: ImportMeta }> {
+  const isPdf = isPdfFile(file)
+  const rows = isPdf ? await parsePdfFile(file) : await parseExcelFile(file)
+  const importMeta = isPdf ? await parsePdfImportMeta(file) : await parseExcelImportMeta(file)
+  logImport('parseImportFile done:', file.name, '→', rows.length, 'rows')
+  logImport('import meta:', importMeta)
+  return { rows, importMeta }
+}
+
 /** Accept .xlsx/.xls/.csv or .pdf; images are handled separately as product thumbnails */
 export async function parseImportFile(file: File): Promise<Record<string, unknown>[]> {
-  const rows = isPdfFile(file)
-    ? await parsePdfFile(file)
-    : await parseExcelFile(file)
-  logImport('parseImportFile done:', file.name, '→', rows.length, 'rows')
+  const { rows } = await parseImportFileDetailed(file)
   return rows
 }
