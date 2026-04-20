@@ -406,24 +406,11 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
 
   if (mapped.length === 0) throw new Error('No valid product rows found in file')
 
-  // Deduplicate by SKU — later rows in the file win (last-write-wins per batch)
-  const skuMap = new Map<string, MappedRow>()
-  const withoutSku: MappedRow[] = []
-  for (const row of mapped) {
-    if (row.sku) skuMap.set(row.sku, row)
-    else withoutSku.push(row)
-  }
-  const withSku = Array.from(skuMap.values())
-
-  // Batch upserts in chunks of 50 to stay within Supabase request limits
+  // Insert every row as-is — no deduplication. Duplicate SKUs/marks from the
+  // same PDF (e.g. same item in different containers or sizes) are all stored.
   const CHUNK = 50
-  for (let i = 0; i < withSku.length; i += CHUNK) {
-    const chunk = withSku.slice(i, i + CHUNK)
-    const { error } = await supabase.from('products').upsert(chunk, { onConflict: 'sku' })
-    if (error) throw new Error(error.message)
-  }
-  for (let i = 0; i < withoutSku.length; i += CHUNK) {
-    const chunk = withoutSku.slice(i, i + CHUNK)
+  for (let i = 0; i < mapped.length; i += CHUNK) {
+    const chunk = mapped.slice(i, i + CHUNK)
     const { error } = await supabase.from('products').insert(chunk)
     if (error) throw new Error(error.message)
   }
@@ -432,5 +419,5 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
 
   revalidatePath('/products')
   revalidatePath('/')
-  return skuMap.size + withoutSku.length
+  return mapped.length
 }
