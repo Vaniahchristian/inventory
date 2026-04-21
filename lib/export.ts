@@ -134,6 +134,10 @@ export function exportMovementsToExcel(movements: StockMovement[]) {
   XLSX.writeFile(wb, `stock_movements_${Date.now()}.xlsx`)
 }
 
+function cjkSafe(text: string): string {
+  return text.replace(/[\u2e80-\u2eff\u3000-\u9fff\uf900-\ufaff\ufe30-\ufe4f]/g, '').replace(/\s+/g, ' ').trim() || '-'
+}
+
 export function exportProductsToPdf(products: Product[]) {
   import('jspdf').then(async ({ default: jsPDF }) => {
     const { default: autoTable } = await import('jspdf-autotable')
@@ -158,9 +162,9 @@ export function exportProductsToPdf(products: Product[]) {
       body: [
         ...products.map(p => [
           p.sku ?? '-',
-          p.name ?? '-',
-          p.description ?? '-',
-          p.shop_name ?? p.suppliers?.name ?? '-',
+          cjkSafe(p.name ?? '-'),
+          cjkSafe(p.description ?? '-'),
+          cjkSafe(p.shop_name ?? p.suppliers?.name ?? '-'),
           p.packing ?? '-',
           p.cartons ?? '-',
           `${p.quantity} ${p.unit}`,
@@ -693,19 +697,7 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
   if (shopDescM) {
     shop = shopDescM[1].replace(/\s+/g, '').trim()
     const blob = shopDescM[2].trim()
-    const parts = blob.split(/\s+(?=[\u4e00-\u9fff])/)
-    if (parts.length >= 2) {
-      descMain = parts[0]
-      descDetail = parts.slice(1).join(' ')
-    } else {
-      const cut = blob.search(/[\u4e00-\u9fff]/)
-      if (cut > 0) {
-        descMain = blob.slice(0, cut).trim()
-        descDetail = blob.slice(cut).trim()
-      } else {
-        descMain = blob
-      }
-    }
+    splitDesc(blob)
   } else {
     // Fallback for rows with non-Chinese shop names
     const shopPack = line.match(/\bSANCARGO\s+(.+?)\s+(\d+\s*\w+\/ctn)/i)
@@ -715,18 +707,29 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
     const itemAndDesc = line.match(
       /\bSANCARGO\s+\S+\s+(\d+)\s+(.+?)\s+\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn/i
     )
-    if (itemAndDesc) {
-      const blob = itemAndDesc[2].trim()
-      const parts = blob.split(/\s+(?=[\u4e00-\u9fff])/)
-      if (parts.length >= 2) {
-        descMain = parts[0]
-        descDetail = parts.slice(1).join(' ')
+    if (itemAndDesc) splitDesc(itemAndDesc[2].trim())
+  }
+
+  function splitDesc(blob: string) {
+    // Split English description from Chinese detail at the first CJK character
+    const parts = blob.split(/\s+(?=[\u4e00-\u9fff])/)
+    if (parts.length >= 2) {
+      descMain = parts[0]
+      descDetail = parts.slice(1).join(' ')
+    } else {
+      const cut = blob.search(/[\u4e00-\u9fff]/)
+      if (cut > 0) {
+        // English first, Chinese suffix
+        descMain = blob.slice(0, cut).trim()
+        descDetail = blob.slice(cut).trim()
+      } else if (cut === 0) {
+        // All-Chinese blob: store as detail and try to pull out an English model number
+        descDetail = blob
+        const modelMatch = blob.match(/\b([A-Z][\w\-./]+(?:\s+[\w\-./]+)*)\s*$/)
+        descMain = modelMatch ? modelMatch[1].trim() : ''
       } else {
-        const cut = blob.search(/[\u4e00-\u9fff]/)
-        if (cut > 0) {
-          descMain = blob.slice(0, cut).trim()
-          descDetail = blob.slice(cut).trim()
-        } else descMain = blob
+        // Pure English/numbers — no Chinese at all
+        descMain = blob
       }
     }
   }

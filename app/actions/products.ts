@@ -158,6 +158,14 @@ async function saveImportMeta(meta: ImportMeta | null | undefined) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+function pickEnglishFirst(a: string, b: string): string | null {
+  const aLatin = /^[A-Za-z]/.test(a)
+  const bLatin = /^[A-Za-z]/.test(b)
+  if (aLatin) return a        // descGoods is English → use it
+  if (bLatin) return b        // col6val is English → use it
+  return a || b || null       // both Chinese or empty → take whatever exists
+}
+
 function str(v: unknown): string {
   return String(v ?? '').trim()
 }
@@ -272,7 +280,6 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       const sku = rawSku.split('\n')[0].trim() || null
 
       const descGoods = str(r['DESCRIPTION OF GOODS'] ?? '')
-      // Column __col6 (index 6) holds the specific product name in most rows.
       const col6val = str(r['__col6'] ?? '')
       const shop = str(r['SHOP#'] ?? '') || null
 
@@ -307,7 +314,9 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         cost_price = num(r['T.AMOUNT'])
         total_amount_rmb = numOrNull(r['__col15'] ?? r['__col14'] ?? '')
       } else {
-        name = col6val || descGoods || null
+        // Prefer whichever value starts with a Latin letter (English name over
+        // Chinese-only text). If both or neither are Latin, descGoods wins.
+        name = pickEnglishFirst(descGoods, col6val)
         packing = packingField || null
         cartons = intOrNull(r['T.CTN'])
         quantity = intOrNull(r['T.QTY']) ?? 0

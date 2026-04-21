@@ -13,7 +13,8 @@
       "mcp__supabase__execute_sql",
       "Bash(node *)",
       "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['version']\\)\")",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(npx shadcn@latest add checkbox --yes)"
     ]
   },
   "enableAllProjectMcpServers": true,
