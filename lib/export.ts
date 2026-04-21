@@ -811,7 +811,12 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
       if (joined) rawLines.push(joined)
     }
 
-    // Merge "MARKS-only" line with following "SANCARGO-only" baseline (two-line MARKS cell)
+    // Merge a MARKS-only line with the following line when that line starts with
+    // (or is exactly) "SANCARGO". pdfjs sometimes places the MARKS text at a
+    // slightly different Y than SANCARGO+data, splitting what should be one row
+    // into two separate Y-bucket lines.  We handle both:
+    //   • "SANCARGO" alone  (original case)
+    //   • "SANCARGO <shop> <desc> <packing> …"  (SANCARGO+data on same Y)
     const merged: string[] = []
     for (let i = 0; i < rawLines.length; i++) {
       const cur = rawLines[i]
@@ -819,7 +824,7 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
       if (
         isLikelyMarksCell(cur) &&
         next &&
-        /^\s*SANCARGO\s*$/i.test(next) &&
+        /^\s*SANCARGO\b/i.test(next) &&
         !/\bSANCARGO\b/i.test(cur)
       ) {
         merged.push(`${cur} ${next}`)

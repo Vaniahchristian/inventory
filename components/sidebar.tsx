@@ -11,6 +11,7 @@ import {
   Menu,
   X,
   Boxes,
+  FileSpreadsheet,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -23,6 +24,7 @@ const navItems = [
   { href: '/stock', label: 'Stock Movements', icon: ArrowLeftRight },
   { href: '/suppliers', label: 'Suppliers', icon: Truck },
   { href: '/categories', label: 'Categories', icon: Tag },
+  { href: '/compiled-products', label: 'Compiled Products', icon: FileSpreadsheet },
 ]
 
 function NavLink({ href, label, icon: Icon, onClick }: {
