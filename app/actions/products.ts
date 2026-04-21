@@ -136,7 +136,9 @@ export async function deleteProduct(id: string) {
 export async function deleteAllProducts() {
   const { error } = await supabase.from('products').delete().not('id', 'is', null)
   if (error) throw new Error(error.message)
+  await supabase.from('product_import_meta').delete().eq('id', 1)
   revalidatePath('/products')
+  revalidatePath('/compiled-products')
   revalidatePath('/')
 }
 
