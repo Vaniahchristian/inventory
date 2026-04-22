@@ -53,10 +53,10 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
   const [isPending, startTransition] = useTransition()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { query, setQuery, filtered } = useFilter(products, ['name', 'sku', 'shop_name', 'description'])
-  const [missingIds, setMissingIds] = useState<Set<string>>(new Set())
+  const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
 
-  function toggleMissing(id: string) {
-    setMissingIds(prev => {
+  function toggleOutOfStock(id: string) {
+    setOutOfStockIds(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
@@ -222,11 +222,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
             ) : (
               filtered.map(p => {
                 const status = stockStatus(p.quantity, p.reorder_level)
-                const isMissing = missingIds.has(p.id)
-                const isOutOfStock = !isMissing && ((p.cartons ?? 0) === 0 || p.quantity === 0)
-                const rowClass = isMissing
+                const isZeroStock = (p.cartons ?? 0) === 0 || p.quantity === 0
+                const isMarkedOutOfStock = !isZeroStock && outOfStockIds.has(p.id)
+                const rowClass = isZeroStock
                   ? 'bg-red-100 hover:bg-red-100'
-                  : isOutOfStock
+                  : isMarkedOutOfStock
                   ? 'bg-yellow-100 hover:bg-yellow-100'
                   : 'hover:bg-slate-50'
                 return (
@@ -277,11 +277,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                             <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
                           </DropdownMenuItem>
                           <DropdownMenuItem
-                            className={isMissing ? 'text-slate-600' : 'text-orange-600'}
-                            onClick={() => toggleMissing(p.id)}
+                            className={outOfStockIds.has(p.id) ? 'text-slate-600' : 'text-amber-600'}
+                            onClick={() => toggleOutOfStock(p.id)}
                           >
                             <AlertTriangle className="h-3.5 w-3.5 mr-2" />
-                            {isMissing ? 'Unmark Missing' : 'Mark Missing'}
+                            {outOfStockIds.has(p.id) ? 'Unmark Out of Stock' : 'Mark Out of Stock'}
                           </DropdownMenuItem>
                           <DropdownMenuItem className="text-red-600" onClick={() => handleDelete(p.id, p.name)}>
                             <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete

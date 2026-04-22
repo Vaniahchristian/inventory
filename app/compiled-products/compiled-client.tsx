@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState, useTransition } from 'react'
+import { toast } from 'sonner'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
@@ -8,19 +9,28 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
-import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal, AlertTriangle } from 'lucide-react'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
+import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal, AlertTriangle, Pencil, Trash2 } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import type { Product, ImportMeta } from '@/lib/types'
+import { updateProduct, deleteProduct } from '@/app/actions/products'
+import type { Product, ImportMeta, Category, Supplier } from '@/lib/types'
+
+const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
 
 type Props = {
   products: Product[]
   importMeta: ImportMeta | null
+  categories: Category[]
+  suppliers: Supplier[]
 }
 
 type CompiledRow = Product & { _variants: number; _rowNo: number }
@@ -137,9 +147,11 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-export function CompiledProductsClient({ products, importMeta }: Props) {
+export function CompiledProductsClient({ products, importMeta, categories, suppliers }: Props) {
   const [query, setQuery] = useState('')
-  const [missingIds, setMissingIds] = useState<Set<string>>(new Set())
+  const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
+  const [editing, setEditing] = useState<Product | null>(null)
+  const [isPending, startTransition] = useTransition()
   const [exportOpen, setExportOpen] = useState(false)
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf'>('excel')
   const [selectedFields, setSelectedFields] = useState<Set<FieldKey>>(
@@ -203,11 +215,23 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
     })
   }
 
-  function toggleMissing(id: string) {
-    setMissingIds(prev => {
+  function toggleOutOfStock(id: string) {
+    setOutOfStockIds(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
+    })
+  }
+
+  function handleDelete(id: string, name: string | null) {
+    if (!confirm(`Delete "${name ?? 'this product'}"? This cannot be undone.`)) return
+    startTransition(async () => {
+      try {
+        await deleteProduct(id)
+        toast.success('Product deleted')
+      } catch (e: any) {
+        toast.error(e.message)
+      }
     })
   }
 
@@ -306,11 +330,11 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
               </TableRow>
             ) : (
               filtered.map((p, i) => {
-                const isMissing = missingIds.has(p.id)
-                const isOutOfStock = !isMissing && ((p.cartons ?? 0) === 0 || p.quantity === 0)
-                const rowClass = isMissing
+                const isZeroStock = (p.cartons ?? 0) === 0 || p.quantity === 0
+                const isMarkedOutOfStock = !isZeroStock && outOfStockIds.has(p.id)
+                const rowClass = isZeroStock
                   ? 'bg-red-100 hover:bg-red-100'
-                  : isOutOfStock
+                  : isMarkedOutOfStock
                   ? 'bg-yellow-100 hover:bg-yellow-100'
                   : 'hover:bg-slate-50'
                 return (
@@ -356,12 +380,18 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
                           <MoreHorizontal className="h-3.5 w-3.5" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => setEditing(p)}>
+                            <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
+                          </DropdownMenuItem>
                           <DropdownMenuItem
-                            className={isMissing ? 'text-slate-600' : 'text-red-600'}
-                            onClick={() => toggleMissing(p.id)}
+                            className={outOfStockIds.has(p.id) ? 'text-slate-600' : 'text-amber-600'}
+                            onClick={() => toggleOutOfStock(p.id)}
                           >
                             <AlertTriangle className="h-3.5 w-3.5 mr-2" />
-                            {isMissing ? 'Unmark Missing' : 'Mark Missing'}
+                            {outOfStockIds.has(p.id) ? 'Unmark Out of Stock' : 'Mark Out of Stock'}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem className="text-red-600" onClick={() => handleDelete(p.id, p.name)}>
+                            <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -496,6 +526,129 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {/* Edit product dialog */}
+      <ProductDialog
+        open={!!editing}
+        product={editing}
+        categories={categories}
+        suppliers={suppliers}
+        onClose={() => setEditing(null)}
+        isPending={isPending}
+        onSubmit={(formData) => {
+          startTransition(async () => {
+            try {
+              await updateProduct(editing!.id, formData)
+              toast.success('Product updated')
+              setEditing(null)
+            } catch (e: any) {
+              toast.error(e.message)
+            }
+          })
+        }}
+      />
+    </div>
+  )
+}
+
+function ProductDialog({
+  open, product, categories, suppliers, onClose, onSubmit, isPending,
+}: {
+  open: boolean
+  product: Product | null
+  categories: Category[]
+  suppliers: Supplier[]
+  onClose: () => void
+  onSubmit: (formData: FormData) => void
+  isPending: boolean
+}) {
+  const [preview, setPreview] = useState<string | null>(product?.image_url ?? null)
+
+  return (
+    <Dialog open={open} onOpenChange={v => !v && onClose()}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Edit Product</DialogTitle>
+        </DialogHeader>
+        <form action={onSubmit} className="space-y-3" encType="multipart/form-data">
+          <div className="grid grid-cols-2 gap-3">
+            <CField label="Name" name="name" defaultValue={product?.name ?? ''} />
+            <CField label="SKU / MARKS" name="sku" defaultValue={product?.sku ?? ''} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <CSelectField label="Category" name="category_id" defaultValue={product?.category_id ?? ''}
+              options={categories.map(c => ({ value: c.id, label: c.name }))} placeholder="None" />
+            <CSelectField label="Supplier" name="supplier_id" defaultValue={product?.supplier_id ?? ''}
+              options={suppliers.map(s => ({ value: s.id, label: s.name ?? '' }))} placeholder="None" />
+          </div>
+          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide pt-1">Packing List Data</p>
+          <div className="grid grid-cols-3 gap-3">
+            <CField label="Shop / SHOP#" name="shop_name" defaultValue={product?.shop_name ?? ''} />
+            <CField label="Packing" name="packing" defaultValue={product?.packing ?? ''} placeholder="e.g. 15pcs/ctn" />
+            <CField label="Cartons (T.CTN)" name="cartons" type="number" defaultValue={String(product?.cartons ?? '')} />
+          </div>
+          <div className="grid grid-cols-5 gap-3">
+            <CSelectField label="Unit" name="unit" defaultValue={product?.unit ?? 'pcs'}
+              options={UNITS.map(u => ({ value: u, label: u }))} placeholder="pcs" />
+            <CField label="Qty (T.QTY)" name="quantity" type="number" defaultValue={String(product?.quantity ?? 0)} />
+            <CField label="U.CBM" name="unit_cbm" type="number" step="0.0001" defaultValue={String(product?.unit_cbm ?? '')} />
+            <CField label="T.CBM" name="cbm" type="number" step="0.0001" defaultValue={String(product?.cbm ?? '')} />
+            <CField label="Reorder Level" name="reorder_level" type="number" defaultValue={String(product?.reorder_level ?? 0)} />
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <CField label="Unit Weight" name="unit_weight" defaultValue={product?.unit_weight ?? ''} placeholder="e.g. 15.8KGS" />
+            <CField label="Total Weight (T.WEIGHT)" name="total_weight" defaultValue={product?.total_weight ?? ''} placeholder="e.g. 142.2KGS" />
+            <CField label="Unit Price ¥ (RMB)" name="cost_price" type="number" step="0.01" defaultValue={String(product?.cost_price ?? '')} />
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <CField label="Total Amount ¥ (T.AMOUNT)" name="total_amount_rmb" type="number" step="0.01" defaultValue={String(product?.total_amount_rmb ?? '')} />
+            <CField label="Selling Price" name="selling_price" type="number" step="0.01" defaultValue={String(product?.selling_price ?? '')} />
+          </div>
+          <div>
+            <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
+            <Textarea name="description" defaultValue={product?.description ?? ''} rows={2} className="text-sm resize-none" />
+          </div>
+          <div>
+            <Label className="text-xs text-slate-600 mb-1 block">Product Image (optional)</Label>
+            {preview && <img src={preview} alt="preview" className="h-20 w-20 object-cover rounded border border-slate-200 mb-2" />}
+            <Input name="image" type="file" accept="image/*" className="h-8 text-sm"
+              onChange={e => { const f = e.target.files?.[0]; if (f) setPreview(URL.createObjectURL(f)) }} />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button type="submit" size="sm" disabled={isPending} className="bg-slate-900 hover:bg-slate-700">
+              {isPending ? 'Saving…' : 'Save Changes'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function CField({ label, name, type = 'text', defaultValue, step, placeholder }: {
+  label: string; name: string; type?: string; defaultValue?: string; step?: string; placeholder?: string
+}) {
+  return (
+    <div>
+      <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
+      <Input name={name} type={type} defaultValue={defaultValue} step={step} placeholder={placeholder} className="h-8 text-sm" />
+    </div>
+  )
+}
+
+function CSelectField({ label, name, defaultValue, options, placeholder }: {
+  label: string; name: string; defaultValue: string; options: { value: string; label: string }[]; placeholder: string
+}) {
+  return (
+    <div>
+      <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
+      <Select name={name} defaultValue={defaultValue}>
+        <SelectTrigger className="h-8 text-sm"><SelectValue placeholder={placeholder} /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="">{placeholder}</SelectItem>
+          {options.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </div>
   )
 }
