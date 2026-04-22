@@ -647,29 +647,29 @@ function parsePdfTableLine(joined: string): Record<string, unknown> | null {
   return r.ok ? r.row : null
 }
 
-function parsePdfTableLineResult(joined: string): PdfLineResult {
+function parsePdfTableLineResult(joined: string, skipKeywordCheck = false): PdfLineResult {
   const line = joined.replace(/\s+/g, ' ').trim()
   if (!line) return { ok: false, skip: 'empty line' }
-  if (shouldSkipPdfLine(line)) return { ok: false, skip: 'skipped (header/footer keyword)' }
+  if (!skipKeywordCheck && shouldSkipPdfLine(line)) return { ok: false, skip: 'skipped (header/footer keyword)' }
   if (!/\bSANCARGO\b/i.test(line)) return { ok: false, skip: 'no SANCARGO anchor' }
 
   const marks = extractMarksFromPdfLine(line)
   if (!marks) return { ok: false, skip: 'no MARKS token' }
   const marksDisplay = /\bSANCARGO\b/i.test(line) ? `${marks}\nSANCARGO` : marks
 
-  const packingM = line.match(/(\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn)/i)
+  const packingM = line.match(/(\d+\s*[A-Za-z]+\s*\/\s*ctn)/i)
   if (!packingM)
     return { ok: false, skip: 'no PACKING token (need e.g. 15pcs/ctn)', preview: line.slice(0, 120) }
 
   const packing = packingM[1].replace(/\s+/g, '')
 
-  const tCtnM = line.match(/(\d+)\s*CTNS/i)
+  const tCtnM = line.match(/(\d+)\s*CTNS?/i)
   const cartonsStr = tCtnM ? `${tCtnM[1]}CTNS` : ''
 
-  const afterCtn = line.match(/\d+\s*CTNS\s+(\d+)\s*pcs/i)
+  const afterCtn = line.match(/(\d+)\s*CTNS?\s+(\d+)\s*([A-Za-z]+)/i)
   const qtyStr = afterCtn
-    ? `${afterCtn[1]}pcs`
-    : (line.match(/(\d+)\s*pcs(?!\/)/i)?.[1] ?? '')
+    ? `${afterCtn[2]}${afterCtn[3]}`
+    : (line.match(/(\d+)\s*(?:pcs?|sets?|prs?|nos?)(?!\/)/i)?.[1] ?? '')
 
   const cbmMatches = [...line.matchAll(/([\d.]+)\s*CBM/gi)]
   const unitCbmStr = cbmMatches[0] ? `${cbmMatches[0][1]}CBM` : ''
@@ -692,7 +692,7 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
   let descDetail = ''
 
   const shopDescM = line.match(
-    /\bSANCARGO\s+((?:[\u4e00-\u9fff]\s*)+)\s*(?:\d+\s+)?(.+?)\s+\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn/i
+    /\bSANCARGO\s+((?:[\u4e00-\u9fff]\s*)+)\s*(?:\d+\s+)?(.+?)\s+\d+\s*[A-Za-z]+\s*\/\s*ctn/i
   )
   if (shopDescM) {
     shop = shopDescM[1].replace(/\s+/g, '').trim()
@@ -700,12 +700,12 @@ function parsePdfTableLineResult(joined: string): PdfLineResult {
     splitDesc(blob)
   } else {
     // Fallback for rows with non-Chinese shop names
-    const shopPack = line.match(/\bSANCARGO\s+(.+?)\s+(\d+\s*\w+\/ctn)/i)
+    const shopPack = line.match(/\bSANCARGO\s+(.+?)\s+(\d+\s*[A-Za-z]+\s*\/\s*ctn)/i)
     if (shopPack) {
       shop = shopPack[1].replace(/\s+\d+\s*$/, '').trim()
     }
     const itemAndDesc = line.match(
-      /\bSANCARGO\s+\S+\s+(\d+)\s+(.+?)\s+\d+\s*(?:pcs|PCS|sets?|SETs?)\/ctn/i
+      /\bSANCARGO\s+\S+\s+(\d+)\s+(.+?)\s+\d+\s*[A-Za-z]+\s*\/\s*ctn/i
     )
     if (itemAndDesc) splitDesc(itemAndDesc[2].trim())
   }
@@ -763,7 +763,7 @@ function parsePackingRowsFromTextBlob(text: string): Record<string, unknown>[] {
   const chunks = extractPackingTextBlocks(text)
   const rows: Record<string, unknown>[] = []
   for (const chunk of chunks) {
-    const result = parsePdfTableLineResult(chunk)
+    const result = parsePdfTableLineResult(chunk, true)
     if (result.ok) rows.push(result.row)
   }
   return rows
@@ -781,6 +781,7 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
   let skipSamples = 0
   const MAX_SKIP_LOG = 25
   let pastSancargo = false
+  let carryMarkLine: string | null = null
 
   const Y_BUCKET = 4
 
@@ -821,10 +822,16 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
     // into two separate Y-bucket lines.  We handle both:
     //   • "SANCARGO" alone  (original case)
     //   • "SANCARGO <shop> <desc> <packing> …"  (SANCARGO+data on same Y)
+    //
+    // Cross-page carry: if the previous page ended with an orphaned MARKS line
+    // (no SANCARGO because the row was split across the page break), prepend it
+    // so it can merge with this page's first SANCARGO line.
+    const effectiveLines = carryMarkLine ? [carryMarkLine, ...rawLines] : rawLines
+    carryMarkLine = null
     const merged: string[] = []
-    for (let i = 0; i < rawLines.length; i++) {
-      const cur = rawLines[i]
-      const next = rawLines[i + 1]
+    for (let i = 0; i < effectiveLines.length; i++) {
+      const cur = effectiveLines[i]
+      const next = effectiveLines[i + 1]
       if (
         isLikelyMarksCell(cur) &&
         next &&
@@ -836,10 +843,49 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
       } else merged.push(cur)
     }
 
+    // If the last merged line is an isolated MARKS with no SANCARGO it is likely
+    // at a page boundary — save it so the next page can complete the merge.
+    if (!pastSancargo && merged.length > 0) {
+      const last = merged[merged.length - 1]
+      if (isLikelyMarksCell(last) && !/\bSANCARGO\b/i.test(last)) {
+        carryMarkLine = last
+        merged.pop()
+      }
+    }
+
+    // Second pass: if a SANCARGO line lacks a packing token, its numeric data
+    // (packing, qty, CBM, price) may sit on a slightly different Y-bucket.
+    // Extend such lines with the immediately following non-product line.
+    const packingDetect = /\d+\s*[A-Za-z]+\s*\/\s*ctn/i
+    const extended: string[] = []
+    for (let i = 0; i < merged.length; i++) {
+      const cur = merged[i]
+      if (
+        /\bSANCARGO\b/i.test(cur) &&
+        !packingDetect.test(cur) &&
+        i + 1 < merged.length
+      ) {
+        const nxt = merged[i + 1]
+        const nxtFirst = nxt.split(/[\n\s]/)[0].trim()
+        if (!isLikelyMarksCell(nxtFirst) && !/\bSANCARGO\b/i.test(nxt)) {
+          extended.push(`${cur} ${nxt}`)
+          i++
+          continue
+        }
+      }
+      extended.push(cur)
+    }
+
     let pageParsed = 0
     let pageSkipped = 0
-    for (const line of merged) {
-      if (/GOODS\s+LEFT\s+IN\s+SANCARGO/i.test(line)) {
+    for (let li = 0; li < extended.length; li++) {
+      const line = extended[li]
+      // Check both this line and the join of this+next for cases where the
+      // "GOODS LEFT IN SANCARGO" header is split across two Y-bucket lines.
+      const twoLine = li + 1 < extended.length
+        ? (line + ' ' + extended[li + 1]).replace(/\s+/g, ' ')
+        : line
+      if (/GOODS\s+LEFT\s+IN\s+SANCARGO/i.test(line) || /GOODS\s+LEFT\s+IN\s+SANCARGO/i.test(twoLine)) {
         pastSancargo = true
         logImport(`PDF p${pageNum}: hit GOODS LEFT IN SANCARGO — skipping all subsequent rows`)
         pageSkipped++
@@ -869,7 +915,7 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
         }
       }
     }
-    logImport(`PDF page ${pageNum}/${pdf.numPages}: merged lines=${merged.length}, parsed=${pageParsed}, skipped=${pageSkipped}`)
+    logImport(`PDF page ${pageNum}/${pdf.numPages}: merged=${merged.length}, extended=${extended.length}, parsed=${pageParsed}, skipped=${pageSkipped}`)
   }
 
   logImport(
@@ -891,10 +937,17 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
     const rawText = pageTextBlobs.join('\n')
     const sancargoCutIdx = rawText.search(/GOODS\s+LEFT\s+IN\s+SANCARGO/i)
     const text = sancargoCutIdx !== -1 ? rawText.slice(0, sancargoCutIdx) : rawText
-    const chunks = extractPackingTextBlocks(text)
+    // Strip page-footer lines that contaminate end-of-page product chunks and
+    // cause shouldSkipPdfLine to reject them ("CUSTOMER CARE", "COMPLAINTS LINE", "PAGE:")
+    const cleanText = text
+      .replace(/Customer\s+care\s+line:[^\n]*/gi, '')
+      .replace(/Complaints?\s+Line:[^\n]*/gi, '')
+      .replace(/Page:\s*\d+\/\d+/gi, '')
+    const chunks = extractPackingTextBlocks(cleanText)
     const fallbackRows: Record<string, unknown>[] = []
     for (const chunk of chunks) {
-      const result = parsePdfTableLineResult(chunk)
+      // skipKeywordCheck=true: MARKS validated by isLikelyMarksCell, GOODS LEFT already cut
+      const result = parsePdfTableLineResult(chunk, true)
       if (result.ok) fallbackRows.push(result.row)
     }
     if (fallbackRows.length) {
