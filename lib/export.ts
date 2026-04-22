@@ -780,6 +780,7 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
   const rows: Record<string, unknown>[] = []
   let skipSamples = 0
   const MAX_SKIP_LOG = 25
+  let pastSancargo = false
 
   const Y_BUCKET = 4
 
@@ -838,6 +839,16 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
     let pageParsed = 0
     let pageSkipped = 0
     for (const line of merged) {
+      if (/GOODS\s+LEFT\s+IN\s+SANCARGO/i.test(line)) {
+        pastSancargo = true
+        logImport(`PDF p${pageNum}: hit GOODS LEFT IN SANCARGO — skipping all subsequent rows`)
+        pageSkipped++
+        continue
+      }
+      if (pastSancargo) {
+        pageSkipped++
+        continue
+      }
       const result = parsePdfTableLineResult(line)
       if (result.ok) {
         rows.push(result.row)
@@ -877,7 +888,9 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
 
   if (rows.length === 0) {
     // Fallback parser for PDFs whose glyph coordinates are too fragmented for Y-bucketing.
-    const text = pageTextBlobs.join('\n')
+    const rawText = pageTextBlobs.join('\n')
+    const sancargoCutIdx = rawText.search(/GOODS\s+LEFT\s+IN\s+SANCARGO/i)
+    const text = sancargoCutIdx !== -1 ? rawText.slice(0, sancargoCutIdx) : rawText
     const chunks = extractPackingTextBlocks(text)
     const fallbackRows: Record<string, unknown>[] = []
     for (const chunk of chunks) {
