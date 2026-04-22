@@ -265,7 +265,6 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
             <TableRow className="bg-slate-50">
               <TableHead className="w-10 text-center">#</TableHead>
               <TableHead className="w-10 px-2" />
-              <TableHead className="w-28">SKU / MARKS</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Description</TableHead>
               <TableHead>Shop</TableHead>
@@ -284,7 +283,7 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={16} className="text-center text-slate-400 py-10">
+                <TableCell colSpan={15} className="text-center text-slate-400 py-10">
                   No products found.
                 </TableCell>
               </TableRow>
@@ -301,7 +300,6 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
                       </div>
                     )}
                   </TableCell>
-                  <TableCell className="font-mono whitespace-nowrap">{p.sku ?? '-'}</TableCell>
                   <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
                   <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
                   <TableCell className="max-w-[100px] truncate">{p.shop_name ?? '-'}</TableCell>
