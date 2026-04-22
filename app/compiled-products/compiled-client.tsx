@@ -187,6 +187,13 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
     )
   }, [compiled, query])
 
+  const totals = useMemo(() => ({
+    cartons: filtered.reduce((s, p) => s + (p.cartons ?? 0), 0),
+    cbm: filtered.reduce((s, p) => s + (p.cbm ?? 0), 0),
+    weight: filtered.reduce((s, p) => s + parseWeight(p.total_weight), 0),
+    amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+  }), [filtered])
+
   function toggleField(key: FieldKey) {
     setSelectedFields(prev => {
       const next = new Set(prev)
@@ -329,24 +336,24 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
               ))
             )}
 
-            {importMeta && (
+            {filtered.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
                 <TableCell /><TableCell /><TableCell /><TableCell /><TableCell /><TableCell /><TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_carton != null ? `${fmt(importMeta.total_carton, 0)} CTNS` : ''}
+                  {`${fmt(totals.cartons, 0)} CTNS`}
                 </TableCell>
                 <TableCell />
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_cbm != null ? `${fmt(importMeta.total_cbm, 4)} CBM` : ''}
+                  {`${fmt(totals.cbm, 4)} CBM`}
                 </TableCell>
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_weight_kgs != null ? `${fmt(importMeta.total_weight_kgs, 1)} KGS` : ''}
+                  {`${fmt(totals.weight, 1)} KGS`}
                 </TableCell>
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_cost_rmb != null ? `¥${fmt(importMeta.total_cost_rmb, 2)}` : ''}
+                  {`¥${fmt(totals.amount, 0)}`}
                 </TableCell>
                 <TableCell />
               </TableRow>

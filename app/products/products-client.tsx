@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useTransition, useRef } from 'react'
+import React, { useState, useTransition, useRef, useMemo } from 'react'
 import { toast } from 'sonner'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -43,12 +43,23 @@ function fmt(n: number | null | undefined, decimals = 2) {
   return n.toLocaleString('en-UG', { minimumFractionDigits: 0, maximumFractionDigits: decimals })
 }
 
+function parseWeight(w: string | null | undefined): number {
+  return parseFloat((w ?? '0').replace(/[^\d.]/g, '')) || 0
+}
+
 export function ProductsClient({ products, categories, suppliers, importMeta }: Props) {
   const [editing, setEditing] = useState<Product | null>(null)
   const [adding, setAdding] = useState(false)
   const [isPending, startTransition] = useTransition()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { query, setQuery, filtered } = useFilter(products, ['name', 'sku', 'shop_name', 'description'])
+
+  const totals = useMemo(() => ({
+    cartons: filtered.reduce((s, p) => s + (p.cartons ?? 0), 0),
+    cbm: filtered.reduce((s, p) => s + (p.cbm ?? 0), 0),
+    weight: filtered.reduce((s, p) => s + parseWeight(p.total_weight), 0),
+    amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+  }), [filtered])
 
   function handleDelete(id: string, name: string | null) {
     if (!confirm(`Delete "${name ?? 'this product'}"? This cannot be undone.`)) return
@@ -259,8 +270,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                 )
               })
             )}
-            {/* Yellow totals row — values from PDF (importMeta), not computed */}
-            {importMeta && (
+            {filtered.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
                 <TableCell />
                 <TableCell />
@@ -269,20 +279,20 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                 <TableCell />
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_carton != null ? `${fmt(importMeta.total_carton, 0)} CTNS` : ''}
+                  {`${fmt(totals.cartons, 0)} CTNS`}
                 </TableCell>
                 <TableCell />
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_cbm != null ? `${fmt(importMeta.total_cbm, 4)} CBM` : ''}
+                  {`${fmt(totals.cbm, 4)} CBM`}
                 </TableCell>
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_weight_kgs != null ? `${fmt(importMeta.total_weight_kgs, 1)} KGS` : ''}
+                  {`${fmt(totals.weight, 1)} KGS`}
                 </TableCell>
                 <TableCell />
                 <TableCell className="text-right text-slate-900">
-                  {importMeta.total_cost_rmb != null ? `¥${fmt(importMeta.total_cost_rmb, 2)}` : ''}
+                  {`¥${fmt(totals.amount, 0)}`}
                 </TableCell>
                 <TableCell />
                 <TableCell />
