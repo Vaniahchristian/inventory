@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/select'
 import {
   Plus, Search, MoreHorizontal, Pencil, Trash2,
-  Download, Upload, FileSpreadsheet, FileText, ImageIcon,
+  Download, Upload, FileSpreadsheet, FileText, ImageIcon, AlertTriangle,
 } from 'lucide-react'
 import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts } from '@/app/actions/products'
 import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
@@ -53,6 +53,15 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
   const [isPending, startTransition] = useTransition()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { query, setQuery, filtered } = useFilter(products, ['name', 'sku', 'shop_name', 'description'])
+  const [missingIds, setMissingIds] = useState<Set<string>>(new Set())
+
+  function toggleMissing(id: string) {
+    setMissingIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
 
   const totals = useMemo(() => ({
     cartons: filtered.reduce((s, p) => s + (p.cartons ?? 0), 0),
@@ -213,8 +222,15 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
             ) : (
               filtered.map(p => {
                 const status = stockStatus(p.quantity, p.reorder_level)
+                const isMissing = missingIds.has(p.id)
+                const isOutOfStock = !isMissing && ((p.cartons ?? 0) === 0 || p.quantity === 0)
+                const rowClass = isMissing
+                  ? 'bg-red-100 hover:bg-red-100'
+                  : isOutOfStock
+                  ? 'bg-yellow-100 hover:bg-yellow-100'
+                  : 'hover:bg-slate-50'
                 return (
-                  <TableRow key={p.id} className="hover:bg-slate-50">
+                  <TableRow key={p.id} className={rowClass}>
                     <TableCell className="p-1">
                       {p.image_url ? (
                         <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
@@ -259,6 +275,13 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => setEditing(p)}>
                             <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            className={isMissing ? 'text-slate-600' : 'text-orange-600'}
+                            onClick={() => toggleMissing(p.id)}
+                          >
+                            <AlertTriangle className="h-3.5 w-3.5 mr-2" />
+                            {isMissing ? 'Unmark Missing' : 'Mark Missing'}
                           </DropdownMenuItem>
                           <DropdownMenuItem className="text-red-600" onClick={() => handleDelete(p.id, p.name)}>
                             <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete

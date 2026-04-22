@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
-import { Search, ImageIcon, Download, FileSpreadsheet, FileText } from 'lucide-react'
+import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal, AlertTriangle } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -139,6 +139,7 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
 
 export function CompiledProductsClient({ products, importMeta }: Props) {
   const [query, setQuery] = useState('')
+  const [missingIds, setMissingIds] = useState<Set<string>>(new Set())
   const [exportOpen, setExportOpen] = useState(false)
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf'>('excel')
   const [selectedFields, setSelectedFields] = useState<Set<FieldKey>>(
@@ -198,6 +199,14 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
     setSelectedFields(prev => {
       const next = new Set(prev)
       next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+  }
+
+  function toggleMissing(id: string) {
+    setMissingIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
       return next
     })
   }
@@ -285,55 +294,81 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
               <TableHead className="text-right">Unit Price</TableHead>
               <TableHead className="text-right">T.Amount</TableHead>
               <TableHead className="text-center">Variants</TableHead>
+              <TableHead className="w-10" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={15} className="text-center text-slate-400 py-10">
+                <TableCell colSpan={16} className="text-center text-slate-400 py-10">
                   No products found.
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((p, i) => (
-                <TableRow key={`${p.id}-${i}`} className="hover:bg-slate-50">
-                  <TableCell className="text-center text-slate-400 font-mono text-[10px]">{i + 1}</TableCell>
-                  <TableCell className="p-1">
-                    {p.image_url ? (
-                      <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
-                    ) : (
-                      <div className="h-8 w-8 rounded bg-slate-100 flex items-center justify-center">
-                        <ImageIcon className="h-3.5 w-3.5 text-slate-300" />
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
-                  <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
-                  <TableCell className="max-w-[100px] truncate">{p.shop_name ?? '-'}</TableCell>
-                  <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
-                  <TableCell className="text-right">{p.cartons ?? '-'}</TableCell>
-                  <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
-                  <TableCell className="text-right">{p.unit_cbm != null ? Number(p.unit_cbm).toFixed(3) : '-'}</TableCell>
-                  <TableCell className="text-right">{p.cbm != null ? Number(p.cbm).toFixed(4) : '-'}</TableCell>
-                  <TableCell className="text-right whitespace-nowrap">{p.unit_weight ?? '-'}</TableCell>
-                  <TableCell className="text-right whitespace-nowrap">{p.total_weight ?? '-'}</TableCell>
-                  <TableCell className="text-right whitespace-nowrap">
-                    {p.cost_price > 0 ? `¥${fmt(p.cost_price)}` : '-'}
-                  </TableCell>
-                  <TableCell className="text-right whitespace-nowrap">
-                    {p.total_amount_rmb != null ? `¥${fmt(p.total_amount_rmb)}` : '-'}
-                  </TableCell>
-                  <TableCell className="text-center">
-                    {p._variants > 1 ? (
-                      <Badge className="bg-blue-100 text-blue-700 border-blue-200 text-[10px] font-semibold">
-                        ×{p._variants}
-                      </Badge>
-                    ) : (
-                      <span className="text-slate-300">—</span>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))
+              filtered.map((p, i) => {
+                const isMissing = missingIds.has(p.id)
+                const isOutOfStock = !isMissing && ((p.cartons ?? 0) === 0 || p.quantity === 0)
+                const rowClass = isMissing
+                  ? 'bg-red-100 hover:bg-red-100'
+                  : isOutOfStock
+                  ? 'bg-yellow-100 hover:bg-yellow-100'
+                  : 'hover:bg-slate-50'
+                return (
+                  <TableRow key={`${p.id}-${i}`} className={rowClass}>
+                    <TableCell className="text-center text-slate-400 font-mono text-[10px]">{i + 1}</TableCell>
+                    <TableCell className="p-1">
+                      {p.image_url ? (
+                        <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
+                      ) : (
+                        <div className="h-8 w-8 rounded bg-slate-100 flex items-center justify-center">
+                          <ImageIcon className="h-3.5 w-3.5 text-slate-300" />
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
+                    <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
+                    <TableCell className="max-w-[100px] truncate">{p.shop_name ?? '-'}</TableCell>
+                    <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
+                    <TableCell className="text-right">{p.cartons ?? '-'}</TableCell>
+                    <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
+                    <TableCell className="text-right">{p.unit_cbm != null ? Number(p.unit_cbm).toFixed(3) : '-'}</TableCell>
+                    <TableCell className="text-right">{p.cbm != null ? Number(p.cbm).toFixed(4) : '-'}</TableCell>
+                    <TableCell className="text-right whitespace-nowrap">{p.unit_weight ?? '-'}</TableCell>
+                    <TableCell className="text-right whitespace-nowrap">{p.total_weight ?? '-'}</TableCell>
+                    <TableCell className="text-right whitespace-nowrap">
+                      {p.cost_price > 0 ? `¥${fmt(p.cost_price)}` : '-'}
+                    </TableCell>
+                    <TableCell className="text-right whitespace-nowrap">
+                      {p.total_amount_rmb != null ? `¥${fmt(p.total_amount_rmb)}` : '-'}
+                    </TableCell>
+                    <TableCell className="text-center">
+                      {p._variants > 1 ? (
+                        <Badge className="bg-blue-100 text-blue-700 border-blue-200 text-[10px] font-semibold">
+                          ×{p._variants}
+                        </Badge>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7" />}>
+                          <MoreHorizontal className="h-3.5 w-3.5" />
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem
+                            className={isMissing ? 'text-slate-600' : 'text-red-600'}
+                            onClick={() => toggleMissing(p.id)}
+                          >
+                            <AlertTriangle className="h-3.5 w-3.5 mr-2" />
+                            {isMissing ? 'Unmark Missing' : 'Mark Missing'}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </TableCell>
+                  </TableRow>
+                )
+              })
             )}
 
             {filtered.length > 0 && (
@@ -355,7 +390,7 @@ export function CompiledProductsClient({ products, importMeta }: Props) {
                 <TableCell className="text-right text-slate-900">
                   {`¥${fmt(totals.amount, 0)}`}
                 </TableCell>
-                <TableCell />
+                <TableCell /><TableCell />
               </TableRow>
             )}
           </TableBody>
