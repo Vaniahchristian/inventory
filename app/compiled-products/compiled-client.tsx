@@ -210,7 +210,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
 
     const numbered = [...map.values()]
     singles.forEach(s => { s._rowNo = rowNo++ })
-    return [...numbered, ...singles]
+    return [...numbered, ...singles].filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
   }, [products])
 
   const filtered = useMemo(() => {
