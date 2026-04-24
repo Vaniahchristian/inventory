@@ -603,8 +603,12 @@ function extractPackingTextBlocks(text: string): string[] {
   const re = /([^\s\n]{3,})\s*SANCARGO([\s\S]*?)(?=(?:[^\s\n]{3,}\s*SANCARGO)|$)/gi
   for (const m of compact.matchAll(re)) {
     const marks = (m[1] ?? '').trim()
-    const body = (m[2] ?? '').trim()
+    let body = (m[2] ?? '').trim()
     if (!isLikelyMarksCell(marks)) continue
+    // Trim body at the first document-summary keyword so the grand-total values
+    // (e.g. "70.125CBM" for the whole document) can't leak into the last product chunk.
+    const summaryIdx = body.search(/\bTOTAL\s+(?:WEIGHT|CBM|CARTON|COST)\b/i)
+    if (summaryIdx !== -1) body = body.slice(0, summaryIdx).trim()
     const joined = `${marks} SANCARGO ${body}`.replace(/\s+/g, ' ').trim()
     if (joined) blocks.push(joined)
   }
@@ -665,15 +669,27 @@ function parsePdfTableLineResult(joined: string, skipKeywordCheck = false): PdfL
 
   const tCtnM = line.match(/(\d+)\s*CTNS?/i)
   const cartonsStr = tCtnM ? `${tCtnM[1]}CTNS` : ''
+  const cartonsNum = parseInt(tCtnM?.[1] ?? '0') || 0
 
   const afterCtn = line.match(/(\d+)\s*CTNS?\s+(\d+)\s*([A-Za-z]+)/i)
   const qtyStr = afterCtn
     ? `${afterCtn[2]}${afterCtn[3]}`
     : (line.match(/(\d+)\s*(?:pcs?|sets?|prs?|nos?)(?!\/)/i)?.[1] ?? '')
 
-  const cbmMatches = [...line.matchAll(/([\d.]+)\s*CBM/gi)]
-  const unitCbmStr = cbmMatches[0] ? `${cbmMatches[0][1]}CBM` : ''
-  const cbmStr = cbmMatches[1] ? `${cbmMatches[1][1]}CBM` : unitCbmStr
+  // Require at least one digit before the decimal so "T.CBM" header text never matches.
+  // Filter against carton count: a single product's T.CBM can't exceed cartons × 10 CBM
+  // (very generous — catches the document-total value that leaks into the last product chunk,
+  // e.g. 70.125 CBM for a whole container attributed to a 3-carton product).
+  const cbmMatches = [...line.matchAll(/(\d+\.?\d*)\s*CBM/gi)]
+  const maxCbmForProduct = cartonsNum > 0 ? cartonsNum * 10 : Infinity
+  const validCbmMatches = cbmMatches.filter(m => {
+    const v = parseFloat(m[1])
+    return !isNaN(v) && v <= maxCbmForProduct
+  })
+  // 2 valid matches → first = UNIT CBM, second = T.CBM (PDFs with both columns).
+  // 1 valid match  → it's T.CBM; leave unit CBM empty (PDF has only T.CBM column).
+  const unitCbmStr = validCbmMatches.length >= 2 ? `${validCbmMatches[0][1]}CBM` : ''
+  const cbmStr = validCbmMatches.length >= 2 ? `${validCbmMatches[1][1]}CBM` : validCbmMatches[0] ? `${validCbmMatches[0][1]}CBM` : ''
 
   const kgsMatches = [...line.matchAll(/([\d.]+)\s*KGS/gi)]
   const unitWt = kgsMatches[0] ? `${kgsMatches[0][1]}KGS` : ''
@@ -937,9 +953,14 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
     const rawText = pageTextBlobs.join('\n')
     const sancargoCutIdx = rawText.search(/GOODS\s+LEFT\s+IN\s+SANCARGO/i)
     const text = sancargoCutIdx !== -1 ? rawText.slice(0, sancargoCutIdx) : rawText
-    // Strip page-footer lines that contaminate end-of-page product chunks and
-    // cause shouldSkipPdfLine to reject them ("CUSTOMER CARE", "COMPLAINTS LINE", "PAGE:")
-    const cleanText = text
+    // Cut at the document summary section so TOTAL CBM / TOTAL WEIGHT / etc.
+    // values don't end up in the last product's chunk body.
+    // The label ("TOTAL CBM") and its value ("70.125CBM") can appear on separate
+    // lines in column-by-column PDFs, so stripping just the label line is not
+    // enough — we must cut the entire summary block away before chunking.
+    const summaryCutIdx = text.search(/\bTOTAL\s+(?:WEIGHT|CBM|CARTON|COST)\b/i)
+    const textForChunking = summaryCutIdx !== -1 ? text.slice(0, summaryCutIdx) : text
+    const cleanText = textForChunking
       .replace(/Customer\s+care\s+line:[^\n]*/gi, '')
       .replace(/Complaints?\s+Line:[^\n]*/gi, '')
       .replace(/Page:\s*\d+\/\d+/gi, '')

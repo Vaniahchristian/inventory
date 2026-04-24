@@ -20,10 +20,10 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import {
-  Plus, Search, MoreHorizontal, Pencil, Trash2,
+  Plus, Minus, Search, MoreHorizontal, Pencil, Trash2,
   Download, Upload, FileSpreadsheet, FileText, ImageIcon, AlertTriangle,
 } from 'lucide-react'
-import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts } from '@/app/actions/products'
+import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons } from '@/app/actions/products'
 import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
 import { formatCurrency, stockStatus } from '@/lib/utils'
 import { useFilter } from '@/hooks/use-inventory'
@@ -53,14 +53,30 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
   const [isPending, startTransition] = useTransition()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { query, setQuery, filtered } = useFilter(products, ['name', 'sku', 'shop_name', 'description'])
-  const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
+  const [adjustingId, setAdjustingId] = useState<string | null>(null)
 
-  function toggleOutOfStock(id: string) {
-    setOutOfStockIds(prev => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
+  async function handleMarkOutOfStock(id: string, name: string | null) {
+    if (!confirm(`Mark "${name ?? 'this product'}" as out of stock? Cartons and quantity will be set to 0.`)) return
+    startTransition(async () => {
+      try {
+        await markOutOfStock(id)
+        toast.success('Marked as out of stock')
+      } catch (e: any) {
+        toast.error(e.message)
+      }
     })
+  }
+
+  async function handleAdjustCartons(id: string, delta: number) {
+    if (adjustingId) return
+    setAdjustingId(id)
+    try {
+      await adjustProductCartons(id, delta)
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setAdjustingId(null)
+    }
   }
 
   const totals = useMemo(() => ({
@@ -223,11 +239,8 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
               filtered.map(p => {
                 const status = stockStatus(p.quantity, p.reorder_level)
                 const isZeroStock = (p.cartons ?? 0) === 0 || p.quantity === 0
-                const isMarkedOutOfStock = !isZeroStock && outOfStockIds.has(p.id)
                 const rowClass = isZeroStock
                   ? 'bg-red-100 hover:bg-red-100'
-                  : isMarkedOutOfStock
-                  ? 'bg-yellow-100 hover:bg-yellow-100'
                   : 'hover:bg-slate-50'
                 return (
                   <TableRow key={p.id} className={rowClass}>
@@ -245,7 +258,27 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                     <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
                     <TableCell className="max-w-[120px] truncate">{p.shop_name ?? p.suppliers?.name ?? '-'}</TableCell>
                     <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
-                    <TableCell className="text-right">{p.cartons ?? '-'}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-0.5">
+                        <Button
+                          variant="ghost" size="icon"
+                          className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
+                          disabled={adjustingId === p.id}
+                          onClick={() => handleAdjustCartons(p.id, -1)}
+                        >
+                          <Minus className="h-2.5 w-2.5" />
+                        </Button>
+                        <span className="w-7 text-center tabular-nums">{p.cartons ?? '-'}</span>
+                        <Button
+                          variant="ghost" size="icon"
+                          className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
+                          disabled={adjustingId === p.id}
+                          onClick={() => handleAdjustCartons(p.id, +1)}
+                        >
+                          <Plus className="h-2.5 w-2.5" />
+                        </Button>
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
                     <TableCell className="text-right">{p.unit_cbm != null ? p.unit_cbm.toFixed(3) : '-'}</TableCell>
                     <TableCell className="text-right">{p.cbm != null ? p.cbm.toFixed(3) : '-'}</TableCell>
@@ -277,11 +310,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                             <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
                           </DropdownMenuItem>
                           <DropdownMenuItem
-                            className={outOfStockIds.has(p.id) ? 'text-slate-600' : 'text-amber-600'}
-                            onClick={() => toggleOutOfStock(p.id)}
+                            className="text-amber-600"
+                            onClick={() => handleMarkOutOfStock(p.id, p.name)}
                           >
                             <AlertTriangle className="h-3.5 w-3.5 mr-2" />
-                            {outOfStockIds.has(p.id) ? 'Unmark Out of Stock' : 'Mark Out of Stock'}
+                            Mark Out of Stock
                           </DropdownMenuItem>
                           <DropdownMenuItem className="text-red-600" onClick={() => handleDelete(p.id, p.name)}>
                             <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete

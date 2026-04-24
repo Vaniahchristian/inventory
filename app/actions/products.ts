@@ -126,6 +126,23 @@ export async function updateProduct(id: string, formData: FormData) {
   revalidatePath('/')
 }
 
+export async function markOutOfStock(id: string) {
+  const { error } = await supabase.from('products').update({ cartons: 0, quantity: 0 }).eq('id', id)
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+  revalidatePath('/')
+}
+
+export async function adjustProductCartons(id: string, delta: number) {
+  const { data } = await supabase.from('products').select('cartons').eq('id', id).single()
+  const current = data?.cartons ?? 0
+  const next = Math.max(0, current + delta)
+  const { error } = await supabase.from('products').update({ cartons: next }).eq('id', id)
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+  revalidatePath('/')
+}
+
 export async function deleteProduct(id: string) {
   const { error } = await supabase.from('products').delete().eq('id', id)
   if (error) throw new Error(error.message)
