@@ -189,11 +189,11 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
         singles.push({ ...p, _variants: 1, _rowNo: 0 })
         continue
       }
-      // Group by: base name (model codes stripped) + packing + per-product quantity.
-      // This merges e.g. "Vacuum Flask TE-R100FG-1" and "Vacuum Flask QAA-200G-1"
-      // when they share the same packing and same quantity per line.
+      // Group by: base name (model codes stripped) + packing.
+      // This merges variants with the same item name and packing even when
+      // their original per-row quantities differ.
       const baseName = extractBaseName(p.name)
-      const key = `${baseName.toLowerCase()}||${p.packing.trim().toLowerCase()}||${p.quantity}`
+      const key = `${baseName.toLowerCase()}||${p.packing.trim().toLowerCase()}`
       const existing = map.get(key)
       if (!existing) {
         map.set(key, { ...p, name: baseName, _variants: 1, _rowNo: rowNo++ })
