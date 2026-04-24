@@ -35,6 +35,27 @@ type Props = {
 
 type CompiledRow = Product & { _variants: number; _rowNo: number }
 
+/**
+ * Strip trailing model-number codes from a product name to get the base name.
+ * A word is treated as a model code (and stops the base) if it:
+ *   - contains any digit (e.g. "KD63-218A", "TE-R100FG-1", "SCT-150")
+ *   - is all-uppercase / pure code with no lowercase (e.g. "SCT", "KD")
+ * Examples:
+ *   "Vacuum Flask TE-R100FG-1"  → "Vacuum Flask"
+ *   "Cup Stand KD63-218A"       → "Cup Stand"
+ *   "Ceramic Canister Set SCT-" → "Ceramic Canister Set"
+ */
+function extractBaseName(name: string): string {
+  const words = name.trim().split(/\s+/)
+  const base: string[] = []
+  for (const w of words) {
+    if (/\d/.test(w)) break                          // word contains a digit → model code
+    if (/^[A-Z]{2,}/.test(w) && !/^[A-Z][a-z]/.test(w)) break  // all-caps code (e.g. "SCT")
+    base.push(w)
+  }
+  return base.length > 0 ? base.join(' ') : words[0] ?? name
+}
+
 function fmt(n: number | null | undefined, decimals = 2) {
   if (n == null) return '-'
   return n.toLocaleString('en-UG', { minimumFractionDigits: 0, maximumFractionDigits: decimals })
@@ -168,10 +189,14 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
         singles.push({ ...p, _variants: 1, _rowNo: 0 })
         continue
       }
-      const key = `${p.name.trim().toLowerCase()}||${p.packing.trim().toLowerCase()}`
+      // Group by: base name (model codes stripped) + packing + per-product quantity.
+      // This merges e.g. "Vacuum Flask TE-R100FG-1" and "Vacuum Flask QAA-200G-1"
+      // when they share the same packing and same quantity per line.
+      const baseName = extractBaseName(p.name)
+      const key = `${baseName.toLowerCase()}||${p.packing.trim().toLowerCase()}||${p.quantity}`
       const existing = map.get(key)
       if (!existing) {
-        map.set(key, { ...p, _variants: 1, _rowNo: rowNo++ })
+        map.set(key, { ...p, name: baseName, _variants: 1, _rowNo: rowNo++ })
       } else {
         existing._variants++
         existing.cartons = (existing.cartons ?? 0) + (p.cartons ?? 0)
