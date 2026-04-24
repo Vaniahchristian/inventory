@@ -17,11 +17,11 @@ import { Label } from '@/components/ui/label'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
-import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal, AlertTriangle, Pencil, Trash2 } from 'lucide-react'
+import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal, AlertTriangle, Pencil, Trash2, Plus, Minus } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { updateProduct, deleteProduct } from '@/app/actions/products'
+import { updateProduct, deleteProduct, adjustProductCartons } from '@/app/actions/products'
 import type { Product, ImportMeta, Category, Supplier } from '@/lib/types'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
@@ -172,6 +172,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
   const [query, setQuery] = useState('')
   const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
   const [editing, setEditing] = useState<Product | null>(null)
+  const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
   const [exportOpen, setExportOpen] = useState(false)
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf'>('excel')
@@ -258,6 +259,18 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
         toast.error(e.message)
       }
     })
+  }
+
+  async function handleAdjustCartons(id: string, delta: number) {
+    if (adjustingId) return
+    setAdjustingId(id)
+    try {
+      await adjustProductCartons(id, delta)
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setAdjustingId(null)
+    }
   }
 
   function openExport(format: 'excel' | 'pdf') {
@@ -378,7 +391,27 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
                     <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
                     <TableCell className="max-w-[100px] truncate">{p.shop_name ?? '-'}</TableCell>
                     <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
-                    <TableCell className="text-right">{p.cartons ?? '-'}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-0.5">
+                        <Button
+                          variant="ghost" size="icon"
+                          className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
+                          disabled={adjustingId === p.id}
+                          onClick={() => handleAdjustCartons(p.id, -1)}
+                        >
+                          <Minus className="h-2.5 w-2.5" />
+                        </Button>
+                        <span className="w-7 text-center tabular-nums">{p.cartons ?? '-'}</span>
+                        <Button
+                          variant="ghost" size="icon"
+                          className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
+                          disabled={adjustingId === p.id}
+                          onClick={() => handleAdjustCartons(p.id, +1)}
+                        >
+                          <Plus className="h-2.5 w-2.5" />
+                        </Button>
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
                     <TableCell className="text-right">{p.unit_cbm != null ? Number(p.unit_cbm).toFixed(3) : '-'}</TableCell>
                     <TableCell className="text-right">{p.cbm != null ? Number(p.cbm).toFixed(4) : '-'}</TableCell>
@@ -667,10 +700,9 @@ function CSelectField({ label, name, defaultValue, options, placeholder }: {
   return (
     <div>
       <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
-      <Select name={name} defaultValue={defaultValue}>
+      <Select name={name} defaultValue={defaultValue || undefined}>
         <SelectTrigger className="h-8 text-sm"><SelectValue placeholder={placeholder} /></SelectTrigger>
         <SelectContent>
-          <SelectItem value="">{placeholder}</SelectItem>
           {options.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
         </SelectContent>
       </Select>
