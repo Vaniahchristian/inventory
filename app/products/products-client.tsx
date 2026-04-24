@@ -25,8 +25,8 @@ import {
 } from 'lucide-react'
 import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons } from '@/app/actions/products'
 import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
-import { formatCurrency, stockStatus } from '@/lib/utils'
-import { useFilter } from '@/hooks/use-inventory'
+import { stockStatus } from '@/lib/utils'
+import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
 import type { Product, Category, Supplier, ImportMeta } from '@/lib/types'
 
 type Props = {
@@ -52,8 +52,21 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
   const [adding, setAdding] = useState(false)
   const [isPending, startTransition] = useTransition()
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const { query, setQuery, filtered } = useFilter(products, ['name', 'sku', 'shop_name', 'description'])
+  const [query, setQuery] = useState('')
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
+  const realProducts = useMemo(() => products.filter(p => !isSectionDividerProduct(p)), [products])
+  const filtered = useMemo(() => {
+    if (!query.trim()) return products
+    const q = query.toLowerCase()
+    return products.filter(p =>
+      isSectionDividerProduct(p) ||
+      p.name?.toLowerCase().includes(q) ||
+      p.sku?.toLowerCase().includes(q) ||
+      p.shop_name?.toLowerCase().includes(q) ||
+      p.description?.toLowerCase().includes(q),
+    )
+  }, [products, query])
+  const filteredDataRows = useMemo(() => filtered.filter(p => !isSectionDividerProduct(p)), [filtered])
 
   async function handleMarkOutOfStock(id: string, name: string | null) {
     if (!confirm(`Mark "${name ?? 'this product'}" as out of stock? Cartons and quantity will be set to 0.`)) return
@@ -80,11 +93,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
   }
 
   const totals = useMemo(() => ({
-    cartons: filtered.reduce((s, p) => s + (p.cartons ?? 0), 0),
-    cbm: filtered.reduce((s, p) => s + (p.cbm ?? 0), 0),
-    weight: filtered.reduce((s, p) => s + parseWeight(p.total_weight), 0),
-    amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
-  }), [filtered])
+    cartons: filteredDataRows.reduce((s, p) => s + (p.cartons ?? 0), 0),
+    cbm: filteredDataRows.reduce((s, p) => s + (p.cbm ?? 0), 0),
+    weight: filteredDataRows.reduce((s, p) => s + parseWeight(p.total_weight), 0),
+    amount: filteredDataRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+  }), [filteredDataRows])
 
   function handleDelete(id: string, name: string | null) {
     if (!confirm(`Delete "${name ?? 'this product'}"? This cannot be undone.`)) return
@@ -147,7 +160,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Products</h1>
-          <p className="text-sm text-slate-500 mt-0.5">{products.length} items total</p>
+          <p className="text-sm text-slate-500 mt-0.5">{realProducts.length} items total</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
@@ -237,6 +250,15 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
               </TableRow>
             ) : (
               filtered.map(p => {
+                if (isSectionDividerProduct(p)) {
+                  return (
+                    <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
+                      <TableCell colSpan={16} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
+                        {REPACKAGED_SECTION_TITLE}
+                      </TableCell>
+                    </TableRow>
+                  )
+                }
                 const status = stockStatus(p.quantity, p.reorder_level)
                 const isZeroStock = (p.cartons ?? 0) === 0 || p.quantity === 0
                 const rowClass = isZeroStock
@@ -326,7 +348,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                 )
               })
             )}
-            {filtered.length > 0 && (
+            {filteredDataRows.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
                 <TableCell />
                 <TableCell />

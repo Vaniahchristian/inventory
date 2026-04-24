@@ -22,6 +22,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { updateProduct, deleteProduct, adjustProductCartons } from '@/app/actions/products'
+import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
 import type { Product, ImportMeta, Category, Supplier } from '@/lib/types'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
@@ -34,6 +35,8 @@ type Props = {
 }
 
 type CompiledRow = Product & { _variants: number; _rowNo: number }
+type DividerRow = { _isDivider: true; id: string; title: string }
+type CompiledDisplayRow = CompiledRow | DividerRow
 
 /**
  * Strip trailing model-number codes from a product name to get the base name.
@@ -180,58 +183,90 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
     () => new Set(EXPORT_FIELDS.filter(f => f.defaultOn).map(f => f.key))
   )
 
-  const compiled = useMemo<CompiledRow[]>(() => {
-    const map = new Map<string, CompiledRow>()
-    const singles: CompiledRow[] = []
-    let rowNo = 1
+  const compiledRows = useMemo<CompiledRow[]>(() => {
+    const compileSection = (rows: Product[], rowNoStart: number) => {
+      const map = new Map<string, CompiledRow>()
+      const singles: CompiledRow[] = []
+      let rowNo = rowNoStart
 
-    for (const p of products) {
-      if (!p.name || !p.packing) {
-        singles.push({ ...p, _variants: 1, _rowNo: 0 })
-        continue
+      for (const p of rows) {
+        if (!p.name || !p.packing) {
+          singles.push({ ...p, _variants: 1, _rowNo: 0 })
+          continue
+        }
+        const baseName = extractBaseName(p.name)
+        const key = `${baseName.toLowerCase()}||${p.packing.trim().toLowerCase()}`
+        const existing = map.get(key)
+        if (!existing) {
+          map.set(key, { ...p, name: baseName, _variants: 1, _rowNo: rowNo++ })
+        } else {
+          existing._variants++
+          existing.cartons = (existing.cartons ?? 0) + (p.cartons ?? 0)
+          existing.quantity += p.quantity
+          existing.cbm = +((existing.cbm ?? 0) + (p.cbm ?? 0)).toFixed(4)
+          const sumW = parseWeight(existing.total_weight) + parseWeight(p.total_weight)
+          existing.total_weight = sumW > 0 ? `${sumW.toFixed(1)}KGS` : existing.total_weight
+          existing.total_amount_rmb = (existing.total_amount_rmb ?? 0) + (p.total_amount_rmb ?? 0)
+        }
       }
-      // Group by: base name (model codes stripped) + packing.
-      // This merges variants with the same item name and packing even when
-      // their original per-row quantities differ.
-      const baseName = extractBaseName(p.name)
-      const key = `${baseName.toLowerCase()}||${p.packing.trim().toLowerCase()}`
-      const existing = map.get(key)
-      if (!existing) {
-        map.set(key, { ...p, name: baseName, _variants: 1, _rowNo: rowNo++ })
-      } else {
-        existing._variants++
-        existing.cartons = (existing.cartons ?? 0) + (p.cartons ?? 0)
-        existing.quantity += p.quantity
-        existing.cbm = +((existing.cbm ?? 0) + (p.cbm ?? 0)).toFixed(4)
-        const sumW = parseWeight(existing.total_weight) + parseWeight(p.total_weight)
-        existing.total_weight = sumW > 0 ? `${sumW.toFixed(1)}KGS` : existing.total_weight
-        existing.total_amount_rmb = (existing.total_amount_rmb ?? 0) + (p.total_amount_rmb ?? 0)
-      }
+
+      const numbered = [...map.values()]
+      singles.forEach(s => { s._rowNo = rowNo++ })
+      const data = [...numbered, ...singles].filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
+      return { data, nextRowNo: rowNo }
     }
 
-    const numbered = [...map.values()]
-    singles.forEach(s => { s._rowNo = rowNo++ })
-    return [...numbered, ...singles].filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
+    const dividerIdx = products.findIndex(p => isSectionDividerProduct(p))
+    const normalSource = (dividerIdx >= 0 ? products.slice(0, dividerIdx) : products).filter(p => !isSectionDividerProduct(p))
+    const repackedSource = dividerIdx >= 0 ? products.slice(dividerIdx + 1).filter(p => !isSectionDividerProduct(p)) : []
+
+    const normal = compileSection(normalSource, 1)
+    const repacked = compileSection(repackedSource, normal.nextRowNo)
+    return [...normal.data, ...repacked.data]
   }, [products])
+
+  const compiled = useMemo<CompiledDisplayRow[]>(() => {
+    const dividerIdx = products.findIndex(p => isSectionDividerProduct(p))
+    if (dividerIdx < 0) return compiledRows
+
+    const normalSourceCount = products.slice(0, dividerIdx).filter(p => !isSectionDividerProduct(p)).length
+    const normalCount = Math.min(normalSourceCount, compiledRows.length)
+    const normal = compiledRows.slice(0, normalCount)
+    const repacked = compiledRows.slice(normalCount)
+    if (normal.length === 0 || repacked.length === 0) return compiledRows
+
+    return [
+      ...normal,
+      { _isDivider: true, id: 'compiled-repackaged-divider', title: REPACKAGED_SECTION_TITLE },
+      ...repacked,
+    ]
+  }, [compiledRows, products])
 
   const filtered = useMemo(() => {
     if (!query.trim()) return compiled
     const q = query.toLowerCase()
     return compiled.filter(
       p =>
-        p.name?.toLowerCase().includes(q) ||
-        p.sku?.toLowerCase().includes(q) ||
-        p.shop_name?.toLowerCase().includes(q) ||
-        p.description?.toLowerCase().includes(q),
+        !('_isDivider' in p) && (
+          p.name?.toLowerCase().includes(q) ||
+          p.sku?.toLowerCase().includes(q) ||
+          p.shop_name?.toLowerCase().includes(q) ||
+          p.description?.toLowerCase().includes(q)
+        ),
     )
   }, [compiled, query])
 
+  const filteredDataRows = useMemo(
+    () => filtered.filter((p): p is CompiledRow => !('_isDivider' in p)),
+    [filtered]
+  )
+
   const totals = useMemo(() => ({
-    cartons: filtered.reduce((s, p) => s + (p.cartons ?? 0), 0),
-    cbm: filtered.reduce((s, p) => s + (p.cbm ?? 0), 0),
-    weight: filtered.reduce((s, p) => s + parseWeight(p.total_weight), 0),
-    amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
-  }), [filtered])
+    cartons: filteredDataRows.reduce((s, p) => s + (p.cartons ?? 0), 0),
+    cbm: filteredDataRows.reduce((s, p) => s + (p.cbm ?? 0), 0),
+    weight: filteredDataRows.reduce((s, p) => s + parseWeight(p.total_weight), 0),
+    amount: filteredDataRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+  }), [filteredDataRows])
 
   function toggleField(key: FieldKey) {
     setSelectedFields(prev => {
@@ -281,7 +316,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
   function runExport() {
     const fields = EXPORT_FIELDS.map(f => f.key).filter(k => selectedFields.has(k))
     if (fields.length === 0) return
-    const rows = filtered.length < compiled.length ? filtered : compiled
+    const rows = filteredDataRows.length < compiledRows.length ? filteredDataRows : compiledRows
     if (exportFormat === 'excel') exportToExcel(rows, fields, importMeta)
     else exportToPdf(rows, fields, importMeta)
     setExportOpen(false)
@@ -294,7 +329,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Compiled Products</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            {compiled.length} unique items (from {products.length} total)
+            {compiledRows.length} unique items (from {products.filter(p => !isSectionDividerProduct(p)).length} total)
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -368,6 +403,15 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
               </TableRow>
             ) : (
               filtered.map((p, i) => {
+                if ('_isDivider' in p) {
+                  return (
+                    <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
+                      <TableCell colSpan={16} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
+                        {p.title}
+                      </TableCell>
+                    </TableRow>
+                  )
+                }
                 const isZeroStock = (p.cartons ?? 0) === 0 || p.quantity === 0
                 const isMarkedOutOfStock = !isZeroStock && outOfStockIds.has(p.id)
                 const rowClass = isZeroStock
@@ -459,7 +503,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
               })
             )}
 
-            {filtered.length > 0 && (
+            {filteredDataRows.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
                 <TableCell /><TableCell /><TableCell /><TableCell /><TableCell /><TableCell /><TableCell />
                 <TableCell className="text-right text-slate-900">

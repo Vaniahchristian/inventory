@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 import type { ImportMeta } from '@/lib/types'
+import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, isRepackagedSectionHeader } from '@/lib/sections'
 
 /** Terminal logs when importing: dev server, or set DEBUG_PRODUCT_IMPORT=1 / NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT=1 */
 function importDebug(): boolean {
@@ -21,7 +22,7 @@ export async function getProducts() {
   const { data, error } = await supabase
     .from('products')
     .select('*, categories(id,name), suppliers(id,name)')
-    .order('sku', { nullsFirst: false })
+    .order('created_at', { ascending: true })
   if (error) throw new Error(error.message)
   return data
 }
@@ -285,6 +286,29 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
   for (const r of rows) {
     if (isPackingList) {
       const rawSku = str(r['MARKS'] ?? '')
+
+      // Preserve section headers from packing list so UI can render dividers.
+      if (isRepackagedSectionHeader(rawSku)) {
+        mapped.push({
+          sku: REPACKAGED_SECTION_MARKER_SKU,
+          name: REPACKAGED_SECTION_TITLE,
+          description: null,
+          shop_name: null,
+          unit: 'pcs',
+          packing: null,
+          cartons: 0,
+          quantity: 0,
+          unit_cbm: null,
+          cbm: null,
+          unit_weight: null,
+          total_weight: null,
+          cost_price: 0,
+          total_amount_rmb: null,
+          selling_price: 0,
+          reorder_level: 0,
+        })
+        continue
+      }
 
       // Skip non-product rows: totals, payment lines, page headers, blank rows
       if (!isValidMarks(rawSku)) {
