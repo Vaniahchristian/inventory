@@ -1,36 +1,68 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Inventory Import System
 
-## Getting Started
+Next.js inventory app with PDF/CSV import, Supabase persistence, review queue, and optional OCR fallback.
 
-First, run the development server:
+## Run the app
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App URL: [http://localhost:3000](http://localhost:3000)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## OCR backend (PaddleOCR + Python)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The app can optionally call a dedicated OCR backend when text parsing fails.
 
-## Learn More
+### Option A: Docker (recommended)
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+docker compose -f docker-compose.ocr.yml up --build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+OCR service URL: `http://localhost:8001`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Option B: Local Python
 
-## Deploy on Vercel
+```bash
+cd ocr_backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8001
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Environment variables
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Add these to your `.env`:
+
+```bash
+NEXT_PUBLIC_OCR_PIPELINE_ENABLED=1
+OCR_PIPELINE_ENABLED=1
+OCR_BASE_URL=http://localhost:8001
+OCR_API_KEY=
+OCR_TIMEOUT_MS=120000
+# OCR backend language model ("ch" recommended for mixed docs)
+OCR_LANG=ch
+```
+
+## OCR integration flow
+
+1. User imports PDF in `Products`.
+2. `lib/export.ts` runs native PDF parser first.
+3. If parser returns zero rows and OCR is enabled, frontend calls `/api/ocr-extract`.
+4. `/api/ocr-extract` proxies to OCR backend `/extract`.
+5. OCR backend returns normalized row objects compatible with import mapping.
+
+## Current document pipeline
+
+- `container_manifest` and `sales_order` type inference
+- normalized storage in `documents`, `document_items`, `document_totals`, `document_payments`
+- extraction observability in `extraction_runs`
+- review queue UI at `/review-queue`
+
+## Notes
+
+- PaddleOCR CPU setup is heavier than Node-only runtime; use Docker for stable setup.
+- OCR should be treated as fallback when native parser confidence is low or output is empty.

@@ -45,6 +45,7 @@ export type Product = {
 export type ImportMeta = {
   source_file_name: string
   source_file_type: 'pdf' | 'excel_or_csv'
+  document_type?: 'sales_order' | 'container_manifest'
   client_details: string | null
   container_no: string | null
   total_weight_kgs: number | null

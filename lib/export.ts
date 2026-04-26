@@ -5,6 +5,7 @@ import type { Product, StockMovement } from './types'
 import type { ImportMeta } from './types'
 import { parseCsvRows } from './csv-parse'
 import { formatDateTime } from './utils'
+import { extractStageSectionHeader, isGoodsLeftHeader, makeStageSectionSku, makeStageTotalSku, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX } from './sections'
 
 /** Browser console + optional prod: set NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT=1 */
 function importDebug(): boolean {
@@ -67,6 +68,7 @@ function extractImportMetaFromText(text: string, fileName: string, sourceType: '
   return {
     source_file_name: fileName,
     source_file_type: sourceType,
+    document_type: inferDocumentType(fileName, normalized),
     client_details: clientMatch?.[1]?.trim() ?? null,
     container_no: containerMatch?.[1]?.trim() ?? null,
     total_weight_kgs: totalWeightKgs,
@@ -83,6 +85,30 @@ function extractImportMetaFromText(text: string, fileName: string, sourceType: '
     total_balance_usd: totalBalanceUsd,
     exchange_rate: exchangeRate,
   }
+}
+
+function inferDocumentType(fileName: string, normalizedText: string): 'sales_order' | 'container_manifest' {
+  const name = fileName.toLowerCase()
+  const text = normalizedText.toLowerCase()
+  if (
+    name.includes('销售单') ||
+    text.includes('销售单') ||
+    text.includes('warehouse') ||
+    text.includes('仓位') ||
+    text.includes('box.no')
+  ) {
+    return 'sales_order'
+  }
+  return 'container_manifest'
+}
+
+function isSalesOrderText(text: string): boolean {
+  const t = text.toLowerCase()
+  return (
+    t.includes('销售单') ||
+    (t.includes('no.') && t.includes('u/p') && t.includes('amount') && t.includes('t.qty')) ||
+    (t.includes('序号') && t.includes('总箱数') && t.includes('单价'))
+  )
 }
 
 export function exportProductsToExcel(products: Product[]) {
@@ -662,12 +688,14 @@ function parsePdfTableLineResult(joined: string, skipKeywordCheck = false): PdfL
   const marksDisplay = /\bSANCARGO\b/i.test(line) ? `${marks}\nSANCARGO` : marks
 
   const packingM = line.match(/(\d+\s*[A-Za-z]+\s*\/\s*ctn)/i)
-  if (!packingM)
-    return { ok: false, skip: 'no PACKING token (need e.g. 15pcs/ctn)', preview: line.slice(0, 120) }
-
-  const packing = packingM[1].replace(/\s+/g, '')
-
   const tCtnM = line.match(/(\d+)\s*CTNS?/i)
+  // Rows in this PDF often omit packing when it repeats from a prior row.
+  // Accept rows that have explicit carton count + a ¥ price; LLM alignment fills packing.
+  if (!packingM && !(tCtnM && /[¥￥]/.test(line))) {
+    return { ok: false, skip: 'no PACKING and insufficient row data', preview: line.slice(0, 120) }
+  }
+
+  const packing = packingM ? packingM[1].replace(/\s+/g, '') : ''
   const cartonsStr = tCtnM ? `${tCtnM[1]}CTNS` : ''
   const cartonsNum = parseInt(tCtnM?.[1] ?? '0') || 0
 
@@ -707,8 +735,10 @@ function parsePdfTableLineResult(joined: string, skipKeywordCheck = false): PdfL
   let descMain = ''
   let descDetail = ''
 
+  // Allow an optional leading numeric shop code before the CJK shop name
+  // e.g. "SANCARGO 49371 \u5929\u4e3d 4 Sleepwear \u51ac\u5b63\u5e26\u5e3d\u7761\u8863" where 49371 is a shop code
   const shopDescM = line.match(
-    /\bSANCARGO\s+((?:[\u4e00-\u9fff]\s*)+)\s*(?:\d+\s+)?(.+?)\s+\d+\s*[A-Za-z]+\s*\/\s*ctn/i
+    /\bSANCARGO\s+(?:\d+\s+)?((?:[\u4e00-\u9fff]\s*)+)\s*(?:\d+\s+)?(.+?)\s+\d+\s*[A-Za-z]+\s*\/\s*ctn/i
   )
   if (shopDescM) {
     shop = shopDescM[1].replace(/\s+/g, '').trim()
@@ -783,6 +813,92 @@ function parsePackingRowsFromTextBlob(text: string): Record<string, unknown>[] {
     if (result.ok) rows.push(result.row)
   }
   return rows
+}
+
+function parseSalesOrderRowsFromTextBlob(text: string): Record<string, unknown>[] {
+  const lines = text
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+    .filter(l => !/^--\s*\d+\s+of\s+\d+\s*--$/i.test(l))
+
+  const rowStartIndexes: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\d+\s+\d{4}-\d{2}-\d{2}$/.test(lines[i])) rowStartIndexes.push(i)
+  }
+  if (!rowStartIndexes.length) return []
+
+  const rows: Record<string, unknown>[] = []
+  for (let i = 0; i < rowStartIndexes.length; i++) {
+    const start = rowStartIndexes[i]
+    const end = i + 1 < rowStartIndexes.length ? rowStartIndexes[i + 1] : lines.length
+    const chunk = lines.slice(start, end)
+    const joined = chunk.join(' ').replace(/\s+/g, ' ').trim()
+    if (!joined) continue
+
+    const metrics = joined.match(
+      /(\d+)\s+(\d+)\s+(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+([A-Za-z0-9]{8,})\s+(\S+)$/i
+    )
+    if (!metrics) continue
+
+    const [
+      metricsBlock,
+      ctn,
+      qtyPerCtn,
+      totalQty,
+      unitPrice,
+      amount,
+      l,
+      w,
+      h,
+      unitCbm,
+      unitGw,
+      totalCbm,
+      totalKgs,
+      barcode,
+      warehouse,
+    ] = metrics
+
+    const prefix = joined.slice(0, joined.length - metricsBlock.length).trim()
+    const orderNo = prefix.match(/C\d{2,}-\d+/i)?.[0] ?? ''
+    const codeMatches = prefix.match(/\b[A-Za-z][A-Za-z0-9]*(?:[-/][A-Za-z0-9]+)+\b/g) ?? []
+    const itemCode = codeMatches.find(code => code.toUpperCase() !== orderNo.toUpperCase()) ?? ''
+    const descSource = itemCode ? prefix.slice(prefix.indexOf(itemCode) + itemCode.length).trim() : prefix
+
+    rows.push({
+      MARKS: itemCode || `SO-${start}`,
+      'SHOP#': warehouse,
+      'ITEM NO.': orderNo,
+      'DESCRIPTION OF GOODS': descSource || itemCode || orderNo || '',
+      __col6: `barcode:${barcode} dims:${l}x${w}x${h}`,
+      PACKING: `${qtyPerCtn}pcs/ctn`,
+      'T.CTN': `${ctn}CTNS`,
+      'T.QTY': `${totalQty}pcs`,
+      'UNIT CBM': `${unitCbm}CBM`,
+      'T.CBM': `${totalCbm}CBM`,
+      'UNIT WEIGHT': `${unitGw}KGS`,
+      'T.WEIGHT': `${totalKgs}KGS`,
+      'U.PRICE (RMB)': `¥${unitPrice}`,
+      'T.AMOUNT': `¥${amount}`,
+    })
+  }
+  return rows
+}
+
+function isStageMarkerRow(row: Record<string, unknown>): boolean {
+  const marks = String(row.MARKS ?? '')
+  return marks.startsWith(STAGE_SECTION_MARKER_PREFIX) || marks.startsWith(STAGE_TOTAL_MARKER_PREFIX)
+}
+
+function extractStageTotalLine(line: string): string | null {
+  const m = line.match(/(\d+\s*CTNS?).*?([\d.]+\s*CBM).*?([\d.]+\s*KGS)(?:.*?([¥￥]\s*[\d,]+(?:\.\d+)?))?/i)
+  if (!m) return null
+  const ctn = m[1].replace(/\s+/g, '').toUpperCase()
+  const cbm = m[2].replace(/\s+/g, '').toUpperCase()
+  const kgs = m[3].replace(/\s+/g, '').toUpperCase()
+  const amount = m[4] ? m[4].replace(/\s+/g, '') : ''
+  return [ctn, cbm, kgs, amount].filter(Boolean).join(' ')
 }
 
 /** Parse a packing-list PDF — output matches CSV column keys for importProducts */
@@ -896,12 +1012,38 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
     let pageSkipped = 0
     for (let li = 0; li < extended.length; li++) {
       const line = extended[li]
+
+      // Section total rows (yellow PDF bands with CTN+CBM+KGS) appear BEFORE
+      // the next section header in the document. Detect them here, before
+      // section-header detection, so they are captured in document order.
+      // Guard: no SANCARGO (product rows) and no labeled TOTAL lines.
+      if (!/\bSANCARGO\b/i.test(line) && !shouldSkipPdfLine(line) && !isGoodsLeftHeader(line)) {
+        const probe = [
+          line,
+          `${line} ${extended[li + 1] ?? ''}`.replace(/\s+/g, ' ').trim(),
+        ].filter(Boolean)
+        const stageTotal = probe.map(extractStageTotalLine).find(Boolean)
+        if (stageTotal) {
+          rows.push({ MARKS: makeStageTotalSku(stageTotal) })
+          continue
+        }
+      }
+
+      const extractedStageHeader = extractStageSectionHeader(line)
+      if (extractedStageHeader && !isGoodsLeftHeader(line)) {
+        // Repacked-goods section — everything below this header is excluded.
+        pastSancargo = true
+        logImport(`PDF p${pageNum}: hit repacked section "${extractedStageHeader}" — stopping import`)
+        pageSkipped++
+        continue
+      }
+
       // Check both this line and the join of this+next for cases where the
       // "GOODS LEFT IN SANCARGO" header is split across two Y-bucket lines.
       const twoLine = li + 1 < extended.length
         ? (line + ' ' + extended[li + 1]).replace(/\s+/g, ' ')
         : line
-      if (/GOODS\s+LEFT\s+IN\s+SANCARGO/i.test(line) || /GOODS\s+LEFT\s+IN\s+SANCARGO/i.test(twoLine)) {
+      if (isGoodsLeftHeader(line) || isGoodsLeftHeader(twoLine)) {
         pastSancargo = true
         logImport(`PDF p${pageNum}: hit GOODS LEFT IN SANCARGO — skipping all subsequent rows`)
         pageSkipped++
@@ -934,6 +1076,20 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
     logImport(`PDF page ${pageNum}/${pdf.numPages}: merged=${merged.length}, extended=${extended.length}, parsed=${pageParsed}, skipped=${pageSkipped}`)
   }
 
+  const fullText = pageTextBlobs.join('\n')
+  if (isSalesOrderText(fullText)) {
+    const salesRows = parseSalesOrderRowsFromTextBlob(fullText)
+    if (salesRows.length > 0) {
+      logImport('PDF sales-order parser rows:', salesRows.length, 'sample:', {
+        MARKS: String(salesRows[0].MARKS ?? '').slice(0, 40),
+        PACKING: salesRows[0].PACKING,
+        'T.QTY': salesRows[0]['T.QTY'],
+        'U.PRICE (RMB)': salesRows[0]['U.PRICE (RMB)'],
+      })
+      return salesRows
+    }
+  }
+
   logImport(
     'PDF total parsed rows:',
     rows.length,
@@ -948,9 +1104,13 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
       : '(none)'
   )
 
-  if (rows.length === 0) {
+  const dataRowCount = rows.filter(r => !isStageMarkerRow(r)).length
+  if (rows.length === 0 || dataRowCount === 0) {
+    if (rows.length > 0 && dataRowCount === 0) {
+      logImport('PDF parse produced only section markers; running fallback parser')
+    }
     // Fallback parser for PDFs whose glyph coordinates are too fragmented for Y-bucketing.
-    const rawText = pageTextBlobs.join('\n')
+    const rawText = fullText
     const sancargoCutIdx = rawText.search(/GOODS\s+LEFT\s+IN\s+SANCARGO/i)
     const text = sancargoCutIdx !== -1 ? rawText.slice(0, sancargoCutIdx) : rawText
     // Cut at the document summary section so TOTAL CBM / TOTAL WEIGHT / etc.
@@ -980,6 +1140,8 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
       })
       return fallbackRows
     }
+    logImport('PDF fallback produced no data rows')
+    return []
   }
 
   return rows
@@ -1015,8 +1177,38 @@ async function parseExcelImportMeta(file: File): Promise<ImportMeta> {
 
 export async function parseImportFileDetailed(file: File): Promise<{ rows: Record<string, unknown>[]; importMeta: ImportMeta }> {
   const isPdf = isPdfFile(file)
-  const rows = isPdf ? await parsePdfFile(file) : await parseExcelFile(file)
+  let rows = isPdf ? await parsePdfFile(file) : await parseExcelFile(file)
   const importMeta = isPdf ? await parsePdfImportMeta(file) : await parseExcelImportMeta(file)
+
+  // OCR pipeline: triggers when the PDF yielded no rows (scanned/image PDF) OR when
+  // existing rows have missing critical values (null packing / qty / price) so the
+  // LLM alignment step gets raw OCR text as extra context.
+  const rowsHaveNulls = rows.length > 0 && rows.some(r => {
+    const packing = String(r['PACKING'] ?? '')
+    return (!packing || !/\//.test(packing)) || !r['T.QTY'] || !r['U.PRICE (RMB)']
+  })
+  if (isPdf && (rows.length === 0 || rowsHaveNulls) && process.env.NEXT_PUBLIC_OCR_PIPELINE_ENABLED === '1') {
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch('/api/ocr-extract', { method: 'POST', body: fd })
+      if (res.ok) {
+        const data = await res.json()
+        const ocrLines: string[] = Array.isArray(data?.lines) ? data.lines : []
+        const ocrRows = Array.isArray(data?.rows) ? (data.rows as Record<string, unknown>[]) : []
+        if (rows.length === 0 && ocrRows.length > 0) {
+          rows = ocrRows
+          logImport('OCR fallback rows:', rows.length)
+        } else if (ocrLines.length > 0 && rowsHaveNulls) {
+          // Attach OCR text to each row so LLM alignment can use it to fill nulls
+          rows = rows.map(r => ({ ...r, __ocr_lines: ocrLines.join('\n') }))
+          logImport('OCR lines attached to', rows.length, 'rows for LLM enrichment')
+        }
+      }
+    } catch (err) {
+      logImport('OCR failed:', err)
+    }
+  }
   logImport('parseImportFile done:', file.name, '→', rows.length, 'rows')
   logImport('import meta:', importMeta)
   return { rows, importMeta }

@@ -1,0 +1,22 @@
+alter table public.documents enable row level security;
+alter table public.document_items enable row level security;
+alter table public.document_totals enable row level security;
+alter table public.document_payments enable row level security;
+alter table public.extraction_runs enable row level security;
+alter table public.extraction_field_reviews enable row level security;
+alter table public.document_templates enable row level security;
+
+create policy "Allow all documents" on public.documents
+  for all using (true) with check (true);
+create policy "Allow all document_items" on public.document_items
+  for all using (true) with check (true);
+create policy "Allow all document_totals" on public.document_totals
+  for all using (true) with check (true);
+create policy "Allow all document_payments" on public.document_payments
+  for all using (true) with check (true);
+create policy "Allow all extraction_runs" on public.extraction_runs
+  for all using (true) with check (true);
+create policy "Allow all extraction_field_reviews" on public.extraction_field_reviews
+  for all using (true) with check (true);
+create policy "Allow all document_templates" on public.document_templates
+  for all using (true) with check (true);

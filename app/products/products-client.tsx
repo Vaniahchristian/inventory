@@ -26,7 +26,7 @@ import {
 import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons } from '@/app/actions/products'
 import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
 import { stockStatus } from '@/lib/utils'
-import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
+import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE, STAGE_TOTAL_MARKER_PREFIX, parseSectionMarkerTitle } from '@/lib/sections'
 import type { Product, Category, Supplier, ImportMeta } from '@/lib/types'
 
 type Props = {
@@ -45,6 +45,19 @@ function fmt(n: number | null | undefined, decimals = 2) {
 
 function parseWeight(w: string | null | undefined): number {
   return parseFloat((w ?? '0').replace(/[^\d.]/g, '')) || 0
+}
+
+function parseStageTotalValues(text: string) {
+  const ctns = text.match(/(\d+)CTNS?/i)?.[1]
+  const cbm = text.match(/([\d.]+)CBM/i)?.[1]
+  const kgs = text.match(/([\d.]+)KGS/i)?.[1]
+  const amountRaw = text.match(/[¥￥]([\d,]+(?:\.\d+)?)/)?.[1]
+  return {
+    cartons: ctns ? parseInt(ctns) : null,
+    cbm: cbm ? parseFloat(cbm) : null,
+    weight: kgs ? parseFloat(kgs) : null,
+    amount: amountRaw ? parseFloat(amountRaw.replace(/,/g, '')) : null,
+  }
 }
 
 export function ProductsClient({ products, categories, suppliers, importMeta }: Props) {
@@ -141,8 +154,21 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
       }
       startTransition(async () => {
         try {
-          const count = await importProducts(rows, importMeta)
-          toast.success(`Imported ${count} products`)
+          const result = await importProducts(rows, importMeta)
+          const count = typeof result === 'number' ? result : result.importedCount
+          const llmAligned = typeof result === 'number' ? 0 : result.llmAligned
+          const totalsMatch = typeof result === 'number' ? true : result.totalsMatch
+          const totalsDiff = typeof result === 'number' ? null : result.totalsDiff
+          if (llmAligned > 0) {
+            toast.success(`Imported ${count} products (LLM aligned ${llmAligned} uncertain rows)`)
+          } else {
+            toast.success(`Imported ${count} products`)
+          }
+          if (!totalsMatch && totalsDiff) {
+            toast.info(
+              `PDF totals differ from imported totals: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔKGS ${totalsDiff.weight ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`
+            )
+          }
         } catch (err: unknown) {
           toast.error(err instanceof Error ? err.message : 'Import failed')
         }
@@ -251,10 +277,29 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
             ) : (
               filtered.map(p => {
                 if (isSectionDividerProduct(p)) {
+                  const markerTitle = parseSectionMarkerTitle(p.sku)
+                  const isStageTotal = !!p.sku?.startsWith(STAGE_TOTAL_MARKER_PREFIX)
+                  if (isStageTotal && markerTitle) {
+                    const tv = parseStageTotalValues(markerTitle)
+                    return (
+                      <TableRow key={p.id} className="bg-amber-100 hover:bg-amber-100 font-semibold border-t-2 border-amber-400">
+                        <TableCell colSpan={6} />
+                        <TableCell className="text-right text-slate-800">{tv.cartons != null ? `${tv.cartons} CTNS` : ''}</TableCell>
+                        <TableCell />
+                        <TableCell />
+                        <TableCell className="text-right text-slate-800">{tv.cbm != null ? `${tv.cbm.toFixed(3)} CBM` : ''}</TableCell>
+                        <TableCell />
+                        <TableCell className="text-right text-slate-800">{tv.weight != null ? `${tv.weight.toFixed(1)} KGS` : ''}</TableCell>
+                        <TableCell />
+                        <TableCell className="text-right text-slate-800">{tv.amount != null ? `¥${fmt(tv.amount, 0)}` : ''}</TableCell>
+                        <TableCell colSpan={2} />
+                      </TableRow>
+                    )
+                  }
                   return (
                     <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
-                      <TableCell colSpan={16} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
-                        {REPACKAGED_SECTION_TITLE}
+                      <TableCell colSpan={16} className="text-center py-2 tracking-wide font-semibold text-slate-800">
+                        {markerTitle ?? REPACKAGED_SECTION_TITLE}
                       </TableCell>
                     </TableRow>
                   )

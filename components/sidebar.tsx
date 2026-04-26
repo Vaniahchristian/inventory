@@ -12,6 +12,7 @@ import {
   X,
   Boxes,
   FileSpreadsheet,
+  ShieldAlert,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -25,6 +26,7 @@ const navItems = [
   { href: '/suppliers', label: 'Suppliers', icon: Truck },
   { href: '/categories', label: 'Categories', icon: Tag },
   { href: '/compiled-products', label: 'Compiled Products', icon: FileSpreadsheet },
+  { href: '/review-queue', label: 'Review Queue', icon: ShieldAlert },
 ]
 
 function NavLink({ href, label, icon: Icon, onClick }: {
