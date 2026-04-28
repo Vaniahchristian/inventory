@@ -4,6 +4,9 @@ import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 import type { ImportMeta } from '@/lib/types'
 import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle } from '@/lib/sections'
+import Anthropic from '@anthropic-ai/sdk'
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
 
 /** Terminal logs when importing: dev server, or set DEBUG_PRODUCT_IMPORT=1 / NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT=1 */
 function importDebug(): boolean {
@@ -206,6 +209,8 @@ function shouldUseLlmAlignment(raw: Record<string, unknown>, mapped: {
   quantity: number
   cost_price: number
 }): boolean {
+  // Respect the parser's explicit signal when it couldn't extract critical fields
+  if (raw['__needs_llm'] === 'true') return true
   const packingLooksBad = !mapped.packing || !/\d+\s*[a-zA-Z]+\s*\/\s*ctn/i.test(mapped.packing)
   const rawCartons = intOrNull(raw['T.CTN']) ?? 0
   const rawQty = intOrNull(raw['T.QTY']) ?? 0
@@ -263,18 +268,7 @@ function parseLlmJson(text: string): LlmAlignedRow | null {
 }
 
 async function alignPackingRowWithLlm(raw: Record<string, unknown>): Promise<LlmAlignedRow | null> {
-  const llmApiKey = process.env.LLM_API_KEY
-  const groqApiKey = process.env.GROQ_API_KEY
-  const apiKey = llmApiKey || groqApiKey
-  if (!apiKey) return null
-
-  const baseUrl = (process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '')
-  const model = process.env.LLM_MODEL || process.env.GROQ_MODEL || 'deepseek/deepseek-chat-v3-0324'
-  const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? process.env.GROQ_TIMEOUT_MS ?? 20000)
-  const retryAttempts = Math.max(1, Number(process.env.LLM_RETRY_ATTEMPTS ?? process.env.GROQ_RETRY_ATTEMPTS ?? 3))
-  const retryDelayMs = Math.max(250, Number(process.env.LLM_RETRY_DELAY_MS ?? process.env.GROQ_RETRY_DELAY_MS ?? 2500))
-
-  // If OCR text was attached by the import pipeline, find the window relevant to this row.
+  // Build OCR context window: find the lines around this row's MARKS token
   const allOcrLines = str(raw['__ocr_lines'] ?? '').split('\n').filter(Boolean)
   const ocrContext = (() => {
     if (!allOcrLines.length) return ''
@@ -302,67 +296,30 @@ async function alignPackingRowWithLlm(raw: Record<string, unknown>): Promise<Llm
     ocrContext ? `\nOCR source text (find values missing from the row above):\n${ocrContext}` : '',
   ].filter(Boolean).join('\n')
 
-  for (let attempt = 1; attempt <= retryAttempts; attempt++) {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
-    try {
-      if (attempt === 1) {
-        logImport('LLM request row:', {
-          MARKS: str(raw['MARKS']).slice(0, 60),
-          PACKING: raw['PACKING'],
-          'T.CTN': raw['T.CTN'],
-          'T.QTY': raw['T.QTY'],
-          'U.PRICE (RMB)': raw['U.PRICE (RMB)'],
-          model,
-        })
-      }
-      const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          ...(process.env.LLM_REFERER ? { 'HTTP-Referer': process.env.LLM_REFERER } : {}),
-          ...(process.env.LLM_APP_NAME ? { 'X-Title': process.env.LLM_APP_NAME } : {}),
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          temperature: 0,
-          messages: [
-            { role: 'system', content: 'You are a strict data extraction engine. Output JSON only.' },
-            { role: 'user', content: prompt },
-          ],
-        }),
-        signal: controller.signal,
-      })
-      if (!res.ok) {
-        if ((res.status === 429 || res.status >= 500) && attempt < retryAttempts) {
-          logImport(`LLM retry ${attempt}/${retryAttempts} after status ${res.status}`)
-          await sleep(retryDelayMs * attempt)
-          continue
-        }
-        logImport('LLM align failed status:', res.status)
-        return null
-      }
-      const data = await res.json()
-      const content = String(data?.choices?.[0]?.message?.content ?? '')
-      logImport('LLM raw content preview:', content.slice(0, 500))
-      const parsed = parseLlmJson(content)
-      logImport('LLM parsed JSON:', parsed)
-      return parsed
-    } catch (e: any) {
-      const msg = e?.message ?? String(e)
-      if (attempt < retryAttempts && isTransientFetchError(msg)) {
-        logImport(`LLM transient exception retry ${attempt}/${retryAttempts}:`, msg)
-        await sleep(retryDelayMs * attempt)
-        continue
-      }
-      logImport('LLM align exception:', msg)
-      return null
-    } finally {
-      clearTimeout(timer)
-    }
+  logImport('Claude request row:', {
+    MARKS: str(raw['MARKS']).slice(0, 60),
+    PACKING: raw['PACKING'],
+    'T.CTN': raw['T.CTN'],
+    'T.QTY': raw['T.QTY'],
+    'U.PRICE (RMB)': raw['U.PRICE (RMB)'],
+  })
+
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 512,
+    messages: [{ role: 'user', content: `You are a strict data extraction engine. Output JSON only.\n\n${prompt}` }],
+  })
+
+  const content = response.content[0].type === 'text' ? response.content[0].text : ''
+  if (!content) {
+    logImport('Claude returned empty response')
+    return null
   }
-  return null
+
+  logImport('Claude raw content preview:', content.slice(0, 500))
+  const parsed = parseLlmJson(content)
+  logImport('Claude parsed JSON:', parsed)
+  return parsed
 }
 
 export async function getProducts() {
@@ -990,7 +947,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         reorder_level: 0,
       }
 
-      const shouldUseLlm = aiMode === 'full' || shouldUseLlmAlignment(r, mappedRow)
+      const fromClaudeCore = str(r['__source']) === 'claude_core'
+      const shouldUseLlm = !fromClaudeCore && (aiMode === 'full' || shouldUseLlmAlignment(r, mappedRow))
       mapped.push(mappedRow)
       if (shouldUseLlm) {
         llmCandidates.push({ mappedIndex: mapped.length - 1, raw: r, sku })
@@ -1040,8 +998,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
   }
 
   if (llmCandidates.length > 0) {
-    const llmBatchSize = Math.max(1, Number(process.env.LLM_BATCH_SIZE ?? process.env.GROQ_BATCH_SIZE ?? 10))
-    const llmBatchPauseMs = Math.max(0, Number(process.env.LLM_BATCH_PAUSE_MS ?? process.env.GROQ_BATCH_PAUSE_MS ?? 2000))
+    const llmBatchSize = Math.max(1, Number(process.env.LLM_BATCH_SIZE ?? 20))
+    const llmBatchPauseMs = Math.max(0, Number(process.env.LLM_BATCH_PAUSE_MS ?? 0))
     logImport('LLM batching config:', { candidates: llmCandidates.length, llmBatchSize, llmBatchPauseMs })
 
     for (let i = 0; i < llmCandidates.length; i += llmBatchSize) {
@@ -1058,7 +1016,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
           })
           const ai = await alignPackingRowWithLlm(candidate.raw)
           if (!ai) {
-            logImport('LLM returned null/invalid:', { sku: candidate.sku })
+            // All providers failed or are cooling down — keep the regex-parsed values as-is
+            logImport('LLM unavailable, keeping parser result for:', { sku: candidate.sku })
             return
           }
 

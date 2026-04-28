@@ -1,92 +1,98 @@
 import { NextResponse } from 'next/server'
 import vision from '@google-cloud/vision'
 import path from 'path'
-import { linesToRows } from '@/lib/ocr-parser'
+import crypto from 'crypto'
+import { detectDocType } from '@/lib/prompts'
+import { extractWithClaude } from '@/lib/claude-extractor'
+import { validateExtraction } from '@/lib/validator'
+import { insertToSupabase } from '@/lib/supabase-inserter'
 
 export const runtime = 'nodejs'
 
 const KEY_FILE = path.join(process.cwd(), 'rosy-cogency-494512-n2-1755231a72ea.json')
 
-function makeClient() {
-  return new vision.ImageAnnotatorClient({ keyFilename: KEY_FILE })
-}
+// Vision API hard limit is 5 pages per batchAnnotateFiles call.
+// We split the page list into batches of 5 and merge all lines.
+const VISION_PAGE_BATCH = 5
+const MAX_PDF_PAGES = 20
 
-async function extractRowsWithLlm(lines: string[]): Promise<Record<string, string>[]> {
-  const apiKey = process.env.LLM_API_KEY || process.env.GROQ_API_KEY
-  if (!apiKey) return []
+async function runOCR(content: Buffer, isPdf: boolean): Promise<string[]> {
+  const client = new vision.ImageAnnotatorClient({ keyFilename: KEY_FILE })
+  const lines: string[] = []
 
-  const baseUrl = (process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '')
-  const model = process.env.LLM_MODEL || process.env.GROQ_MODEL || 'deepseek/deepseek-chat-v3-0324'
-  const ocrText = lines.join('\n').slice(0, 7000)
-
-  const prompt = `You are a data extraction engine for Chinese packing lists and sales orders (销售单).
-The text below was extracted via OCR from a multi-column PDF table. Columns may appear scrambled or interleaved.
-Reconstruct ALL product rows. Skip rows that are clearly header/footer/total lines.
-
-Return a JSON array where each element has EXACTLY these keys:
-"MARKS", "SHOP#", "ITEM NO.", "DESCRIPTION OF GOODS", "PACKING", "T.CTN", "T.QTY", "UNIT CBM", "T.CBM", "UNIT WEIGHT", "T.WEIGHT", "U.PRICE (RMB)", "T.AMOUNT"
-
-CRITICAL rules:
-- MARKS: short product code/SKU only — no spaces (e.g. "SE-030", "BL6015W1", "VF013C", "TN55M2"). Never a full sentence.
-- DESCRIPTION OF GOODS: REQUIRED — English product name (e.g. "5L Air Fryer", "1.3L Vacuum Jug"). Look for English words near the SKU. Never leave blank if any English description exists.
-- PACKING: REQUIRED — must contain a slash, format "Npcs/ctn" (e.g. "2pcs/ctn", "12pcs/ctn"). Derive from pcs-per-carton data visible in the row.
-- T.CTN: total cartons with unit, e.g. "30CTNS"
-- T.QTY: total pieces, e.g. "360pcs"
-- UNIT CBM: per-carton cubic metres, e.g. "0.11CBM"
-- T.CBM: total cubic metres, e.g. "1.06CBM"
-- UNIT WEIGHT: per-carton weight, e.g. "11.5KGS"
-- T.WEIGHT: total weight, e.g. "115KGS"
-- U.PRICE (RMB): unit price with ¥ symbol, e.g. "¥47"
-- T.AMOUNT: total amount with ¥ symbol, e.g. "¥5640"
-- SHOP#: warehouse if visible (e.g. "浦江仓"), else ""
-- ITEM NO.: order reference if visible (e.g. "C25-6083"), else ""
-- Use "" for truly unknown values — never null, never skip DESCRIPTION or PACKING
-- Skip rows where quantity AND cartons are both 0
-- Output ONLY the raw JSON array. No markdown. No explanation.
-
-OCR text:
-${ocrText}`
-
-  console.log('[ocr-extract] LLM fallback: sending', lines.length, 'lines to', model)
-  try {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        ...(process.env.LLM_REFERER ? { 'HTTP-Referer': process.env.LLM_REFERER } : {}),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        messages: [
-          { role: 'system', content: 'You are a strict data extraction engine. Output JSON only.' },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    })
-    if (!res.ok) {
-      console.error('[ocr-extract] LLM status:', res.status)
-      return []
+  if (isPdf) {
+    // Build page batches: [1..5], [6..10], [11..15], [16..20]
+    const batches: number[][] = []
+    for (let start = 1; start <= MAX_PDF_PAGES; start += VISION_PAGE_BATCH) {
+      batches.push(
+        Array.from(
+          { length: VISION_PAGE_BATCH },
+          (_, i) => start + i
+        )
+      )
     }
-    const data = await res.json()
-    const content = String(data?.choices?.[0]?.message?.content ?? '')
-    console.log('[ocr-extract] LLM response preview:', content.slice(0, 300))
-    const start = content.indexOf('[')
-    const end = content.lastIndexOf(']')
-    if (start === -1 || end === -1 || end <= start) return []
-    const parsed = JSON.parse(content.slice(start, end + 1))
-    return Array.isArray(parsed) ? parsed : []
-  } catch (err: any) {
-    console.error('[ocr-extract] LLM fallback error:', err?.message)
-    return []
+
+    for (const pageBatch of batches) {
+      console.log(`[ocr] requesting pages ${pageBatch[0]}–${pageBatch[pageBatch.length - 1]}`)
+      try {
+        const [batchResult] = await client.batchAnnotateFiles({
+          requests: [{
+            inputConfig: { content, mimeType: 'application/pdf' },
+            features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+            pages: pageBatch,
+          }],
+        })
+
+        const pageResponses = (batchResult.responses?.[0] as any)?.responses ?? []
+        console.log(`[ocr] pages returned: ${pageResponses.length}`)
+
+        if (pageResponses.length === 0) {
+          // No pages returned means we've gone past the end of the document
+          console.log('[ocr] no more pages — stopping')
+          break
+        }
+
+        for (const pageResp of pageResponses) {
+          const text: string = pageResp.fullTextAnnotation?.text ?? ''
+          if (text) {
+            lines.push(...text.split('\n').filter(Boolean))
+          }
+        }
+
+        // If fewer pages came back than requested, we've hit the end
+        if (pageResponses.length < VISION_PAGE_BATCH) {
+          console.log('[ocr] reached last page')
+          break
+        }
+      } catch (err: any) {
+        // Vision throws if the page range is entirely beyond the document
+        if (err?.message?.includes('INVALID_ARGUMENT') || err?.code === 3) {
+          console.log(`[ocr] page batch ${pageBatch[0]}+ beyond document end, stopping`)
+          break
+        }
+        throw err
+      }
+    }
+  } else {
+    const [result] = await client.annotateImage({
+      image: { content },
+      features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+    })
+    const text: string = result.fullTextAnnotation?.text ?? ''
+    lines.push(...text.split('\n').filter(Boolean))
   }
+
+  return lines
 }
 
 export async function POST(req: Request) {
+  const startTime = Date.now()
+
   try {
     const form = await req.formData()
     const file = form.get('file')
+    const skipInsert = form.get('skip_insert') === 'true'
+
     if (!(file instanceof File)) {
       return NextResponse.json({ error: 'Missing file' }, { status: 400 })
     }
@@ -98,54 +104,71 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unsupported file type' }, { status: 400 })
     }
 
-    console.log('[ocr-extract] processing:', file.name, 'size:', file.size, 'bytes')
+    console.log(`[route] file: ${file.name} size: ${file.size}`)
     const content = Buffer.from(await file.arrayBuffer())
-    const client = makeClient()
-    const lines: string[] = []
+    const fileSha256 = crypto.createHash('sha256').update(content).digest('hex')
 
-    if (isPdf) {
-      const [batchResult] = await client.batchAnnotateFiles({
-        requests: [{
-          inputConfig: { content, mimeType: 'application/pdf' },
-          features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-        }],
-      })
-      console.log('[ocr-extract] batchAnnotateFiles responses:', batchResult.responses?.length ?? 0)
-      for (const fileResp of batchResult.responses ?? []) {
-        const pageResponses = (fileResp as any).responses ?? []
-        console.log('[ocr-extract] pages:', pageResponses.length)
-        for (const pageResp of pageResponses) {
-          const text: string = pageResp.fullTextAnnotation?.text ?? ''
-          const pageLines = text.split('\n').filter(Boolean)
-          console.log('[ocr-extract] page lines:', pageLines.length, '| preview:', pageLines.slice(0, 2).join(' | '))
-          lines.push(...pageLines)
-        }
-      }
-    } else {
-      const [result] = await client.annotateImage({
-        image: { content },
-        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-      })
-      const text: string = result.fullTextAnnotation?.text ?? ''
-      lines.push(...text.split('\n').filter(Boolean))
+    // Step 1: Google Vision OCR (batched, handles any page count)
+    console.log('[route] running OCR...')
+    const lines = await runOCR(content, isPdf)
+    console.log(`[route] ocr_lines: ${lines.length}`)
+
+    if (lines.length === 0) {
+      return NextResponse.json({ error: 'OCR returned no text' }, { status: 422 })
     }
 
-    console.log('[ocr-extract] total OCR lines:', lines.length)
+    // Step 2: Detect document type from header lines
+    const docType = detectDocType(lines)
+    console.log(`[route] doc_type: ${docType}`)
 
-    // Try regex parser first
-    let rows = linesToRows(lines)
-    console.log('[ocr-extract] regex parser rows:', rows.length)
+    // Step 3: Single Claude call — full document, no per-row loops
+    console.log('[route] calling Claude...')
+    const extraction = await extractWithClaude(lines, docType)
+    console.log(`[route] extracted rows: ${extraction.products.length}`)
 
-    // If regex parser found nothing but OCR has content, let the LLM reconstruct the table
-    if (rows.length === 0 && lines.length > 0) {
-      console.log('[ocr-extract] falling back to LLM table reconstruction')
-      rows = await extractRowsWithLlm(lines)
-      console.log('[ocr-extract] LLM extracted rows:', rows.length)
+    if (extraction.products.length === 0) {
+      return NextResponse.json({ error: 'Claude extracted 0 rows' }, { status: 422 })
     }
 
-    return NextResponse.json({ rows, lines, metrics: { ocr_lines: lines.length, parsed_rows: rows.length } })
+    // Step 4: Validate totals against PDF footer checksums
+    const validation = validateExtraction(extraction.document, extraction.products)
+
+    // Step 5: Supabase insert
+    let insertResult = null
+    if (!skipInsert) {
+      console.log('[route] inserting to Supabase...')
+      insertResult = await insertToSupabase(file.name, fileSha256, extraction, validation, lines)
+    }
+
+    const duration = Date.now() - startTime
+    console.log(`[route] done in ${duration}ms`)
+
+    return NextResponse.json({
+      success: true,
+      document_id: insertResult?.document_id ?? null,
+      doc_type: docType,
+      rows_extracted: extraction.products.length,
+      rows_pass: validation.pass_count,
+      rows_flagged: validation.flag_count,
+      totals_match: validation.totals_match,
+      totals_diff: validation.totals_diff,
+      validation_flags: validation.validation_flags,
+      truncated: extraction.truncated,
+      metrics: {
+        ocr_lines: lines.length,
+        input_tokens: extraction.input_tokens,
+        output_tokens: extraction.output_tokens,
+        duration_ms: duration,
+      },
+      products: extraction.products,
+      document: extraction.document,
+      lines,
+    })
   } catch (err: any) {
-    console.error('[ocr-extract] error:', err?.message ?? err)
-    return NextResponse.json({ rows: [], lines: [], message: err?.message ?? 'OCR request failed' }, { status: 200 })
+    console.error('[route] error:', err?.message ?? err)
+    return NextResponse.json(
+      { error: err?.message ?? 'Extraction failed', success: false },
+      { status: 500 }
+    )
   }
 }

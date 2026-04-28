@@ -681,16 +681,27 @@ function parsePdfTableLineResult(joined: string, skipKeywordCheck = false): PdfL
   const line = joined.replace(/\s+/g, ' ').trim()
   if (!line) return { ok: false, skip: 'empty line' }
   if (!skipKeywordCheck && shouldSkipPdfLine(line)) return { ok: false, skip: 'skipped (header/footer keyword)' }
-  if (!/\bSANCARGO\b/i.test(line)) return { ok: false, skip: 'no SANCARGO anchor' }
+
+  const hasSancargo = /\bSANCARGO\b/i.test(line)
+  // Require SANCARGO as the anchor for regular rows.
+  // Exception: rows with a bare MARKS token + packing + CTN (e.g. "MOSES 丰锦 1pcs/ctn 4CTNS")
+  // are client-sourced items that don't go through SANCARGO but still belong to the shipment.
+  if (!hasSancargo) {
+    const hasPacking = /\d+\s*[A-Za-z]+\s*\/\s*ctn/i.test(line)
+    const hasCtn = /\d+\s*CTNS?/i.test(line)
+    if (!hasPacking || !hasCtn) return { ok: false, skip: 'no SANCARGO anchor' }
+  }
 
   const marks = extractMarksFromPdfLine(line)
   if (!marks) return { ok: false, skip: 'no MARKS token' }
-  const marksDisplay = /\bSANCARGO\b/i.test(line) ? `${marks}\nSANCARGO` : marks
+  const marksDisplay = hasSancargo ? `${marks}\nSANCARGO` : marks
 
   const packingM = line.match(/(\d+\s*[A-Za-z]+\s*\/\s*ctn)/i)
   const tCtnM = line.match(/(\d+)\s*CTNS?/i)
   // Rows in this PDF often omit packing when it repeats from a prior row.
   // Accept rows that have explicit carton count + a ¥ price; LLM alignment fills packing.
+  // Also accept non-SANCARGO rows (e.g. "MOSES") if they have CTNs + packing — these are
+  // client-sourced items billed separately that still count toward the container total.
   if (!packingM && !(tCtnM && /[¥￥]/.test(line))) {
     return { ok: false, skip: 'no PACKING and insufficient row data', preview: line.slice(0, 120) }
   }
@@ -1013,6 +1024,40 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
     for (let li = 0; li < extended.length; li++) {
       const line = extended[li]
 
+      // Fast exit once we have passed the repacked section boundary.
+      if (pastSancargo) {
+        pageSkipped++
+        continue
+      }
+
+      // Repacked-goods section stop. The strict regex needs "37-T-1 18 CTN GOODS STUFFED…";
+      // the broader substring fallback catches cases where the banner text is split across
+      // pdfjs Y-buckets. Only check `line` here — using twoLine risks triggering on the
+      // yellow total row when the section banner immediately follows it.
+      const extractedStageHeader = extractStageSectionHeader(line)
+      const isRepackedBanner =
+        !isGoodsLeftHeader(line) && (
+          !!extractedStageHeader ||
+          /GOODS\s+STUFFED\s+INTO\s+THIS\s+CONTAINER/i.test(line)
+        )
+      if (isRepackedBanner) {
+        pastSancargo = true
+        logImport(`PDF p${pageNum}: hit repacked section banner — stopping import`)
+        pageSkipped++
+        continue
+      }
+
+      // "GOODS LEFT IN SANCARGO" header can be split across two Y-bucket lines.
+      const twoLine = li + 1 < extended.length
+        ? (line + ' ' + extended[li + 1]).replace(/\s+/g, ' ')
+        : line
+      if (isGoodsLeftHeader(line) || isGoodsLeftHeader(twoLine)) {
+        pastSancargo = true
+        logImport(`PDF p${pageNum}: hit GOODS LEFT IN SANCARGO — skipping all subsequent rows`)
+        pageSkipped++
+        continue
+      }
+
       // Section total rows (yellow PDF bands with CTN+CBM+KGS) appear BEFORE
       // the next section header in the document. Detect them here, before
       // section-header detection, so they are captured in document order.
@@ -1029,30 +1074,6 @@ export async function parsePdfFile(file: File): Promise<Record<string, unknown>[
         }
       }
 
-      const extractedStageHeader = extractStageSectionHeader(line)
-      if (extractedStageHeader && !isGoodsLeftHeader(line)) {
-        // Repacked-goods section — everything below this header is excluded.
-        pastSancargo = true
-        logImport(`PDF p${pageNum}: hit repacked section "${extractedStageHeader}" — stopping import`)
-        pageSkipped++
-        continue
-      }
-
-      // Check both this line and the join of this+next for cases where the
-      // "GOODS LEFT IN SANCARGO" header is split across two Y-bucket lines.
-      const twoLine = li + 1 < extended.length
-        ? (line + ' ' + extended[li + 1]).replace(/\s+/g, ' ')
-        : line
-      if (isGoodsLeftHeader(line) || isGoodsLeftHeader(twoLine)) {
-        pastSancargo = true
-        logImport(`PDF p${pageNum}: hit GOODS LEFT IN SANCARGO — skipping all subsequent rows`)
-        pageSkipped++
-        continue
-      }
-      if (pastSancargo) {
-        pageSkipped++
-        continue
-      }
       const result = parsePdfTableLineResult(line)
       if (result.ok) {
         rows.push(result.row)
@@ -1180,25 +1201,47 @@ export async function parseImportFileDetailed(file: File): Promise<{ rows: Recor
   let rows = isPdf ? await parsePdfFile(file) : await parseExcelFile(file)
   const importMeta = isPdf ? await parsePdfImportMeta(file) : await parseExcelImportMeta(file)
 
-  // OCR pipeline: triggers when the PDF yielded no rows (scanned/image PDF) OR when
-  // existing rows have missing critical values (null packing / qty / price) so the
-  // LLM alignment step gets raw OCR text as extra context.
+  // OCR pipeline: for PDFs, prefer full-document Claude extraction as the primary source.
+  // Legacy parser rows remain as a fallback when OCR/LLM is unavailable.
   const rowsHaveNulls = rows.length > 0 && rows.some(r => {
     const packing = String(r['PACKING'] ?? '')
     return (!packing || !/\//.test(packing)) || !r['T.QTY'] || !r['U.PRICE (RMB)']
   })
-  if (isPdf && (rows.length === 0 || rowsHaveNulls) && process.env.NEXT_PUBLIC_OCR_PIPELINE_ENABLED === '1') {
+  if (isPdf) {
     try {
       const fd = new FormData()
       fd.append('file', file)
+      // Import path uses OCR/LLM extraction only; products are persisted by importProducts.
+      // This avoids /api/ocr-extract failing the whole import on document_items constraints.
+      fd.append('skip_insert', 'true')
       const res = await fetch('/api/ocr-extract', { method: 'POST', body: fd })
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}))
+        logImport(`OCR route failed: HTTP ${res.status}`, errBody?.error ?? errBody)
+      }
       if (res.ok) {
         const data = await res.json()
         const ocrLines: string[] = Array.isArray(data?.lines) ? data.lines : []
-        const ocrRows = Array.isArray(data?.rows) ? (data.rows as Record<string, unknown>[]) : []
-        if (rows.length === 0 && ocrRows.length > 0) {
-          rows = ocrRows
-          logImport('OCR fallback rows:', rows.length)
+        const ocrProducts = Array.isArray(data?.products) ? (data.products as Record<string, unknown>[]) : []
+        if (ocrProducts.length > 0) {
+          rows = ocrProducts.map(p => ({
+            MARKS: String(p.marks ?? p.item_code ?? ''),
+            'SHOP#': String(p.shop ?? ''),
+            'ITEM NO.': String(p.line_no ?? ''),
+            'DESCRIPTION OF GOODS': String(p.description ?? ''),
+            PACKING: String(p.packaging ?? ''),
+            'T.CTN': p.total_cartons != null ? `${String(p.total_cartons)}CTNS` : '',
+            'T.QTY': p.total_qty != null ? `${String(p.total_qty)}pcs` : '',
+            'UNIT CBM': p.unit_cbm != null ? `${String(p.unit_cbm)}CBM` : '',
+            'T.CBM': p.total_cbm != null ? `${String(p.total_cbm)}CBM` : '',
+            'UNIT WEIGHT': p.unit_weight_kg != null ? `${String(p.unit_weight_kg)}KGS` : '',
+            'T.WEIGHT': p.total_weight_kg != null ? `${String(p.total_weight_kg)}KGS` : '',
+            'U.PRICE (RMB)': p.unit_price_rmb != null ? `¥${String(p.unit_price_rmb)}` : '',
+            'T.AMOUNT': p.total_amount_rmb != null ? `¥${String(p.total_amount_rmb)}` : '',
+            __source: 'claude_core',
+            __needs_llm: 'false',
+          }))
+          logImport('OCR primary rows:', rows.length)
         } else if (ocrLines.length > 0 && rowsHaveNulls) {
           // Attach OCR text to each row so LLM alignment can use it to fill nulls
           rows = rows.map(r => ({ ...r, __ocr_lines: ocrLines.join('\n') }))
