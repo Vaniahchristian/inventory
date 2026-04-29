@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import vision from '@google-cloud/vision'
 import path from 'path'
 import crypto from 'crypto'
+import fs from 'fs'
 import { detectDocType } from '@/lib/prompts'
 import { extractWithClaudeChunked } from '@/lib/claude-extractor'
 import { validateExtraction } from '@/lib/validator'
@@ -16,8 +17,35 @@ const KEY_FILE = path.join(process.cwd(), 'rosy-cogency-494512-n2-1755231a72ea.j
 const VISION_PAGE_BATCH = 5
 const MAX_PDF_PAGES = 20
 
+let visionClient: InstanceType<typeof vision.ImageAnnotatorClient> | null = null
+
+function getVisionClient(): InstanceType<typeof vision.ImageAnnotatorClient> {
+  if (visionClient) return visionClient
+
+  // Prefer env-based credentials in production (Vercel), fallback to local key file in dev.
+  const inlineCreds = process.env.GCP_VISION_CREDENTIALS_JSON
+  if (inlineCreds) {
+    try {
+      const creds = JSON.parse(inlineCreds)
+      visionClient = new vision.ImageAnnotatorClient({ credentials: creds })
+      return visionClient
+    } catch (err) {
+      throw new Error('Invalid GCP_VISION_CREDENTIALS_JSON format')
+    }
+  }
+
+  if (fs.existsSync(KEY_FILE)) {
+    visionClient = new vision.ImageAnnotatorClient({ keyFilename: KEY_FILE })
+    return visionClient
+  }
+
+  throw new Error(
+    'Google Vision credentials not configured. Set GCP_VISION_CREDENTIALS_JSON in Vercel env.'
+  )
+}
+
 async function runOCR(content: Buffer, isPdf: boolean): Promise<string[]> {
-  const client = new vision.ImageAnnotatorClient({ keyFilename: KEY_FILE })
+  const client = getVisionClient()
   const lines: string[] = []
 
   if (isPdf) {
@@ -107,7 +135,10 @@ export async function POST(req: Request) {
       console.log(`[route] downloading blob: ${blobUrl}`)
       const blobRes = await fetch(blobUrl)
       if (!blobRes.ok) {
-        return NextResponse.json({ error: 'Failed to download blob' }, { status: 502 })
+        return NextResponse.json(
+          { error: `Failed to download blob (HTTP ${blobRes.status})` },
+          { status: 502 }
+        )
       }
       content = Buffer.from(await blobRes.arrayBuffer())
     } else {
