@@ -152,34 +152,37 @@ export async function extractFromBuffer(
  */
 export async function extractWithClaude(
   ocrLines: string[],
-  docType: DocType
+  docType: DocType,
+  label = 'chunk'
 ): Promise<ClaudeExtractionResult> {
   const ocrText = ocrLines.join('\n')
   const prompt = getPromptForDocType(docType, ocrText)
   const maxTokens = Math.max(4096, Number(process.env.CLAUDE_MAX_TOKENS ?? 32000))
 
-  console.log(`[claude-extractor] text mode — doc_type: ${docType}`)
-  console.log(`[claude-extractor] ocr_lines: ${ocrLines.length}`)
+  console.log(`[claude-extractor] ${label} — doc_type=${docType} lines=${ocrLines.length} prompt_chars=${prompt.length} max_tokens=${maxTokens}`)
 
+  const callStart = Date.now()
   const stream = anthropic.messages.stream({
     model: 'claude-sonnet-4-6',
     max_tokens: maxTokens,
     messages: [{ role: 'user', content: prompt }],
   })
   const response = await stream.finalMessage()
+  const callMs = Date.now() - callStart
 
   const rawContent = response.content[0].type === 'text' ? response.content[0].text : ''
 
-  console.log(`[claude-extractor] input_tokens: ${response.usage.input_tokens}`)
-  console.log(`[claude-extractor] output_tokens: ${response.usage.output_tokens}`)
-  console.log(`[claude-extractor] stop_reason: ${response.stop_reason}`)
+  console.log(`[claude-extractor] ${label} — done in ${callMs}ms`)
+  console.log(`[claude-extractor] ${label} — input_tokens=${response.usage.input_tokens} output_tokens=${response.usage.output_tokens} stop_reason=${response.stop_reason}`)
+  console.log(`[claude-extractor] ${label} — response_preview: ${rawContent.slice(0, 300)}`)
 
   const truncated = response.stop_reason === 'max_tokens'
   if (truncated) {
-    console.warn('[claude-extractor] WARNING: hit max_tokens — output may be incomplete')
+    console.warn(`[claude-extractor] ${label} — WARNING: hit max_tokens, output may be incomplete`)
   }
 
   const parsed = parseClaudeResponse(rawContent)
+  console.log(`[claude-extractor] ${label} — parsed ${parsed.products.length} rows, parse_errors=${parsed.products.length === 0 ? 'POSSIBLY — check response_preview above' : 'none'}`)
 
   return {
     document: parsed.document,
@@ -231,12 +234,15 @@ export async function extractWithClaudeChunked(
   let subchunkCount = 0
   let claudeUnavailableForRequest = false
 
+  console.log(`[claude-extractor] chunked — total_lines=${ocrLines.length} chunks=${chunks.length} chunk_sizes=${chunks.map(c => c.length).join(',')}`)
+
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i]
-    console.log(`[claude-extractor] chunk ${i + 1}/${chunks.length} lines=${chunk.length}`)
+    const chunkLabel = `chunk ${i + 1}/${chunks.length}`
+    console.log(`[claude-extractor] ── ${chunkLabel} start (lines=${chunk.length}) ──`)
     if (claudeUnavailableForRequest) {
       try {
-        console.log(`[claude-extractor] chunk ${i + 1} using fallback-only path (Claude unavailable)`)
+        console.log(`[claude-extractor] ${chunkLabel} using fallback-only path (Claude unavailable)`)
         const fallback = await extractWithFallbackLlm(chunk, docType)
         model = fallback.model
         inputTokens += fallback.input_tokens
@@ -248,17 +254,18 @@ export async function extractWithClaudeChunked(
         if (!doc) doc = fallback.document
         allProducts.push(...fallback.products)
         successfulChunks++
+        console.log(`[claude-extractor] ${chunkLabel} fallback done — rows=${fallback.products.length} running_total=${allProducts.length}`)
         continue
       } catch (fallbackErr: any) {
         failedChunks++
         console.warn(
-          `[claude-extractor] chunk ${i + 1} fallback-only path failed: ${fallbackErr?.message ?? fallbackErr}`
+          `[claude-extractor] ${chunkLabel} fallback-only path failed: ${fallbackErr?.message ?? fallbackErr}`
         )
         continue
       }
     }
     try {
-      const result = await extractWithClaude(chunk, docType)
+      const result = await extractWithClaude(chunk, docType, chunkLabel)
       model = result.model
       inputTokens += result.input_tokens
       outputTokens += result.output_tokens
@@ -269,15 +276,17 @@ export async function extractWithClaudeChunked(
       if (!doc) doc = result.document
       allProducts.push(...result.products)
       successfulChunks++
+      console.log(`[claude-extractor] ${chunkLabel} done — rows=${result.products.length} running_total=${allProducts.length}`)
 
       if (result.truncated && chunk.length >= 250) {
         const subchunks = splitChunk(chunk)
         if (subchunks.length > 1) {
           subchunkCount += subchunks.length
-          console.log(`[claude-extractor] chunk ${i + 1} truncated, retrying ${subchunks.length} subchunks`)
+          console.log(`[claude-extractor] ${chunkLabel} truncated → splitting into ${subchunks.length} subchunks`)
           for (const [j, sub] of subchunks.entries()) {
+            const subLabel = `chunk ${i + 1}.${j + 1}/${subchunks.length}`
             try {
-              const subResult = await extractWithClaude(sub, docType)
+              const subResult = await extractWithClaude(sub, docType, subLabel)
               inputTokens += subResult.input_tokens
               outputTokens += subResult.output_tokens
               if (subResult.truncated) {
@@ -287,24 +296,24 @@ export async function extractWithClaudeChunked(
               if (!doc) doc = subResult.document
               allProducts.push(...subResult.products)
               successfulChunks++
-              console.log(`[claude-extractor] subchunk ${i + 1}.${j + 1} rows=${subResult.products.length}`)
+              console.log(`[claude-extractor] ${subLabel} done — rows=${subResult.products.length} running_total=${allProducts.length}`)
             } catch (subErr: any) {
               failedChunks++
-              console.warn(`[claude-extractor] subchunk ${i + 1}.${j + 1} failed: ${subErr?.message ?? subErr}`)
+              console.warn(`[claude-extractor] ${subLabel} failed: ${subErr?.message ?? subErr}`)
             }
           }
         }
       }
     } catch (err: any) {
       const msg = err?.message ?? String(err)
-      console.warn(`[claude-extractor] chunk ${i + 1} failed: ${msg}`)
+      console.warn(`[claude-extractor] ${chunkLabel} failed: ${msg}`)
       if (isAnthropicBillingError(msg)) {
         claudeUnavailableForRequest = true
         console.warn('[claude-extractor] Anthropic billing/credit issue detected; switching remaining chunks to fallback-only')
       }
       if (shouldTryFallbackModel(msg)) {
         try {
-          console.log(`[claude-extractor] chunk ${i + 1} trying fallback model...`)
+          console.log(`[claude-extractor] ${chunkLabel} trying fallback model...`)
           const fallback = await extractWithFallbackLlm(chunk, docType)
           model = fallback.model
           inputTokens += fallback.input_tokens
@@ -316,10 +325,11 @@ export async function extractWithClaudeChunked(
           if (!doc) doc = fallback.document
           allProducts.push(...fallback.products)
           successfulChunks++
+          console.log(`[claude-extractor] ${chunkLabel} fallback done — rows=${fallback.products.length} running_total=${allProducts.length}`)
           continue
         } catch (fallbackErr: any) {
           console.warn(
-            `[claude-extractor] chunk ${i + 1} fallback failed: ${fallbackErr?.message ?? fallbackErr}`
+            `[claude-extractor] ${chunkLabel} fallback failed: ${fallbackErr?.message ?? fallbackErr}`
           )
         }
       }
@@ -327,9 +337,12 @@ export async function extractWithClaudeChunked(
     }
   }
 
+  const deduped = dedupeProducts(allProducts)
+  console.log(`[claude-extractor] chunked complete — raw_rows=${allProducts.length} deduped_rows=${deduped.length} successful=${successfulChunks} failed=${failedChunks} truncated_chunks=${truncatedChunks} input_tokens=${inputTokens} output_tokens=${outputTokens}`)
+
   return {
     document: doc ?? defaultDocumentFor(docType),
-    products: dedupeProducts(allProducts),
+    products: deduped,
     model,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
