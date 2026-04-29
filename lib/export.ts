@@ -1215,14 +1215,14 @@ export async function parseImportFileDetailed(file: File): Promise<{ rows: Recor
       let res: Response
       const importPath = `imports/${Date.now()}-${file.name.replace(/[^\w.\-()]/g, '_')}`
       const { error: uploadErr } = await supabase.storage
-        .from('product-images')
+        .from('documents')
         .upload(importPath, file, {
           upsert: true,
           contentType: file.type || 'application/pdf',
         })
 
       if (!uploadErr) {
-        const { data: pub } = supabase.storage.from('product-images').getPublicUrl(importPath)
+        const { data: pub } = supabase.storage.from('documents').getPublicUrl(importPath)
         const blobUrl = pub.publicUrl
         res = await fetch('/api/ocr-extract', {
           method: 'POST',
