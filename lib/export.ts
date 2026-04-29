@@ -6,6 +6,7 @@ import type { ImportMeta } from './types'
 import { parseCsvRows } from './csv-parse'
 import { formatDateTime } from './utils'
 import { extractStageSectionHeader, isGoodsLeftHeader, makeStageSectionSku, makeStageTotalSku, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX } from './sections'
+import { supabase } from './supabase'
 
 /** Browser console + optional prod: set NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT=1 */
 function importDebug(): boolean {
@@ -1209,23 +1210,35 @@ export async function parseImportFileDetailed(file: File): Promise<{ rows: Recor
   })
   if (isPdf) {
     try {
-      // Upload via Vercel Blob first to avoid the 4.5 MB serverless body limit.
-      // Fall back to direct FormData upload when the blob route is unavailable (e.g. local dev
-      // without BLOB_READ_WRITE_TOKEN configured).
+      // Upload directly to Supabase Storage from the browser so large PDFs do not
+      // pass through a serverless request body (prevents Vercel 413 errors).
       let res: Response
-      const blobFd = new FormData()
-      blobFd.append('file', file)
-      const blobUpload = await fetch('/api/upload-blob', { method: 'POST', body: blobFd }).catch(() => null)
+      const importPath = `imports/${Date.now()}-${file.name.replace(/[^\w.\-()]/g, '_')}`
+      const { error: uploadErr } = await supabase.storage
+        .from('product-images')
+        .upload(importPath, file, {
+          upsert: true,
+          contentType: file.type || 'application/pdf',
+        })
 
-      if (blobUpload?.ok) {
-        const { url: blobUrl } = await blobUpload.json()
+      if (!uploadErr) {
+        const { data: pub } = supabase.storage.from('product-images').getPublicUrl(importPath)
+        const blobUrl = pub.publicUrl
         res = await fetch('/api/ocr-extract', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ blob_url: blobUrl, file_name: file.name, skip_insert: true }),
         })
       } else {
-        // Fallback: direct upload (works locally and for small files on Vercel)
+        // Fallback: direct upload only for small files.
+        // Large files should fail fast with a clear message instead of hitting Vercel 413.
+        const fourMb = 4.0 * 1024 * 1024
+        if (file.size > fourMb) {
+          throw new Error(
+            `PDF is too large for direct upload fallback (${Math.round(file.size / (1024 * 1024))}MB). ` +
+            `Storage upload failed: ${uploadErr.message}`
+          )
+        }
         const fd = new FormData()
         fd.append('file', file)
         fd.append('skip_insert', 'true')
