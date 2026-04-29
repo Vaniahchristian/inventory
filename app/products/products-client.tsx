@@ -27,13 +27,14 @@ import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importP
 import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
 import { stockStatus } from '@/lib/utils'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE, STAGE_TOTAL_MARKER_PREFIX, parseSectionMarkerTitle } from '@/lib/sections'
-import type { Product, Category, Supplier, ImportMeta } from '@/lib/types'
+import type { Product, Category, Supplier, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
 type Props = {
   products: Product[]
   categories: Category[]
   suppliers: Supplier[]
   importMeta: ImportMeta | null
+  productDocuments: ProductDocumentRef[]
 }
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
@@ -60,25 +61,36 @@ function parseStageTotalValues(text: string) {
   }
 }
 
-export function ProductsClient({ products, categories, suppliers, importMeta }: Props) {
+export function ProductsClient({ products, categories, suppliers, importMeta, productDocuments }: Props) {
   const [editing, setEditing] = useState<Product | null>(null)
   const [adding, setAdding] = useState(false)
   const [isPending, startTransition] = useTransition()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [query, setQuery] = useState('')
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
   const realProducts = useMemo(() => products.filter(p => !isSectionDividerProduct(p)), [products])
   const filtered = useMemo(() => {
-    if (!query.trim()) return products
+    const queryTrimmed = query.trim().toLowerCase()
     const q = query.toLowerCase()
-    return products.filter(p =>
-      isSectionDividerProduct(p) ||
-      p.name?.toLowerCase().includes(q) ||
-      p.sku?.toLowerCase().includes(q) ||
-      p.shop_name?.toLowerCase().includes(q) ||
-      p.description?.toLowerCase().includes(q),
-    )
-  }, [products, query])
+    return products.filter(p => {
+      const passesDoc =
+        selectedDocumentId === 'all' ||
+        p.source_document_id === selectedDocumentId ||
+        isSectionDividerProduct(p)
+      if (!passesDoc) return false
+      if (!queryTrimmed) return true
+      return (
+        isSectionDividerProduct(p) ||
+        p.name?.toLowerCase().includes(q) ||
+        p.sku?.toLowerCase().includes(q) ||
+        p.shop_name?.toLowerCase().includes(q) ||
+        p.description?.toLowerCase().includes(q) ||
+        p.order_no?.toLowerCase().includes(q) ||
+        p.customer_no?.toLowerCase().includes(q)
+      )
+    })
+  }, [products, query, selectedDocumentId])
   const filteredDataRows = useMemo(() => filtered.filter(p => !isSectionDividerProduct(p)), [filtered])
 
   async function handleMarkOutOfStock(id: string, name: string | null) {
@@ -198,6 +210,19 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
               className="pl-8 h-8 text-sm w-56"
             />
           </div>
+          <Select value={selectedDocumentId} onValueChange={(value) => setSelectedDocumentId(value ?? 'all')}>
+            <SelectTrigger className="h-8 text-xs w-[260px]">
+              <SelectValue placeholder="All PDFs / documents" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All PDFs / documents</SelectItem>
+              {productDocuments.map(doc => (
+                <SelectItem key={doc.id} value={doc.id}>
+                  {(doc.source_file_name ?? doc.id).slice(0, 70)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <input
             ref={fileInputRef}
             type="file"
@@ -253,12 +278,18 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
               <TableHead className="w-28">SKU / MARKS</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Description</TableHead>
+              <TableHead>Order No</TableHead>
+              <TableHead>CUS No</TableHead>
+              <TableHead>Item No</TableHead>
               <TableHead>Shop / Supplier</TableHead>
               <TableHead>Packing</TableHead>
               <TableHead className="text-right">CTN</TableHead>
               <TableHead className="text-right">Qty</TableHead>
               <TableHead className="text-right">U.CBM</TableHead>
               <TableHead className="text-right">T.CBM</TableHead>
+              <TableHead className="text-right">L</TableHead>
+              <TableHead className="text-right">W</TableHead>
+              <TableHead className="text-right">H</TableHead>
               <TableHead className="text-right">U.Weight</TableHead>
               <TableHead className="text-right">T.Weight</TableHead>
               <TableHead className="text-right">Unit Price</TableHead>
@@ -270,7 +301,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={16} className="text-center text-slate-400 py-10">
+                <TableCell colSpan={22} className="text-center text-slate-400 py-10">
                   No products found.
                 </TableCell>
               </TableRow>
@@ -283,22 +314,19 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                     const tv = parseStageTotalValues(markerTitle)
                     return (
                       <TableRow key={p.id} className="bg-amber-100 hover:bg-amber-100 font-semibold border-t-2 border-amber-400">
-                        <TableCell colSpan={6} />
-                        <TableCell className="text-right text-slate-800">{tv.cartons != null ? `${tv.cartons} CTNS` : ''}</TableCell>
-                        <TableCell />
-                        <TableCell />
-                        <TableCell className="text-right text-slate-800">{tv.cbm != null ? `${tv.cbm.toFixed(3)} CBM` : ''}</TableCell>
-                        <TableCell />
-                        <TableCell className="text-right text-slate-800">{tv.weight != null ? `${tv.weight.toFixed(1)} KGS` : ''}</TableCell>
-                        <TableCell />
-                        <TableCell className="text-right text-slate-800">{tv.amount != null ? `¥${fmt(tv.amount, 0)}` : ''}</TableCell>
-                        <TableCell colSpan={2} />
+                        <TableCell colSpan={22} className="text-center text-slate-800">
+                          Stage Total
+                          {tv.cartons != null ? ` | ${tv.cartons} CTNS` : ''}
+                          {tv.cbm != null ? ` | ${tv.cbm.toFixed(3)} CBM` : ''}
+                          {tv.weight != null ? ` | ${tv.weight.toFixed(1)} KGS` : ''}
+                          {tv.amount != null ? ` | ¥${fmt(tv.amount, 0)}` : ''}
+                        </TableCell>
                       </TableRow>
                     )
                   }
                   return (
                     <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
-                      <TableCell colSpan={16} className="text-center py-2 tracking-wide font-semibold text-slate-800">
+                      <TableCell colSpan={22} className="text-center py-2 tracking-wide font-semibold text-slate-800">
                         {markerTitle ?? REPACKAGED_SECTION_TITLE}
                       </TableCell>
                     </TableRow>
@@ -323,6 +351,9 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                     <TableCell className="font-mono whitespace-nowrap">{p.sku ?? '-'}</TableCell>
                     <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
                     <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
+                    <TableCell className="whitespace-nowrap">{p.order_no ?? '-'}</TableCell>
+                    <TableCell className="whitespace-nowrap">{p.customer_no ?? '-'}</TableCell>
+                    <TableCell className="whitespace-nowrap">{p.source_item_no ?? '-'}</TableCell>
                     <TableCell className="max-w-[120px] truncate">{p.shop_name ?? p.suppliers?.name ?? '-'}</TableCell>
                     <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
                     <TableCell className="text-right">
@@ -349,6 +380,9 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
                     <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
                     <TableCell className="text-right">{p.unit_cbm != null ? p.unit_cbm.toFixed(3) : '-'}</TableCell>
                     <TableCell className="text-right">{p.cbm != null ? p.cbm.toFixed(3) : '-'}</TableCell>
+                    <TableCell className="text-right">{p.dim_l_cm != null ? Number(p.dim_l_cm).toFixed(1) : '-'}</TableCell>
+                    <TableCell className="text-right">{p.dim_w_cm != null ? Number(p.dim_w_cm).toFixed(1) : '-'}</TableCell>
+                    <TableCell className="text-right">{p.dim_h_cm != null ? Number(p.dim_h_cm).toFixed(1) : '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.unit_weight ?? '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.total_weight ?? '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">
@@ -395,30 +429,9 @@ export function ProductsClient({ products, categories, suppliers, importMeta }: 
             )}
             {filteredDataRows.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
-                <TableCell />
-                <TableCell />
-                <TableCell />
-                <TableCell />
-                <TableCell />
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`${fmt(totals.cartons, 0)} CTNS`}
+                <TableCell colSpan={22} className="text-right text-slate-900">
+                  {`TOTALS: ${fmt(totals.cartons, 0)} CTNS | ${fmt(totals.cbm, 4)} CBM | ${fmt(totals.weight, 1)} KGS | ¥${fmt(totals.amount, 0)}`}
                 </TableCell>
-                <TableCell />
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`${fmt(totals.cbm, 4)} CBM`}
-                </TableCell>
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`${fmt(totals.weight, 1)} KGS`}
-                </TableCell>
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`¥${fmt(totals.amount, 0)}`}
-                </TableCell>
-                <TableCell />
-                <TableCell />
               </TableRow>
             )}
           </TableBody>

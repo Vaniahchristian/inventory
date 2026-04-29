@@ -389,6 +389,20 @@ export async function getReviewDocuments() {
   return data ?? []
 }
 
+export async function getProductDocuments() {
+  const { data, error } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('documents')
+        .select('id, source_file_name, document_type, created_at')
+        .order('created_at', { ascending: false })
+        .limit(300),
+    'getProductDocuments'
+  )
+  if (error) throw new Error(error.message)
+  return data ?? []
+}
+
 export async function approveDocumentReview(id: string) {
   const { error } = await withSupabaseRetry(
     () =>

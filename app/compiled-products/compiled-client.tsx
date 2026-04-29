@@ -23,7 +23,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { updateProduct, deleteProduct, adjustProductCartons } from '@/app/actions/products'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
-import type { Product, ImportMeta, Category, Supplier } from '@/lib/types'
+import type { Product, ImportMeta, Category, Supplier, ProductDocumentRef } from '@/lib/types'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
 
@@ -32,6 +32,7 @@ type Props = {
   importMeta: ImportMeta | null
   categories: Category[]
   suppliers: Supplier[]
+  productDocuments: ProductDocumentRef[]
 }
 
 type CompiledRow = Product & { _variants: number; _rowNo: number }
@@ -171,8 +172,9 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-export function CompiledProductsClient({ products, importMeta, categories, suppliers }: Props) {
+export function CompiledProductsClient({ products, importMeta, categories, suppliers, productDocuments }: Props) {
   const [query, setQuery] = useState('')
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
   const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
   const [editing, setEditing] = useState<Product | null>(null)
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
@@ -181,6 +183,13 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf'>('excel')
   const [selectedFields, setSelectedFields] = useState<Set<FieldKey>>(
     () => new Set(EXPORT_FIELDS.filter(f => f.defaultOn).map(f => f.key))
+  )
+
+  const visibleProducts = useMemo(
+    () => products.filter(
+      p => selectedDocumentId === 'all' || isSectionDividerProduct(p) || p.source_document_id === selectedDocumentId
+    ),
+    [products, selectedDocumentId]
   )
 
   const compiledRows = useMemo<CompiledRow[]>(() => {
@@ -216,20 +225,20 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
       return { data, nextRowNo: rowNo }
     }
 
-    const dividerIdx = products.findIndex(p => isSectionDividerProduct(p))
-    const normalSource = (dividerIdx >= 0 ? products.slice(0, dividerIdx) : products).filter(p => !isSectionDividerProduct(p))
-    const repackedSource = dividerIdx >= 0 ? products.slice(dividerIdx + 1).filter(p => !isSectionDividerProduct(p)) : []
+    const dividerIdx = visibleProducts.findIndex(p => isSectionDividerProduct(p))
+    const normalSource = (dividerIdx >= 0 ? visibleProducts.slice(0, dividerIdx) : visibleProducts).filter(p => !isSectionDividerProduct(p))
+    const repackedSource = dividerIdx >= 0 ? visibleProducts.slice(dividerIdx + 1).filter(p => !isSectionDividerProduct(p)) : []
 
     const normal = compileSection(normalSource, 1)
     const repacked = compileSection(repackedSource, normal.nextRowNo)
     return [...normal.data, ...repacked.data]
-  }, [products])
+  }, [visibleProducts])
 
   const compiled = useMemo<CompiledDisplayRow[]>(() => {
-    const dividerIdx = products.findIndex(p => isSectionDividerProduct(p))
+    const dividerIdx = visibleProducts.findIndex(p => isSectionDividerProduct(p))
     if (dividerIdx < 0) return compiledRows
 
-    const normalSourceCount = products.slice(0, dividerIdx).filter(p => !isSectionDividerProduct(p)).length
+    const normalSourceCount = visibleProducts.slice(0, dividerIdx).filter(p => !isSectionDividerProduct(p)).length
     const normalCount = Math.min(normalSourceCount, compiledRows.length)
     const normal = compiledRows.slice(0, normalCount)
     const repacked = compiledRows.slice(normalCount)
@@ -240,7 +249,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
       { _isDivider: true, id: 'compiled-repackaged-divider', title: REPACKAGED_SECTION_TITLE },
       ...repacked,
     ]
-  }, [compiledRows, products])
+  }, [compiledRows, visibleProducts])
 
   const filtered = useMemo(() => {
     if (!query.trim()) return compiled
@@ -329,7 +338,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Compiled Products</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            {compiledRows.length} unique items (from {products.filter(p => !isSectionDividerProduct(p)).length} total)
+            {compiledRows.length} unique items (from {visibleProducts.filter(p => !isSectionDividerProduct(p)).length} total)
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -342,6 +351,19 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
               className="pl-8 h-8 text-sm w-56"
             />
           </div>
+          <Select value={selectedDocumentId} onValueChange={(value) => setSelectedDocumentId(value ?? 'all')}>
+            <SelectTrigger className="h-8 text-xs w-[260px]">
+              <SelectValue placeholder="All PDFs / documents" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All PDFs / documents</SelectItem>
+              {productDocuments.map(doc => (
+                <SelectItem key={doc.id} value={doc.id}>
+                  {(doc.source_file_name ?? doc.id).slice(0, 70)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <DropdownMenu>
             <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-8 gap-1.5" />}>
               <Download className="h-3.5 w-3.5" /> Export
@@ -380,12 +402,18 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
               <TableHead className="w-10 px-2" />
               <TableHead>Name</TableHead>
               <TableHead>Description</TableHead>
+              <TableHead>Order No</TableHead>
+              <TableHead>CUS No</TableHead>
+              <TableHead>Item No</TableHead>
               <TableHead>Shop</TableHead>
               <TableHead>Packing</TableHead>
               <TableHead className="text-right">CTN</TableHead>
               <TableHead className="text-right">Qty</TableHead>
               <TableHead className="text-right">U.CBM</TableHead>
               <TableHead className="text-right">T.CBM</TableHead>
+              <TableHead className="text-right">L</TableHead>
+              <TableHead className="text-right">W</TableHead>
+              <TableHead className="text-right">H</TableHead>
               <TableHead className="text-right">U.Weight</TableHead>
               <TableHead className="text-right">T.Weight</TableHead>
               <TableHead className="text-right">Unit Price</TableHead>
@@ -397,7 +425,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={16} className="text-center text-slate-400 py-10">
+                <TableCell colSpan={22} className="text-center text-slate-400 py-10">
                   No products found.
                 </TableCell>
               </TableRow>
@@ -406,7 +434,7 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
                 if ('_isDivider' in p) {
                   return (
                     <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
-                      <TableCell colSpan={16} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
+                      <TableCell colSpan={22} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
                         {p.title}
                       </TableCell>
                     </TableRow>
@@ -433,6 +461,9 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
                     </TableCell>
                     <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
                     <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
+                    <TableCell className="whitespace-nowrap">{p.order_no ?? '-'}</TableCell>
+                    <TableCell className="whitespace-nowrap">{p.customer_no ?? '-'}</TableCell>
+                    <TableCell className="whitespace-nowrap">{p.source_item_no ?? '-'}</TableCell>
                     <TableCell className="max-w-[100px] truncate">{p.shop_name ?? '-'}</TableCell>
                     <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
                     <TableCell className="text-right">
@@ -459,6 +490,9 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
                     <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
                     <TableCell className="text-right">{p.unit_cbm != null ? Number(p.unit_cbm).toFixed(3) : '-'}</TableCell>
                     <TableCell className="text-right">{p.cbm != null ? Number(p.cbm).toFixed(4) : '-'}</TableCell>
+                    <TableCell className="text-right">{p.dim_l_cm != null ? Number(p.dim_l_cm).toFixed(1) : '-'}</TableCell>
+                    <TableCell className="text-right">{p.dim_w_cm != null ? Number(p.dim_w_cm).toFixed(1) : '-'}</TableCell>
+                    <TableCell className="text-right">{p.dim_h_cm != null ? Number(p.dim_h_cm).toFixed(1) : '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.unit_weight ?? '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.total_weight ?? '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">
@@ -505,24 +539,9 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
 
             {filteredDataRows.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
-                <TableCell /><TableCell /><TableCell /><TableCell /><TableCell /><TableCell /><TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`${fmt(totals.cartons, 0)} CTNS`}
+                <TableCell colSpan={22} className="text-right text-slate-900">
+                  {`TOTALS: ${fmt(totals.cartons, 0)} CTNS | ${fmt(totals.cbm, 4)} CBM | ${fmt(totals.weight, 1)} KGS | ¥${fmt(totals.amount, 0)}`}
                 </TableCell>
-                <TableCell />
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`${fmt(totals.cbm, 4)} CBM`}
-                </TableCell>
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`${fmt(totals.weight, 1)} KGS`}
-                </TableCell>
-                <TableCell />
-                <TableCell className="text-right text-slate-900">
-                  {`¥${fmt(totals.amount, 0)}`}
-                </TableCell>
-                <TableCell /><TableCell />
               </TableRow>
             )}
           </TableBody>

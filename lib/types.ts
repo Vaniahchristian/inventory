@@ -19,6 +19,7 @@ export type Product = {
   id: string
   name: string | null
   sku: string | null
+  source_item_no?: string | null
   description: string | null
   category_id: string | null
   supplier_id: string | null
@@ -36,10 +37,32 @@ export type Product = {
   total_weight: string | null
   total_amount_rmb: number | null
   shop_name: string | null
+  source_document_id?: string | null
+  source_document_item_id?: string | null
+  barcode?: string | null
+  code?: string | null
+  warehouse?: string | null
+  remarks?: string | null
+  photo?: string | null
+  photo2?: string | null
+  dim_l_cm?: number | null
+  dim_w_cm?: number | null
+  dim_h_cm?: number | null
+  order_no?: string | null
+  customer_no?: string | null
+  delivery_address?: string | null
+  document_date?: string | null
   created_at: string
   updated_at: string
   categories?: Category | null
   suppliers?: Supplier | null
+}
+
+export type ProductDocumentRef = {
+  id: string
+  source_file_name: string | null
+  document_type: 'sales_order' | 'container_manifest'
+  created_at: string
 }
 
 export type ImportMeta = {
