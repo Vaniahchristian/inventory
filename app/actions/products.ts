@@ -69,6 +69,7 @@ type ImportValidationFlag =
 
 type MappedRow = {
   sku: string | null
+  source_item_no?: string | null
   name: string | null
   description: string | null
   shop_name: string | null
@@ -80,8 +81,21 @@ type MappedRow = {
   cbm: number | null
   unit_weight: string | null
   total_weight: string | null
+  dim_l_cm?: number | null
+  dim_w_cm?: number | null
+  dim_h_cm?: number | null
   cost_price: number
   total_amount_rmb: number | null
+  warehouse?: string | null
+  remarks?: string | null
+  barcode?: string | null
+  code?: string | null
+  photo?: string | null
+  photo2?: string | null
+  order_no?: string | null
+  customer_no?: string | null
+  delivery_address?: string | null
+  document_date?: string | null
   selling_price: number
   reorder_level: number
 }
@@ -106,14 +120,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function computeValidationFlags(row: MappedRow): ImportValidationFlag[] {
+function computeValidationFlags(
+  row: MappedRow,
+  options: { requirePacking?: boolean } = {}
+): ImportValidationFlag[] {
   const flags: ImportValidationFlag[] = []
+  const requirePacking = options.requirePacking ?? true
   const cartons = row.cartons ?? 0
   const qty = row.quantity
   const price = row.cost_price
   const amount = row.total_amount_rmb ?? 0
   if (!row.name) flags.push('missing_name')
-  if (!row.packing) flags.push('missing_packing')
+  if (requirePacking && !row.packing) flags.push('missing_packing')
   if (qty > 0 && cartons <= 0) flags.push('qty_without_cartons')
   if (cartons > 0 && qty <= 0) flags.push('cartons_without_qty')
   if (price <= 0 && amount > 0) flags.push('price_missing_but_amount_present')
@@ -127,7 +145,10 @@ function computeValidationFlags(row: MappedRow): ImportValidationFlag[] {
   return flags
 }
 
-function summarizeValidation(mapped: MappedRow[]): ValidationSummary {
+function summarizeValidation(
+  mapped: MappedRow[],
+  options: { requirePacking?: boolean } = {}
+): ValidationSummary {
   const flagCounts: Record<string, number> = {}
   const dataRows = mapped.filter(
     row =>
@@ -138,7 +159,7 @@ function summarizeValidation(mapped: MappedRow[]): ValidationSummary {
   let flaggedRows = 0
   let criticalRows = 0
   for (const row of dataRows) {
-    const flags = computeValidationFlags(row)
+    const flags = computeValidationFlags(row, options)
     if (flags.length > 0) flaggedRows++
     const critical = flags.some(f => f === 'missing_name' || f === 'missing_packing' || f === 'amount_mismatch')
     if (critical) criticalRows++
@@ -541,6 +562,29 @@ function extractClientId(clientDetails: string | null | undefined): string | nul
   return token ?? null
 }
 
+function extractSalesOrderContext(rawRows: Record<string, unknown>[]): {
+  orderNo: string | null
+  customerNo: string | null
+  deliveryAddress: string | null
+  documentDate: string | null
+} {
+  const pick = (...keys: string[]) => {
+    for (const row of rawRows) {
+      for (const key of keys) {
+        const value = str(row[key])
+        if (value) return value
+      }
+    }
+    return ''
+  }
+  return {
+    orderNo: pick('ORD NO.', 'order_no') || null,
+    customerNo: pick('CUS NO.', 'customer_no') || null,
+    deliveryAddress: pick('送货地址', 'DELIVERY ADDRESS', 'delivery_address') || null,
+    documentDate: normalizeDate(pick('DATE', 'date')),
+  }
+}
+
 async function saveNormalizedDocument(payload: {
   mapped: MappedRow[]
   rawRows: Record<string, unknown>[]
@@ -556,12 +600,15 @@ async function saveNormalizedDocument(payload: {
 }): Promise<{ documentId: string | null; itemIdsByLine: string[] }> {
   const sourceFileName = payload.importMeta?.source_file_name ?? null
   const documentType = payload.importMeta?.document_type ?? inferDocumentType(sourceFileName)
+  const salesOrderContext = documentType === 'sales_order'
+    ? extractSalesOrderContext(payload.rawRows)
+    : null
   const docNumber = extractDocNumber(sourceFileName, payload.importMeta?.client_details)
   const clientDetails = payload.importMeta?.client_details ?? null
   const documentDate =
     payload.importMeta?.payment_date && /^\d{2}\/\d{2}\/\d{4}$/.test(payload.importMeta.payment_date)
       ? payload.importMeta.payment_date.split('/').reverse().join('-')
-      : null
+      : (salesOrderContext?.documentDate ?? null)
 
   const itemRows = payload.mapped
     .map((row, idx) => ({ row, idx }))
@@ -579,10 +626,11 @@ async function saveNormalizedDocument(payload: {
           .insert({
             document_type: documentType,
             source_file_name: sourceFileName ?? 'unknown',
-            doc_number: docNumber,
-            client_id: extractClientId(clientDetails),
+            doc_number: salesOrderContext?.orderNo ?? docNumber,
+            client_id: salesOrderContext?.customerNo ?? extractClientId(clientDetails),
             client_name: clientDetails,
             document_date: documentDate,
+            delivery_address: salesOrderContext?.deliveryAddress ?? null,
             container_no: payload.importMeta?.container_no ?? null,
             extraction_status: payload.validationSummary.shouldReview || !payload.totalsMatch ? 'review_needed' : 'approved',
             extraction_confidence: payload.validationSummary.qualityScore,
@@ -615,6 +663,7 @@ async function saveNormalizedDocument(payload: {
         document_id: document.id,
         line_no: idx + 1,
         item_code: row.sku,
+        source_item_no: row.source_item_no ?? null,
         description: row.description ?? row.name,
         shop: row.shop_name,
         packaging: row.packing,
@@ -627,8 +676,19 @@ async function saveNormalizedDocument(payload: {
         total_cbm: row.cbm,
         unit_weight_kg: numOrNull(row.unit_weight),
         total_weight_kg: numOrNull(row.total_weight),
+        dim_l_cm: row.dim_l_cm ?? null,
+        dim_w_cm: row.dim_w_cm ?? null,
+        dim_h_cm: row.dim_h_cm ?? null,
+        warehouse: row.warehouse ?? null,
+        barcode: row.barcode ?? null,
+        remarks: row.remarks ?? null,
+        code: row.code ?? null,
+        photo: row.photo ?? null,
+        photo2: row.photo2 ?? null,
         extraction_confidence: 85,
-        validation_flags: computeValidationFlags(row),
+        validation_flags: computeValidationFlags(row, {
+          requirePacking: payload.importMeta?.document_type !== 'sales_order',
+        }),
       }
     })
 
@@ -741,6 +801,18 @@ function str(v: unknown): string {
   return String(v ?? '').trim()
 }
 
+function normalizeDate(v: unknown): string | null {
+  const s = str(v)
+  if (!s) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s.split('/').reverse().join('-')
+  if (/^\d{2}-\d{2}-\d{4}$/.test(s)) {
+    const [d, m, y] = s.split('-')
+    return `${y}-${m}-${d}`
+  }
+  return null
+}
+
 function num(v: unknown): number {
   return parseFloat(str(v).replace(/[^\d.-]/g, '')) || 0
 }
@@ -771,7 +843,7 @@ function isValidMarks(raw: string): boolean {
   if (first.length < 3) return false
   if (/\s/.test(first)) return false
   if (/[¥￥]/.test(first)) return false
-  if (/[\\/]/.test(first)) return false
+  if (/\\/.test(first)) return false
   const upper = first.toUpperCase()
   return !(
     upper.includes('MARKS') ||
@@ -795,10 +867,20 @@ function isValidMarks(raw: string): boolean {
 
 export async function importProducts(rows: Record<string, unknown>[], importMeta?: ImportMeta | null) {
   const allKeys = new Set(rows.flatMap(r => Object.keys(r)))
-  const isPackingList =
+  const requestedDocType = importMeta?.document_type ?? null
+  const isSalesOrderDoc = requestedDocType === 'sales_order'
+  const hasPackingListKeys =
     allKeys.has('MARKS') || allKeys.has('T.QTY') || allKeys.has('U.PRICE (RMB)')
+  const isPackingList = !isSalesOrderDoc && hasPackingListKeys
 
-  logImport('importProducts: incoming rows=', rows.length, 'isPackingList=', isPackingList)
+  logImport(
+    'importProducts: incoming rows=',
+    rows.length,
+    'isPackingList=',
+    isPackingList,
+    'isSalesOrderDoc=',
+    isSalesOrderDoc
+  )
   logImport(
     'column keys (sample):',
     [...allKeys].filter(k => !k.startsWith('__col')).slice(0, 24),
@@ -809,7 +891,7 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
     logImport('first raw row keys:', Object.keys(rows[0]), 'MARKS=', String(rows[0].MARKS ?? '').slice(0, 40))
   }
 
-  let skippedInvalidMarks = 0
+  let retainedInvalidMarks = 0
   let llmAttempts = 0
   let llmApplied = 0
   const aiMode = (process.env.AI_IMPORT_MODE ?? 'hybrid').toLowerCase() // hybrid | full
@@ -830,33 +912,36 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       const rawSku = str(r['MARKS'] ?? '')
 
       // Preserve section headers from packing list so UI can render dividers.
+      // If the section marker text is malformed, treat it like a normal row
+      // instead of dropping it.
       if (rawSku.startsWith(STAGE_SECTION_MARKER_PREFIX) || rawSku.startsWith(STAGE_TOTAL_MARKER_PREFIX)) {
         const title = rawSku.startsWith(STAGE_SECTION_MARKER_PREFIX)
           ? rawSku.slice(STAGE_SECTION_MARKER_PREFIX.length)
           : rawSku.slice(STAGE_TOTAL_MARKER_PREFIX.length)
-        if (rawSku.startsWith(STAGE_SECTION_MARKER_PREFIX) && !isValidStageSectionTitle(title)) {
-          logImport('skip malformed stage marker:', title.slice(0, 160))
+        const malformedSectionMarker =
+          rawSku.startsWith(STAGE_SECTION_MARKER_PREFIX) && !isValidStageSectionTitle(title)
+        if (!malformedSectionMarker) {
+          mapped.push({
+            sku: rawSku,
+            name: title,
+            description: null,
+            shop_name: null,
+            unit: 'pcs',
+            packing: null,
+            cartons: 0,
+            quantity: 0,
+            unit_cbm: null,
+            cbm: null,
+            unit_weight: null,
+            total_weight: null,
+            cost_price: 0,
+            total_amount_rmb: null,
+            selling_price: 0,
+            reorder_level: 0,
+          })
           continue
         }
-        mapped.push({
-          sku: rawSku,
-          name: title,
-          description: null,
-          shop_name: null,
-          unit: 'pcs',
-          packing: null,
-          cartons: 0,
-          quantity: 0,
-          unit_cbm: null,
-          cbm: null,
-          unit_weight: null,
-          total_weight: null,
-          cost_price: 0,
-          total_amount_rmb: null,
-          selling_price: 0,
-          reorder_level: 0,
-        })
-        continue
+        logImport('malformed stage marker kept as data row:', title.slice(0, 160))
       }
 
       if (isGoodsLeftHeader(rawSku)) {
@@ -869,12 +954,13 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         break
       }
 
-      // Skip non-product rows: totals, payment lines, page headers, blank rows
+      // Keep all rows (except explicit goods-left / repackaged boundary rules).
+      // Invalid MARKS are retained and still mapped.
       if (!isValidMarks(rawSku)) {
-        skippedInvalidMarks++
+        // Retained for diagnostics only. We no longer drop these rows.
+        retainedInvalidMarks++
         if (invalidMarksSamples.length < 10)
           invalidMarksSamples.push(String(rawSku).replace(/\n/g, '\\n').slice(0, 120))
-        continue
       }
 
       const sku = rawSku.split('\n')[0].trim() || null
@@ -971,6 +1057,50 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
             },
           })
       }
+    } else if (isSalesOrderDoc) {
+      // Sales order mapper: same row-level keys may still come through MARKS/T.QTY style
+      // after OCR/LLM extraction, so do not force exported-file schema here.
+      const sku = str(r['MARKS'] ?? r['item_code'] ?? r['SKU'] ?? r['sku']) || null
+      const sourceItemNo = str(r['ITEM NO.'] ?? r['item_no'] ?? r['NO.'] ?? '') || null
+      const name = str(r['DESCRIPTION OF GOODS'] ?? r['description'] ?? r['name'] ?? r['Name']) || null
+      const packingFromText =
+        str(r['PACKING'] ?? '') ||
+        ((name ?? '').match(/\b\d+\s*(?:pcs|set|sets|dec)\s*\/\s*(?:ctn|box)\b/i)?.[0] ?? '') ||
+        null
+      const documentDateRaw = str(r['DATE'] ?? r['date'] ?? '')
+      const documentDate = normalizeDate(documentDateRaw)
+      mapped.push({
+        sku,
+        source_item_no: sourceItemNo,
+        name,
+        description: name,
+        shop_name: str(r['SHOP#'] ?? r['shop'] ?? '') || null,
+        unit: packingFromText ? parseUnit(packingFromText) : 'pcs',
+        packing: packingFromText,
+        cartons: intOrNull(r['T.CTN'] ?? r['CTN'] ?? r['total_cartons']),
+        quantity: intOrNull(r['T.QTY'] ?? r['QTY'] ?? r['total_qty'] ?? r['quantity']) ?? 0,
+        unit_cbm: numOrNull(r['UNIT CBM'] ?? r['unit_cbm']),
+        cbm: numOrNull(r['T.CBM'] ?? r['CBM'] ?? r['total_cbm']),
+        unit_weight: str(r['UNIT WEIGHT'] ?? r['unit_weight'] ?? '') || null,
+        total_weight: str(r['T.WEIGHT'] ?? r['total_weight'] ?? '') || null,
+        dim_l_cm: numOrNull(r['L'] ?? r['l'] ?? r['dim_l_cm']),
+        dim_w_cm: numOrNull(r['W'] ?? r['w'] ?? r['dim_w_cm']),
+        dim_h_cm: numOrNull(r['H'] ?? r['h'] ?? r['dim_h_cm']),
+        cost_price: num(r['U.PRICE (RMB)'] ?? r['U/P'] ?? r['unit_price_rmb'] ?? r['cost_price']),
+        total_amount_rmb: numOrNull(r['T.AMOUNT'] ?? r['AMOUNT'] ?? r['total_amount_rmb']),
+        warehouse: str(r['W.H.'] ?? r['warehouse'] ?? '') || null,
+        remarks: str(r['REK'] ?? r['remarks'] ?? '') || null,
+        barcode: str(r['CODE'] ?? r['barcode'] ?? '') || null,
+        code: str(r['CODE'] ?? r['code'] ?? '') || null,
+        photo: str(r['PHOTO'] ?? r['photo'] ?? '') || null,
+        photo2: str(r['PHOTO2'] ?? r['photo2'] ?? '') || null,
+        order_no: str(r['ORD NO.'] ?? r['order_no'] ?? '') || null,
+        customer_no: str(r['CUS NO.'] ?? r['customer_no'] ?? '') || null,
+        delivery_address: str(r['送货地址'] ?? r['delivery_address'] ?? '') || null,
+        document_date: documentDate,
+        selling_price: num(r['selling_price'] ?? r['Selling Price']),
+        reorder_level: intOrNull(r['reorder_level'] ?? r['Reorder Level']) ?? 0,
+      })
     } else {
       // Standard exported format (column names from our own Excel export)
       const name = str(r['name'] ?? r['Name']) || null
@@ -1084,8 +1214,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
     mapped.length,
     'llm attempts/applied:',
     `${llmAttempts}/${llmApplied}`,
-    'skipped (invalid MARKS):',
-    skippedInvalidMarks,
+    'retained (invalid MARKS):',
+    retainedInvalidMarks,
     invalidMarksSamples.length ? 'samples:' : '',
     invalidMarksSamples
   )
@@ -1133,7 +1263,7 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       (row.sku ?? '').startsWith(STAGE_TOTAL_MARKER_PREFIX) ||
       (row.sku ?? '') === REPACKAGED_SECTION_MARKER_SKU
     if (isMarker) continue
-    const flags = computeValidationFlags(row)
+    const flags = computeValidationFlags(row, { requirePacking: !isSalesOrderDoc })
     if (!flags.length) continue
     for (const f of flags) validationFlagCounts[f] = (validationFlagCounts[f] ?? 0) + 1
     if (validationSamples.length < 20) {
@@ -1152,7 +1282,7 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
     logImport('validation flag counts:', validationFlagCounts)
     logImport('validation samples (first 20):', validationSamples)
   }
-  const validationSummary = summarizeValidation(mapped)
+  const validationSummary = summarizeValidation(mapped, { requirePacking: !isSalesOrderDoc })
   logImport('validation summary:', validationSummary)
 
   const computedTotals = {
@@ -1171,7 +1301,13 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       }
     : null
 
-  const totalsMatch = !totalsDiff || (
+  const hasPdfTotals = !!importMeta && (
+    importMeta.total_carton != null ||
+    importMeta.total_cbm != null ||
+    importMeta.total_weight_kgs != null ||
+    importMeta.total_cost_rmb != null
+  )
+  const totalsMatch = hasPdfTotals && !!totalsDiff && (
     Math.abs(totalsDiff.cartons ?? 0) <= 0.5 &&
     Math.abs(totalsDiff.cbm ?? 0) <= 0.05 &&
     Math.abs(totalsDiff.weight ?? 0) <= 1 &&
@@ -1220,7 +1356,7 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         source_document_id: normalizedDoc.documentId,
         source_document_item_id: maybeItemId,
         extraction_confidence: validationSummary.qualityScore,
-        extraction_flags: computeValidationFlags(row),
+        extraction_flags: computeValidationFlags(row, { requirePacking: !isSalesOrderDoc }),
       }
     })
     const { error } = await withSupabaseRetry(
@@ -1233,7 +1369,21 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         error.message.includes('source_document_id') ||
         error.message.includes('source_document_item_id') ||
         error.message.includes('extraction_confidence') ||
-        error.message.includes('extraction_flags')
+        error.message.includes('extraction_flags') ||
+        error.message.includes('source_item_no') ||
+        error.message.includes('photo') ||
+        error.message.includes('photo2') ||
+        error.message.includes('code') ||
+        error.message.includes('warehouse') ||
+        error.message.includes('remarks') ||
+        error.message.includes('dim_l_cm') ||
+        error.message.includes('dim_w_cm') ||
+        error.message.includes('dim_h_cm') ||
+        error.message.includes('barcode') ||
+        error.message.includes('order_no') ||
+        error.message.includes('customer_no') ||
+        error.message.includes('delivery_address') ||
+        error.message.includes('document_date')
       ) {
         const fallbackChunk = mapped.slice(i, i + CHUNK)
         const { error: fallbackErr } = await withSupabaseRetry(

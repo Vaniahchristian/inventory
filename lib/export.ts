@@ -1223,8 +1223,28 @@ export async function parseImportFileDetailed(file: File): Promise<{ rows: Recor
         const data = await res.json()
         const ocrLines: string[] = Array.isArray(data?.lines) ? data.lines : []
         const ocrProducts = Array.isArray(data?.products) ? (data.products as Record<string, unknown>[]) : []
+
+        // Merge Claude's extracted footer totals and doc metadata into importMeta.
+        // extractImportMetaFromText only handles English container manifest labels; sales orders
+        // use a Chinese format ("TOTAL： 1587 36839…") that the regex misses entirely.
+        const claudeDoc = data?.document as Record<string, any> | null | undefined
+        if (claudeDoc) {
+          const ft = claudeDoc.footer_totals as Record<string, number | null> | null | undefined
+          if (ft) {
+            if (ft.total_cartons != null) importMeta.total_carton = ft.total_cartons
+            if (ft.total_cbm != null) importMeta.total_cbm = ft.total_cbm
+            if (ft.total_weight_kg != null) importMeta.total_weight_kgs = ft.total_weight_kg
+            if (ft.total_amount_rmb != null) importMeta.total_cost_rmb = ft.total_amount_rmb
+          }
+          if (!importMeta.client_details && claudeDoc.client_id) importMeta.client_details = String(claudeDoc.client_id)
+          if (!importMeta.container_no && claudeDoc.container_no) importMeta.container_no = String(claudeDoc.container_no)
+        }
+        if (data?.doc_type && !importMeta.document_type) {
+          importMeta.document_type = data.doc_type as 'sales_order' | 'container_manifest'
+        }
+
         if (ocrProducts.length > 0) {
-          rows = ocrProducts.map(p => ({
+          rows = ocrProducts.filter(p => ((p.section as string) ?? 'shipped') === 'shipped').map(p => ({
             MARKS: String(p.marks ?? p.item_code ?? ''),
             'SHOP#': String(p.shop ?? ''),
             'ITEM NO.': String(p.line_no ?? ''),

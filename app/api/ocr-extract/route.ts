@@ -3,7 +3,7 @@ import vision from '@google-cloud/vision'
 import path from 'path'
 import crypto from 'crypto'
 import { detectDocType } from '@/lib/prompts'
-import { extractWithClaude } from '@/lib/claude-extractor'
+import { extractWithClaudeChunked } from '@/lib/claude-extractor'
 import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
 
@@ -121,10 +121,11 @@ export async function POST(req: Request) {
     const docType = detectDocType(lines)
     console.log(`[route] doc_type: ${docType}`)
 
-    // Step 3: Single Claude call — full document, no per-row loops
-    console.log('[route] calling Claude...')
-    const extraction = await extractWithClaude(lines, docType)
+    // Step 3: Chunked Claude extraction to avoid max-token truncation.
+    console.log('[route] calling Claude (chunked)...')
+    const extraction = await extractWithClaudeChunked(lines, docType)
     console.log(`[route] extracted rows: ${extraction.products.length}`)
+    console.log('[route] chunking:', extraction.chunking)
 
     if (extraction.products.length === 0) {
       return NextResponse.json({ error: 'Claude extracted 0 rows' }, { status: 422 })
@@ -158,8 +159,13 @@ export async function POST(req: Request) {
         ocr_lines: lines.length,
         input_tokens: extraction.input_tokens,
         output_tokens: extraction.output_tokens,
+        chunk_count: extraction.chunking.chunk_count,
+        subchunk_count: extraction.chunking.subchunk_count,
+        failed_chunks: extraction.chunking.failed_chunks,
+        truncated_chunks: extraction.chunking.truncated_chunks,
         duration_ms: duration,
       },
+      chunking: extraction.chunking,
       products: extraction.products,
       document: extraction.document,
       lines,
