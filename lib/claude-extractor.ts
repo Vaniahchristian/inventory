@@ -1,0 +1,648 @@
+import Anthropic from '@anthropic-ai/sdk'
+import { DocType, getPromptForDocType } from './prompts'
+import { callLlm } from './llm-client'
+
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+})
+
+export interface ExtractedDocument {
+  doc_number: string | null
+  client_id: string | null
+  container_no: string | null
+  document_date?: string | null
+  document_type: DocType
+  footer_totals: {
+    total_cartons: number | null
+    total_cbm: number | null
+    total_weight_kg: number | null
+    total_amount_rmb: number | null
+    total_amount_usd: number | null
+    exchange_rate: number | null
+    goods_balance_usd: number | null
+    freight_usd: number | null
+    total_balance_usd: number | null
+  }
+  payments: Array<{
+    payment_date: string | null
+    amount_usd: number | null
+    payment_type: string
+  }>
+}
+
+export interface ExtractedProduct {
+  line_no: number | null
+  marks: string | null
+  shop: string | null
+  item_code: string | null
+  description: string | null
+  packaging: string | null
+  qty_per_carton: number | null
+  total_cartons: number | null
+  total_qty: number | null
+  unit_price_rmb: number | null
+  total_amount_rmb: number | null
+  dim_l_cm: number | null
+  dim_w_cm: number | null
+  dim_h_cm: number | null
+  unit_cbm: number | null
+  total_cbm: number | null
+  unit_weight_kg: number | null
+  total_weight_kg: number | null
+  barcode: string | null
+  warehouse: string | null
+  box_no_start: number | null
+  box_no_end: number | null
+  section: 'shipped' | 'left_in_warehouse' | 'repacked'
+  remarks: string | null
+}
+
+export interface ClaudeExtractionResult {
+  document: ExtractedDocument
+  products: ExtractedProduct[]
+  model: string
+  input_tokens: number
+  output_tokens: number
+  truncated: boolean
+}
+
+export interface ClaudeChunkingStats {
+  chunk_count: number
+  subchunk_count: number
+  successful_chunks: number
+  failed_chunks: number
+  truncated_chunks: number
+}
+
+/**
+ * Extract from raw file bytes — PDF or image — sent directly to Claude.
+ * Skips Google Vision OCR entirely; Claude reads the visual layout.
+ */
+export async function extractFromBuffer(
+  fileBuffer: Buffer,
+  mediaType: 'application/pdf' | 'image/png' | 'image/jpeg' | 'image/webp',
+  docType: DocType
+): Promise<ClaudeExtractionResult> {
+  const base64Data = fileBuffer.toString('base64')
+  const maxTokens = Math.max(4096, Number(process.env.CLAUDE_MAX_TOKENS ?? 32000))
+  const prompt = getVisualPromptForDocType(docType)
+
+  console.log(`[claude-extractor] visual mode — media_type: ${mediaType}`)
+  console.log(`[claude-extractor] file_bytes: ${fileBuffer.length}`)
+
+  const contentBlock = mediaType === 'application/pdf'
+    ? {
+        type: 'document' as const,
+        source: {
+          type: 'base64' as const,
+          media_type: 'application/pdf' as const,
+          data: base64Data,
+        },
+      }
+    : {
+        type: 'image' as const,
+        source: {
+          type: 'base64' as const,
+          media_type: mediaType as 'image/png' | 'image/jpeg' | 'image/webp',
+          data: base64Data,
+        },
+      }
+
+  const response = await anthropic.beta.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: maxTokens,
+    betas: ['pdfs-2024-09-25'],
+    messages: [
+      {
+        role: 'user',
+        content: [
+          contentBlock as any,
+          { type: 'text', text: prompt },
+        ],
+      },
+    ],
+  })
+
+  const rawContent = response.content[0].type === 'text' ? response.content[0].text : ''
+
+  console.log(`[claude-extractor] input_tokens: ${response.usage.input_tokens}`)
+  console.log(`[claude-extractor] output_tokens: ${response.usage.output_tokens}`)
+  console.log(`[claude-extractor] stop_reason: ${response.stop_reason}`)
+  console.log(`[claude-extractor] response_preview: ${rawContent.slice(0, 200)}`)
+
+  const truncated = response.stop_reason === 'max_tokens'
+  if (truncated) {
+    console.warn('[claude-extractor] WARNING: hit max_tokens — output may be incomplete')
+  }
+
+  const parsed = parseClaudeResponse(rawContent)
+
+  return {
+    document: parsed.document,
+    products: parsed.products,
+    model: response.model,
+    input_tokens: response.usage.input_tokens,
+    output_tokens: response.usage.output_tokens,
+    truncated,
+  }
+}
+
+/**
+ * Fallback: extract from OCR text lines (used when file-based extraction is unavailable).
+ */
+export async function extractWithClaude(
+  ocrLines: string[],
+  docType: DocType
+): Promise<ClaudeExtractionResult> {
+  const ocrText = ocrLines.join('\n')
+  const prompt = getPromptForDocType(docType, ocrText)
+  const maxTokens = Math.max(4096, Number(process.env.CLAUDE_MAX_TOKENS ?? 32000))
+
+  console.log(`[claude-extractor] text mode — doc_type: ${docType}`)
+  console.log(`[claude-extractor] ocr_lines: ${ocrLines.length}`)
+
+  const stream = anthropic.messages.stream({
+    model: 'claude-sonnet-4-6',
+    max_tokens: maxTokens,
+    messages: [{ role: 'user', content: prompt }],
+  })
+  const response = await stream.finalMessage()
+
+  const rawContent = response.content[0].type === 'text' ? response.content[0].text : ''
+
+  console.log(`[claude-extractor] input_tokens: ${response.usage.input_tokens}`)
+  console.log(`[claude-extractor] output_tokens: ${response.usage.output_tokens}`)
+  console.log(`[claude-extractor] stop_reason: ${response.stop_reason}`)
+
+  const truncated = response.stop_reason === 'max_tokens'
+  if (truncated) {
+    console.warn('[claude-extractor] WARNING: hit max_tokens — output may be incomplete')
+  }
+
+  const parsed = parseClaudeResponse(rawContent)
+
+  return {
+    document: parsed.document,
+    products: parsed.products,
+    model: response.model,
+    input_tokens: response.usage.input_tokens,
+    output_tokens: response.usage.output_tokens,
+    truncated,
+  }
+}
+
+export async function extractWithClaudeChunked(
+  ocrLines: string[],
+  docType: DocType
+): Promise<ClaudeExtractionResult & { chunking: ClaudeChunkingStats }> {
+  const chunks = buildRowAwareChunks(
+    ocrLines,
+    Math.max(10, Number(process.env.CLAUDE_CHUNK_TARGET_ROWS ?? 40)),
+    Math.max(200, Number(process.env.CLAUDE_CHUNK_MAX_LINES ?? 900))
+  )
+
+  if (chunks.length === 0) {
+    return {
+      document: defaultDocumentFor(docType),
+      products: [],
+      model: 'claude-sonnet-4-6',
+      input_tokens: 0,
+      output_tokens: 0,
+      truncated: false,
+      chunking: {
+        chunk_count: 0,
+        subchunk_count: 0,
+        successful_chunks: 0,
+        failed_chunks: 0,
+        truncated_chunks: 0,
+      },
+    }
+  }
+
+  const allProducts: ExtractedProduct[] = []
+  let doc: ExtractedDocument | null = null
+  let model = 'claude-sonnet-4-6'
+  let inputTokens = 0
+  let outputTokens = 0
+  let anyTruncated = false
+  let failedChunks = 0
+  let successfulChunks = 0
+  let truncatedChunks = 0
+  let subchunkCount = 0
+  let claudeUnavailableForRequest = false
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]
+    console.log(`[claude-extractor] chunk ${i + 1}/${chunks.length} lines=${chunk.length}`)
+    if (claudeUnavailableForRequest) {
+      try {
+        console.log(`[claude-extractor] chunk ${i + 1} using fallback-only path (Claude unavailable)`)
+        const fallback = await extractWithFallbackLlm(chunk, docType)
+        model = fallback.model
+        inputTokens += fallback.input_tokens
+        outputTokens += fallback.output_tokens
+        if (fallback.truncated) {
+          truncatedChunks++
+          anyTruncated = true
+        }
+        if (!doc) doc = fallback.document
+        allProducts.push(...fallback.products)
+        successfulChunks++
+        continue
+      } catch (fallbackErr: any) {
+        failedChunks++
+        console.warn(
+          `[claude-extractor] chunk ${i + 1} fallback-only path failed: ${fallbackErr?.message ?? fallbackErr}`
+        )
+        continue
+      }
+    }
+    try {
+      const result = await extractWithClaude(chunk, docType)
+      model = result.model
+      inputTokens += result.input_tokens
+      outputTokens += result.output_tokens
+      if (result.truncated) {
+        truncatedChunks++
+        anyTruncated = true
+      }
+      if (!doc) doc = result.document
+      allProducts.push(...result.products)
+      successfulChunks++
+
+      if (result.truncated && chunk.length >= 250) {
+        const subchunks = splitChunk(chunk)
+        if (subchunks.length > 1) {
+          subchunkCount += subchunks.length
+          console.log(`[claude-extractor] chunk ${i + 1} truncated, retrying ${subchunks.length} subchunks`)
+          for (const [j, sub] of subchunks.entries()) {
+            try {
+              const subResult = await extractWithClaude(sub, docType)
+              inputTokens += subResult.input_tokens
+              outputTokens += subResult.output_tokens
+              if (subResult.truncated) {
+                truncatedChunks++
+                anyTruncated = true
+              }
+              if (!doc) doc = subResult.document
+              allProducts.push(...subResult.products)
+              successfulChunks++
+              console.log(`[claude-extractor] subchunk ${i + 1}.${j + 1} rows=${subResult.products.length}`)
+            } catch (subErr: any) {
+              failedChunks++
+              console.warn(`[claude-extractor] subchunk ${i + 1}.${j + 1} failed: ${subErr?.message ?? subErr}`)
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      const msg = err?.message ?? String(err)
+      console.warn(`[claude-extractor] chunk ${i + 1} failed: ${msg}`)
+      if (isAnthropicBillingError(msg)) {
+        claudeUnavailableForRequest = true
+        console.warn('[claude-extractor] Anthropic billing/credit issue detected; switching remaining chunks to fallback-only')
+      }
+      if (shouldTryFallbackModel(msg)) {
+        try {
+          console.log(`[claude-extractor] chunk ${i + 1} trying fallback model...`)
+          const fallback = await extractWithFallbackLlm(chunk, docType)
+          model = fallback.model
+          inputTokens += fallback.input_tokens
+          outputTokens += fallback.output_tokens
+          if (fallback.truncated) {
+            truncatedChunks++
+            anyTruncated = true
+          }
+          if (!doc) doc = fallback.document
+          allProducts.push(...fallback.products)
+          successfulChunks++
+          continue
+        } catch (fallbackErr: any) {
+          console.warn(
+            `[claude-extractor] chunk ${i + 1} fallback failed: ${fallbackErr?.message ?? fallbackErr}`
+          )
+        }
+      }
+      failedChunks++
+    }
+  }
+
+  return {
+    document: doc ?? defaultDocumentFor(docType),
+    products: dedupeProducts(allProducts),
+    model,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    truncated: anyTruncated,
+    chunking: {
+      chunk_count: chunks.length,
+      subchunk_count: subchunkCount,
+      successful_chunks: successfulChunks,
+      failed_chunks: failedChunks,
+      truncated_chunks: truncatedChunks,
+    },
+  }
+}
+
+function shouldTryFallbackModel(message: string): boolean {
+  const m = message.toLowerCase()
+  return (
+    m.includes('credit balance is too low') ||
+    m.includes('insufficient') ||
+    m.includes('rate limit') ||
+    m.includes('429') ||
+    m.includes('timeout') ||
+    m.includes('timed out') ||
+    m.includes('fetch failed') ||
+    m.includes('network')
+  )
+}
+
+function isAnthropicBillingError(message: string): boolean {
+  const m = message.toLowerCase()
+  return (
+    m.includes('credit balance is too low') ||
+    m.includes('plans & billing') ||
+    m.includes('billing') ||
+    m.includes('insufficient credits')
+  )
+}
+
+async function extractWithFallbackLlm(
+  ocrLines: string[],
+  docType: DocType
+): Promise<ClaudeExtractionResult> {
+  const ocrText = ocrLines.join('\n')
+  const basePrompt = getPromptForDocType(docType, ocrText)
+  const strictPrompt =
+    `${basePrompt}\n\n` +
+    'IMPORTANT: Return ONLY a raw JSON object. No markdown fences, no commentary.'
+
+  const messages = [
+    { role: 'system' as const, content: 'You are a strict JSON extraction engine.' },
+    { role: 'user' as const, content: strictPrompt },
+  ]
+  const llm = await callLlm(messages, {
+    timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 30000),
+    retries: 2,
+  })
+  if (!llm?.content) {
+    const waitMs = Math.max(1000, Number(process.env.LLM_FALLBACK_RETRY_WAIT_MS ?? 25000))
+    console.log(`[claude-extractor] fallback providers unavailable, waiting ${waitMs}ms and retrying once`)
+    await new Promise(resolve => setTimeout(resolve, waitMs))
+    const retry = await callLlm(messages, {
+      timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 30000),
+      retries: 2,
+    })
+    if (!retry?.content) throw new Error('No fallback LLM response')
+    const parsedRetry = parseClaudeResponse(retry.content)
+    return {
+      document: parsedRetry.document,
+      products: parsedRetry.products,
+      model: retry.provider,
+      input_tokens: 0,
+      output_tokens: 0,
+      truncated: false,
+    }
+  }
+
+  const parsed = parseClaudeResponse(llm.content)
+  return {
+    document: parsed.document,
+    products: parsed.products,
+    model: llm.provider,
+    input_tokens: 0,
+    output_tokens: 0,
+    truncated: false,
+  }
+}
+
+function buildRowAwareChunks(lines: string[], targetRows: number, maxLines: number): string[][] {
+  const normalized = lines.map(l => l.trim()).filter(Boolean)
+  if (!normalized.length) return []
+
+  const overlapLines = Math.max(0, Number(process.env.CLAUDE_CHUNK_OVERLAP_LINES ?? 40))
+  const chunks: string[][] = []
+  let current: string[] = []
+  let rowAnchors = 0
+
+  for (const line of normalized) {
+    const isAnchor = looksLikeRowAnchor(line)
+    if (isAnchor && current.length > 0 && (rowAnchors >= targetRows || current.length >= maxLines)) {
+      chunks.push(current)
+      const overlap = overlapLines > 0 ? current.slice(Math.max(0, current.length - overlapLines)) : []
+      current = [...overlap]
+      rowAnchors = overlap.filter(looksLikeRowAnchor).length
+    }
+    if (current.length >= maxLines) {
+      chunks.push(current)
+      const overlap = overlapLines > 0 ? current.slice(Math.max(0, current.length - overlapLines)) : []
+      current = [...overlap]
+      rowAnchors = overlap.filter(looksLikeRowAnchor).length
+    }
+    current.push(line)
+    if (isAnchor) rowAnchors++
+  }
+
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
+function splitChunk(lines: string[]): string[][] {
+  if (lines.length < 2) return [lines]
+  const mid = Math.floor(lines.length / 2)
+  return [lines.slice(0, mid), lines.slice(mid)]
+}
+
+function looksLikeRowAnchor(line: string): boolean {
+  if (!line) return false
+  return (
+    /^MS-\d{2,4}-\d{1,4}\b/i.test(line) ||
+    /^\d{1,4}[\.\)]\s/.test(line) ||
+    /^ITEM\s*NO\.?/i.test(line) ||
+    /^[A-Z0-9]{2,6}-[A-Z0-9]{1,6}-\d{1,5}\b/i.test(line)
+  )
+}
+
+function dedupeProducts(products: ExtractedProduct[]): ExtractedProduct[] {
+  const seen = new Set<string>()
+  const out: ExtractedProduct[] = []
+  for (const p of products) {
+    const key = [
+      p.section ?? '',
+      p.marks ?? '',
+      p.item_code ?? '',
+      p.description ?? '',
+      p.total_cartons ?? '',
+      p.total_qty ?? '',
+      p.total_amount_rmb ?? '',
+    ].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(p)
+  }
+  return out
+}
+
+function defaultDocumentFor(docType: DocType): ExtractedDocument {
+  return {
+    doc_number: null,
+    client_id: null,
+    container_no: null,
+    document_date: null,
+    document_type: docType,
+    footer_totals: {
+      total_cartons: null,
+      total_cbm: null,
+      total_weight_kg: null,
+      total_amount_rmb: null,
+      total_amount_usd: null,
+      exchange_rate: null,
+      goods_balance_usd: null,
+      freight_usd: null,
+      total_balance_usd: null,
+    },
+    payments: [],
+  }
+}
+
+function parseClaudeResponse(raw: string): { document: ExtractedDocument; products: ExtractedProduct[] } {
+  const cleaned = raw
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim()
+
+  const firstBrace = cleaned.indexOf('{')
+  const lastBrace = cleaned.lastIndexOf('}')
+
+  if (firstBrace === -1 || lastBrace === -1) {
+    throw new Error('Claude response contains no JSON object')
+  }
+
+  const jsonStr = cleaned.slice(firstBrace, lastBrace + 1)
+
+  let parsed: any
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    console.error('[claude-extractor] JSON parse failed, attempting repair...')
+    const repaired = repairJson(jsonStr)
+    parsed = JSON.parse(repaired)
+  }
+
+  if (!parsed.document || !Array.isArray(parsed.products)) {
+    throw new Error('Claude response missing required "document" or "products" fields')
+  }
+
+  console.log(`[claude-extractor] parsed rows: ${parsed.products.length}`)
+
+  return { document: parsed.document, products: parsed.products }
+}
+
+function repairJson(str: string): string {
+  let result = str.trim()
+
+  const openArrays = (result.match(/\[/g) || []).length
+  const closeArrays = (result.match(/\]/g) || []).length
+  const missingArrayClose = openArrays - closeArrays
+
+  const openObjects = (result.match(/\{/g) || []).length
+  const closeObjects = (result.match(/\}/g) || []).length
+  const missingObjectClose = openObjects - closeObjects
+
+  result = result.replace(/,\s*$/, '')
+
+  for (let i = 0; i < missingArrayClose; i++) result += ']'
+  for (let i = 0; i < missingObjectClose; i++) result += '}'
+
+  return result
+}
+
+// ── Visual prompts (no OCR text — Claude reads the document directly) ──────
+
+function getVisualPromptForDocType(docType: DocType): string {
+  const shared = `
+CRITICAL RULES:
+- Extract EVERY product row visible in the table. Do not skip rows with 0 quantities.
+- Return ONLY a raw JSON object. No markdown fences, no explanation, no preamble.
+- All numeric fields must be plain numbers. Strip units: "0.09CBM" → 0.09, "20.9KGS" → 20.9, "¥32" → 32.
+- Use null for any field that is genuinely missing or not visible.
+- Never invent data. If a field is blank in the document, set it to null.
+- Read the entire document including all pages. The "products" array must contain ALL rows.`
+
+  if (docType === 'sales_order') {
+    return `You are a strict data extraction engine. Read this Chinese sales order (销售单) document and extract all product rows.
+
+Columns to find: 序号 (line_no), 产品货号 (item_code), 描述 (description), 总箱数 (total_cartons), 每箱数量 (qty_per_carton), 总数量 (total_qty), 单价 (unit_price_rmb), 金额 (total_amount_rmb), 长/宽/高 cm (dim_l/w/h), 体积 (unit_cbm/total_cbm), 重量 (unit/total weight kg), 条形码 (barcode), 仓位 (warehouse).
+
+Return a JSON object with EXACTLY this structure:
+{
+  "document": {
+    "doc_number": null,
+    "client_id": null,
+    "container_no": null,
+    "document_date": null,
+    "document_type": "sales_order",
+    "footer_totals": { "total_cartons": null, "total_cbm": null, "total_weight_kg": null, "total_amount_rmb": null, "total_amount_usd": null, "exchange_rate": null, "goods_balance_usd": null, "freight_usd": null, "total_balance_usd": null },
+    "payments": []
+  },
+  "products": [{
+    "line_no": 1, "marks": null, "shop": null, "item_code": null, "description": null,
+    "packaging": null, "qty_per_carton": null, "total_cartons": null, "total_qty": null,
+    "unit_price_rmb": null, "total_amount_rmb": null,
+    "dim_l_cm": null, "dim_w_cm": null, "dim_h_cm": null,
+    "unit_cbm": null, "total_cbm": null, "unit_weight_kg": null, "total_weight_kg": null,
+    "barcode": null, "warehouse": null, "box_no_start": null, "box_no_end": null,
+    "section": "shipped", "remarks": null
+  }]
+}
+${shared}`
+  }
+
+  return `You are a strict data extraction engine. Read this container packing list / manifest document and extract all product rows.
+
+Columns to find: MARKS (唛头), SHOP# (supplier name), ITEM NO., DESCRIPTION OF GOODS, PACKING (e.g. "2pcs/ctn"), T.CTN (total cartons), T.QTY (total pieces), H/W/L (dimensions cm), UNIT CBM, T.CBM, UNIT WEIGHT (kg), T.WEIGHT (kg), U.PRICE (RMB), T.AMOUNT (RMB), BOX NO range.
+
+Sections: main shipped goods, "GOODS LEFT IN SANCARGO" (section="left_in_warehouse"), repacked goods (section="repacked").
+
+Return a JSON object with EXACTLY this structure:
+{
+  "document": {
+    "doc_number": null,
+    "client_id": null,
+    "container_no": null,
+    "document_date": null,
+    "document_type": "container_manifest",
+    "footer_totals": { "total_cartons": null, "total_cbm": null, "total_weight_kg": null, "total_amount_rmb": null, "total_amount_usd": null, "exchange_rate": null, "goods_balance_usd": null, "freight_usd": null, "total_balance_usd": null },
+    "payments": [{ "payment_date": null, "amount_usd": null, "payment_type": "deposit" }]
+  },
+  "products": [{
+    "line_no": 1, "marks": null, "shop": null, "item_code": null, "description": null,
+    "packaging": null, "qty_per_carton": null, "total_cartons": null, "total_qty": null,
+    "unit_price_rmb": null, "total_amount_rmb": null,
+    "dim_l_cm": null, "dim_w_cm": null, "dim_h_cm": null,
+    "unit_cbm": null, "total_cbm": null, "unit_weight_kg": null, "total_weight_kg": null,
+    "barcode": null, "warehouse": null, "box_no_start": null, "box_no_end": null,
+    "section": "shipped", "remarks": null
+  }]
+}
+
+CONTAINER MANIFEST SPECIFIC:
+- marks: the MARKS/唛头 column (e.g. "37-T-101-1", "MS-301-1")
+  MARKS INHERITANCE: Sub-rows for accessories/parts of a parent item do not repeat the MARKS.
+  Always propagate the most recent MARKS value down to every sub-row that lacks its own MARKS.
+- shop: the SHOP# column — supplier name, NOT a warehouse
+- box_no_start / box_no_end: parse from BOX NO column (e.g. "170-278" → start:170, end:278)
+- payments: extract all payment lines at bottom (date, amount USD, type)
+
+SHARED / MERGED CELLS — CRITICAL FOR ACCURATE CARTON COUNTS:
+T.CTN is often a single merged cell spanning several sub-rows (e.g. "1CTNS" covers rows 2–5
+because those parts share one physical carton). Rules:
+  1. Assign the T.CTN to the FIRST row of the group (or where the cell visually sits).
+  2. All other sub-rows in that group must get total_cartons = 0 (not null).
+  3. A sub-row with its own distinct CTN cell keeps that value.
+  4. Rows with 0.000CBM and 0.0KGS are valid packed-inside-parent rows — extract CBM/weight as 0.
+  5. The sum of all total_cartons must equal the document footer total.
+${shared}`
+}
