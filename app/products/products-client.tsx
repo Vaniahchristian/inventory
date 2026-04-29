@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/select'
 import {
   Plus, Minus, Search, MoreHorizontal, Pencil, Trash2,
-  Download, Upload, FileSpreadsheet, FileText, ImageIcon, AlertTriangle,
+  Download, Upload, FileSpreadsheet, FileText, ImageIcon, AlertTriangle, Loader2,
 } from 'lucide-react'
 import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons } from '@/app/actions/products'
 import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
@@ -69,6 +69,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
   const [query, setQuery] = useState('')
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
+  const [importStage, setImportStage] = useState<string | null>(null)
   const realProducts = useMemo(() => products.filter(p => !isSectionDividerProduct(p)), [products])
   const filtered = useMemo(() => {
     const queryTrimmed = query.trim().toLowerCase()
@@ -160,10 +161,12 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
     }
 
     try {
+      setImportStage(`Uploading and extracting ${file.name}...`)
       const { rows, importMeta } = await parseImportFileDetailed(file)
       if (rows.length === 0) {
         throw new Error('No rows detected from file. If this is a PDF, re-export it as text-searchable PDF or CSV.')
       }
+      setImportStage(`Saving ${rows.length} extracted rows...`)
       startTransition(async () => {
         try {
           const result = await importProducts(rows, importMeta)
@@ -183,10 +186,13 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
           }
         } catch (err: unknown) {
           toast.error(err instanceof Error ? err.message : 'Import failed')
+        } finally {
+          setImportStage(null)
         }
       })
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to parse file')
+      setImportStage(null)
     }
     e.target.value = ''
   }
@@ -243,8 +249,22 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => fileInputRef.current?.click()}>
-            <Upload className="h-3.5 w-3.5" /> Import
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={!!importStage}
+          >
+            {importStage ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Importing...
+              </>
+            ) : (
+              <>
+                <Upload className="h-3.5 w-3.5" /> Import
+              </>
+            )}
           </Button>
           <Button
             variant="outline"
@@ -260,6 +280,13 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
           </Button>
         </div>
       </div>
+
+      {importStage && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900 flex items-center gap-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+          <span>{importStage}</span>
+        </div>
+      )}
 
       {importMeta && (
         <div className="rounded-md border bg-amber-50 border-amber-200 px-3 py-2 text-xs flex flex-wrap gap-x-6 gap-y-0.5 items-center">
@@ -302,7 +329,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
             {filtered.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={22} className="text-center text-slate-400 py-10">
-                  No products found.
+                  {importStage ? 'Import in progress... extracted rows will appear shortly.' : 'No products found.'}
                 </TableCell>
               </TableRow>
             ) : (
