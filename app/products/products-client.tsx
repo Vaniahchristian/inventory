@@ -94,6 +94,14 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
   }, [products, query, selectedDocumentId])
   const filteredDataRows = useMemo(() => filtered.filter(p => !isSectionDividerProduct(p)), [filtered])
 
+  function importConsole(msg: string, meta?: unknown) {
+    if (meta !== undefined) {
+      console.log(`[products-import] ${msg}`, meta)
+    } else {
+      console.log(`[products-import] ${msg}`)
+    }
+  }
+
   async function handleMarkOutOfStock(id: string, name: string | null) {
     if (!confirm(`Mark "${name ?? 'this product'}" as out of stock? Cartons and quantity will be set to 0.`)) return
     startTransition(async () => {
@@ -151,6 +159,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
   }
 
   async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
+    const startedAt = Date.now()
     const file = e.target.files?.[0]
     if (!file) return
 
@@ -161,12 +170,19 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
     }
 
     try {
+      importConsole('▶ import started', { file: file.name, size_bytes: file.size, type: file.type || 'unknown' })
       setImportStage(`Uploading and extracting ${file.name}...`)
       const { rows, importMeta } = await parseImportFileDetailed(file)
+      importConsole('parseImportFileDetailed complete', {
+        rows: rows.length,
+        document_type: importMeta?.document_type ?? null,
+        elapsed_ms: Date.now() - startedAt,
+      })
       if (rows.length === 0) {
         throw new Error('No rows detected from file. If this is a PDF, re-export it as text-searchable PDF or CSV.')
       }
       setImportStage(`Saving ${rows.length} extracted rows...`)
+      importConsole('importProducts start', { rows: rows.length })
       startTransition(async () => {
         try {
           const result = await importProducts(rows, importMeta)
@@ -184,14 +200,29 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
               `PDF totals differ from imported totals: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔKGS ${totalsDiff.weight ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`
             )
           }
+          importConsole('✓ importProducts complete', {
+            imported: count,
+            llm_aligned: llmAligned,
+            totals_match: totalsMatch,
+            totals_diff: totalsDiff,
+            elapsed_ms: Date.now() - startedAt,
+          })
         } catch (err: unknown) {
           toast.error(err instanceof Error ? err.message : 'Import failed')
+          importConsole('✗ importProducts failed', {
+            error: err instanceof Error ? err.message : 'Import failed',
+            elapsed_ms: Date.now() - startedAt,
+          })
         } finally {
           setImportStage(null)
         }
       })
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to parse file')
+      importConsole('✗ import failed before save', {
+        error: err instanceof Error ? err.message : 'Failed to parse file',
+        elapsed_ms: Date.now() - startedAt,
+      })
       setImportStage(null)
     }
     e.target.value = ''
