@@ -1209,12 +1209,28 @@ export async function parseImportFileDetailed(file: File): Promise<{ rows: Recor
   })
   if (isPdf) {
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      // Import path uses OCR/LLM extraction only; products are persisted by importProducts.
-      // This avoids /api/ocr-extract failing the whole import on document_items constraints.
-      fd.append('skip_insert', 'true')
-      const res = await fetch('/api/ocr-extract', { method: 'POST', body: fd })
+      // Upload via Vercel Blob first to avoid the 4.5 MB serverless body limit.
+      // Fall back to direct FormData upload when the blob route is unavailable (e.g. local dev
+      // without BLOB_READ_WRITE_TOKEN configured).
+      let res: Response
+      const blobFd = new FormData()
+      blobFd.append('file', file)
+      const blobUpload = await fetch('/api/upload-blob', { method: 'POST', body: blobFd }).catch(() => null)
+
+      if (blobUpload?.ok) {
+        const { url: blobUrl } = await blobUpload.json()
+        res = await fetch('/api/ocr-extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blob_url: blobUrl, file_name: file.name, skip_insert: true }),
+        })
+      } else {
+        // Fallback: direct upload (works locally and for small files on Vercel)
+        const fd = new FormData()
+        fd.append('file', file)
+        fd.append('skip_insert', 'true')
+        res = await fetch('/api/ocr-extract', { method: 'POST', body: fd })
+      }
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}))
         logImport(`OCR route failed: HTTP ${res.status}`, errBody?.error ?? errBody)

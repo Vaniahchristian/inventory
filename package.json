@@ -13,6 +13,7 @@
     "@base-ui/react": "^1.4.0",
     "@google-cloud/vision": "^5.3.5",
     "@supabase/supabase-js": "^2.103.3",
+    "@vercel/blob": "^2.3.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "jspdf": "^4.2.1",

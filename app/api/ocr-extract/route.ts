@@ -89,23 +89,48 @@ export async function POST(req: Request) {
   const startTime = Date.now()
 
   try {
-    const form = await req.formData()
-    const file = form.get('file')
-    const skipInsert = form.get('skip_insert') === 'true'
+    const contentType = req.headers.get('content-type') ?? ''
+    let fileName: string
+    let skipInsert: boolean
+    let content: Buffer
 
-    if (!(file instanceof File)) {
-      return NextResponse.json({ error: 'Missing file' }, { status: 400 })
+    if (contentType.includes('application/json')) {
+      // Blob URL path: { blob_url, file_name, skip_insert }
+      const body = await req.json()
+      const blobUrl: string = body.blob_url
+      fileName = body.file_name ?? 'upload.pdf'
+      skipInsert = body.skip_insert === true
+
+      if (!blobUrl) {
+        return NextResponse.json({ error: 'Missing blob_url' }, { status: 400 })
+      }
+      console.log(`[route] downloading blob: ${blobUrl}`)
+      const blobRes = await fetch(blobUrl)
+      if (!blobRes.ok) {
+        return NextResponse.json({ error: 'Failed to download blob' }, { status: 502 })
+      }
+      content = Buffer.from(await blobRes.arrayBuffer())
+    } else {
+      // Direct upload path (local dev / small files)
+      const form = await req.formData()
+      const file = form.get('file')
+      skipInsert = form.get('skip_insert') === 'true'
+
+      if (!(file instanceof File)) {
+        return NextResponse.json({ error: 'Missing file' }, { status: 400 })
+      }
+      fileName = file.name
+      content = Buffer.from(await file.arrayBuffer())
     }
 
-    const name = file.name.toLowerCase()
+    const name = fileName.toLowerCase()
     const isPdf = name.endsWith('.pdf')
     const isImage = name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg')
     if (!isPdf && !isImage) {
       return NextResponse.json({ error: 'Unsupported file type' }, { status: 400 })
     }
 
-    console.log(`[route] file: ${file.name} size: ${file.size}`)
-    const content = Buffer.from(await file.arrayBuffer())
+    console.log(`[route] file: ${fileName} size: ${content.length}`)
     const fileSha256 = crypto.createHash('sha256').update(content).digest('hex')
 
     // Step 1: Google Vision OCR (batched, handles any page count)
@@ -138,7 +163,7 @@ export async function POST(req: Request) {
     let insertResult = null
     if (!skipInsert) {
       console.log('[route] inserting to Supabase...')
-      insertResult = await insertToSupabase(file.name, fileSha256, extraction, validation, lines)
+      insertResult = await insertToSupabase(fileName, fileSha256, extraction, validation, lines)
     }
 
     const duration = Date.now() - startTime
