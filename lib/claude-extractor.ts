@@ -200,8 +200,8 @@ export async function extractWithClaudeChunked(
 ): Promise<ClaudeExtractionResult & { chunking: ClaudeChunkingStats }> {
   const chunks = buildRowAwareChunks(
     ocrLines,
-    Math.max(10, Number(process.env.CLAUDE_CHUNK_TARGET_ROWS ?? 40)),
-    Math.max(200, Number(process.env.CLAUDE_CHUNK_MAX_LINES ?? 900))
+    Math.max(20, Number(process.env.CLAUDE_CHUNK_TARGET_ROWS ?? 120)),
+    Math.max(300, Number(process.env.CLAUDE_CHUNK_MAX_LINES ?? 1400))
   )
 
   if (chunks.length === 0) {
@@ -396,16 +396,16 @@ async function extractWithFallbackLlm(
     { role: 'user' as const, content: strictPrompt },
   ]
   const llm = await callLlm(messages, {
-    timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 30000),
-    retries: 2,
+    timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 12000),
+    retries: 1,
   })
   if (!llm?.content) {
-    const waitMs = Math.max(1000, Number(process.env.LLM_FALLBACK_RETRY_WAIT_MS ?? 25000))
+    const waitMs = Math.max(1000, Number(process.env.LLM_FALLBACK_RETRY_WAIT_MS ?? 4000))
     console.log(`[claude-extractor] fallback providers unavailable, waiting ${waitMs}ms and retrying once`)
     await new Promise(resolve => setTimeout(resolve, waitMs))
     const retry = await callLlm(messages, {
-      timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 30000),
-      retries: 2,
+      timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 12000),
+      retries: 1,
     })
     if (!retry?.content) throw new Error('No fallback LLM response')
     const parsedRetry = parseClaudeResponse(retry.content)

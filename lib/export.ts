@@ -1311,3 +1311,54 @@ export async function parseImportFile(file: File): Promise<Record<string, unknow
   const { rows } = await parseImportFileDetailed(file)
   return rows
 }
+
+/**
+ * Upload a PDF to Supabase Storage, queue a background extraction job, and
+ * fire the processing endpoint (fire-and-forget). Returns the job_id immediately
+ * so the caller can subscribe to Supabase Realtime for progress updates.
+ *
+ * Flow:
+ *   browser → Supabase Storage (no serverless body limit)
+ *   → POST /api/queue-import  → job_id (instant)
+ *   → POST /api/process-import (fire-and-forget, runs up to 300s on Vercel Pro)
+ *   → Supabase Realtime pushes progress to subscribers
+ */
+export async function startPdfImportJob(file: File): Promise<string> {
+  // 1. Upload to Supabase Storage
+  const importPath = `imports/${Date.now()}-${file.name.replace(/[^\w.\-()]/g, '_')}`
+  logImport('uploading to storage:', importPath)
+
+  const { error: uploadErr } = await supabase.storage
+    .from('documents')
+    .upload(importPath, file, { upsert: true, contentType: file.type || 'application/pdf' })
+
+  if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr.message}`)
+
+  const { data: pub } = supabase.storage.from('documents').getPublicUrl(importPath)
+  const fileUrl = pub.publicUrl
+  logImport('upload done, url:', fileUrl)
+
+  // 2. Create job record → returns job_id instantly
+  const queueRes = await fetch('/api/queue-import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_url: fileUrl, file_name: file.name, skip_db_insert: false }),
+  })
+  if (!queueRes.ok) {
+    const err = await queueRes.json().catch(() => ({}))
+    throw new Error(`Queue failed: ${err.error ?? queueRes.status}`)
+  }
+  const { job_id } = await queueRes.json()
+  logImport('job queued:', job_id)
+
+  // 3. Fire the Supabase Edge Function — runs up to 400s, no Vercel timeout constraint.
+  //    Fire-and-forget: the browser tracks progress via Supabase Realtime, not this response.
+  const edgeFnUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/process-import`
+  fetch(edgeFnUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_id }),
+  }).catch(err => logImport('edge function fire-and-forget error:', err?.message ?? err))
+
+  return job_id
+}

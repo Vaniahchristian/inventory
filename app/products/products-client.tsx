@@ -24,7 +24,8 @@ import {
   Download, Upload, FileSpreadsheet, FileText, ImageIcon, AlertTriangle, Loader2,
 } from 'lucide-react'
 import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons } from '@/app/actions/products'
-import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed } from '@/lib/export'
+import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed, startPdfImportJob } from '@/lib/export'
+import { supabase } from '@/lib/supabase'
 import { stockStatus } from '@/lib/utils'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE, STAGE_TOTAL_MARKER_PREFIX, parseSectionMarkerTitle } from '@/lib/sections'
 import type { Product, Category, Supplier, ImportMeta, ProductDocumentRef } from '@/lib/types'
@@ -70,6 +71,8 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
   const [importStage, setImportStage] = useState<string | null>(null)
+  const [importJobId, setImportJobId] = useState<string | null>(null)
+  const [importProgress, setImportProgress] = useState<number>(0)
   const realProducts = useMemo(() => products.filter(p => !isSectionDividerProduct(p)), [products])
   const filtered = useMemo(() => {
     const queryTrimmed = query.trim().toLowerCase()
@@ -169,60 +172,169 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
       return
     }
 
-    try {
-      importConsole('▶ import started', { file: file.name, size_bytes: file.size, type: file.type || 'unknown' })
-      setImportStage(`Uploading and extracting ${file.name}...`)
-      const { rows, importMeta } = await parseImportFileDetailed(file)
-      importConsole('parseImportFileDetailed complete', {
-        rows: rows.length,
-        document_type: importMeta?.document_type ?? null,
-        elapsed_ms: Date.now() - startedAt,
-      })
-      if (rows.length === 0) {
-        throw new Error('No rows detected from file. If this is a PDF, re-export it as text-searchable PDF or CSV.')
+    const isPdf = file.name.toLowerCase().endsWith('.pdf')
+
+    // ── Async job path for PDFs ────────────────────────────────────────────────
+    if (isPdf) {
+      try {
+        importConsole('▶ import started (async job)', { file: file.name, size_bytes: file.size })
+        setImportStage('Uploading PDF…')
+        setImportProgress(0)
+
+        const jobId = await startPdfImportJob(file)
+        setImportJobId(jobId)
+        importConsole('job queued', { job_id: jobId })
+        setImportStage('Extracting with AI (this takes ~60s)…')
+        setImportProgress(5)
+
+        // Subscribe to Supabase Realtime for live progress on this specific job
+        const channel = supabase
+          .channel(`import_job_${jobId}`)
+          .on(
+            'postgres_changes',
+            { event: 'UPDATE', schema: 'public', table: 'import_jobs', filter: `id=eq.${jobId}` },
+            async (payload) => {
+              const job = payload.new as Record<string, any>
+              importConsole('job update', { status: job.status, step: job.step, pct: job.progress_pct })
+              setImportProgress(job.progress_pct ?? 0)
+
+              const stepLabels: Record<string, string> = {
+                downloading: 'Downloading file…',
+                extracting: 'Claude is reading the PDF…',
+                validating: 'Validating extracted data…',
+                saving: 'Saving to database…',
+                done: 'Done!',
+                failed: 'Extraction failed',
+              }
+              setImportStage(stepLabels[job.step] ?? `Processing… (${job.step})`)
+
+              if (job.status === 'completed') {
+                channel.unsubscribe()
+                setImportJobId(null)
+                const result = job.result as Record<string, any>
+                const products = Array.isArray(result?.products) ? result.products : []
+                const doc = result?.document ?? {}
+
+                // Build importMeta from extracted document
+                const meta = {
+                  source_file_name: file.name,
+                  source_file_type: 'pdf' as const,
+                  document_type: doc.document_type ?? 'container_manifest',
+                  client_details: doc.client_id ?? null,
+                  container_no: doc.container_no ?? null,
+                  total_carton: doc.footer_totals?.total_cartons ?? null,
+                  total_cbm: doc.footer_totals?.total_cbm ?? null,
+                  total_weight_kgs: doc.footer_totals?.total_weight_kg ?? null,
+                  total_cost_rmb: doc.footer_totals?.total_amount_rmb ?? null,
+                  total_cost_usd: doc.footer_totals?.total_amount_usd ?? null,
+                  payment_date: null, payment_usd: null, goods_balance_usd: null,
+                  credit_support_usd: null, pivoc_usd: null, freight_usd: null,
+                  total_balance_usd: null, exchange_rate: null,
+                }
+
+                // Map Claude products → legacy row format for importProducts
+                const rows = products
+                  .filter((p: any) => (p.section ?? 'shipped') === 'shipped')
+                  .map((p: any) => ({
+                    MARKS: String(p.marks ?? p.item_code ?? ''),
+                    'SHOP#': String(p.shop ?? ''),
+                    'ITEM NO.': String(p.line_no ?? ''),
+                    'DESCRIPTION OF GOODS': String(p.description ?? ''),
+                    PACKING: String(p.packaging ?? ''),
+                    'T.CTN': p.total_cartons != null ? `${p.total_cartons}CTNS` : '',
+                    'T.QTY': p.total_qty != null ? `${p.total_qty}pcs` : '',
+                    'UNIT CBM': p.unit_cbm != null ? `${p.unit_cbm}CBM` : '',
+                    'T.CBM': p.total_cbm != null ? `${p.total_cbm}CBM` : '',
+                    'UNIT WEIGHT': p.unit_weight_kg != null ? `${p.unit_weight_kg}KGS` : '',
+                    'T.WEIGHT': p.total_weight_kg != null ? `${p.total_weight_kg}KGS` : '',
+                    'U.PRICE (RMB)': p.unit_price_rmb != null ? `¥${p.unit_price_rmb}` : '',
+                    'T.AMOUNT': p.total_amount_rmb != null ? `¥${p.total_amount_rmb}` : '',
+                    __source: 'claude_core',
+                    __needs_llm: 'false',
+                  }))
+
+                importConsole('job completed', { rows: rows.length, elapsed_ms: Date.now() - startedAt })
+
+                if (rows.length === 0) {
+                  toast.error('PDF processed but no product rows found')
+                  setImportStage(null)
+                  return
+                }
+
+                setImportStage(`Saving ${rows.length} rows…`)
+                startTransition(async () => {
+                  try {
+                    const importResult = await importProducts(rows, meta)
+                    const count = typeof importResult === 'number' ? importResult : importResult.importedCount
+                    const totalsMatch = typeof importResult === 'number' ? true : importResult.totalsMatch
+                    const totalsDiff = typeof importResult === 'number' ? null : importResult.totalsDiff
+                    toast.success(`Imported ${count} products`)
+                    if (!totalsMatch && totalsDiff) {
+                      toast.info(`Totals differ: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`)
+                    }
+                  } catch (err: unknown) {
+                    toast.error(err instanceof Error ? err.message : 'Save failed')
+                  } finally {
+                    setImportStage(null)
+                    setImportProgress(0)
+                  }
+                })
+              }
+
+              if (job.status === 'failed') {
+                channel.unsubscribe()
+                setImportJobId(null)
+                toast.error(`Extraction failed: ${job.error ?? 'unknown error'}`)
+                setImportStage(null)
+                setImportProgress(0)
+              }
+            }
+          )
+          .subscribe()
+      } catch (err: unknown) {
+        toast.error(err instanceof Error ? err.message : 'Failed to start import')
+        importConsole('✗ async import failed', { error: String(err) })
+        setImportStage(null)
+        setImportProgress(0)
+        setImportJobId(null)
       }
-      setImportStage(`Saving ${rows.length} extracted rows...`)
-      importConsole('importProducts start', { rows: rows.length })
+      e.target.value = ''
+      return
+    }
+
+    // ── Sync path for Excel / CSV ─────────────────────────────────────────────
+    try {
+      importConsole('▶ import started (sync)', { file: file.name, size_bytes: file.size })
+      setImportStage(`Parsing ${file.name}…`)
+      const { rows, importMeta: meta } = await parseImportFileDetailed(file)
+      importConsole('parse complete', { rows: rows.length, elapsed_ms: Date.now() - startedAt })
+      if (rows.length === 0) {
+        throw new Error('No rows detected from file.')
+      }
+      setImportStage(`Saving ${rows.length} rows…`)
       startTransition(async () => {
         try {
-          const result = await importProducts(rows, importMeta)
+          const result = await importProducts(rows, meta)
           const count = typeof result === 'number' ? result : result.importedCount
           const llmAligned = typeof result === 'number' ? 0 : result.llmAligned
           const totalsMatch = typeof result === 'number' ? true : result.totalsMatch
           const totalsDiff = typeof result === 'number' ? null : result.totalsDiff
           if (llmAligned > 0) {
-            toast.success(`Imported ${count} products (LLM aligned ${llmAligned} uncertain rows)`)
+            toast.success(`Imported ${count} products (LLM aligned ${llmAligned} rows)`)
           } else {
             toast.success(`Imported ${count} products`)
           }
           if (!totalsMatch && totalsDiff) {
-            toast.info(
-              `PDF totals differ from imported totals: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔKGS ${totalsDiff.weight ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`
-            )
+            toast.info(`Totals differ: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`)
           }
-          importConsole('✓ importProducts complete', {
-            imported: count,
-            llm_aligned: llmAligned,
-            totals_match: totalsMatch,
-            totals_diff: totalsDiff,
-            elapsed_ms: Date.now() - startedAt,
-          })
         } catch (err: unknown) {
           toast.error(err instanceof Error ? err.message : 'Import failed')
-          importConsole('✗ importProducts failed', {
-            error: err instanceof Error ? err.message : 'Import failed',
-            elapsed_ms: Date.now() - startedAt,
-          })
         } finally {
           setImportStage(null)
         }
       })
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to parse file')
-      importConsole('✗ import failed before save', {
-        error: err instanceof Error ? err.message : 'Failed to parse file',
-        elapsed_ms: Date.now() - startedAt,
-      })
       setImportStage(null)
     }
     e.target.value = ''
@@ -313,9 +425,20 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
       </div>
 
       {importStage && (
-        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900 flex items-center gap-2">
-          <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-          <span>{importStage}</span>
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-900 space-y-1.5">
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+            <span>{importStage}</span>
+            {importJobId && <span className="ml-auto text-blue-400 font-mono">{importProgress}%</span>}
+          </div>
+          {importJobId && (
+            <div className="w-full h-1.5 bg-blue-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                style={{ width: `${importProgress}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
