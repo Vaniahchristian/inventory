@@ -10,7 +10,7 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 
 const LOCK_STALE_MS = Math.max(60_000, Number(process.env.IMPORT_JOB_LOCK_STALE_MS ?? 8 * 60_000))
-const EXTRACT_TIMEOUT_MS = Math.max(20_000, Number(process.env.IMPORT_EXTRACT_TIMEOUT_MS ?? 90_000))
+const EXTRACT_TIMEOUT_MS = Math.max(20_000, Number(process.env.IMPORT_EXTRACT_TIMEOUT_MS ?? 240_000))
 const MAX_RETRIES = Math.max(0, Number(process.env.IMPORT_JOB_MAX_RETRIES ?? 2))
 const RETRY_BASE_DELAY_MS = Math.max(1000, Number(process.env.IMPORT_JOB_RETRY_BASE_DELAY_MS ?? 5000))
 
