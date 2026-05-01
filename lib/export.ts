@@ -1346,9 +1346,9 @@ export async function startPdfImportJob(file: File): Promise<string> {
   // 2. Create job record directly in Supabase → returns job_id instantly
   const { data: existing } = await supabase
     .from('import_jobs')
-    .select('id')
+    .select('id,status')
     .eq('idempotency_key', idempotencyKey)
-    .in('status', ['queued', 'processing', 'retryable', 'completed'])
+    .in('status', ['queued', 'processing', 'retryable', 'completed', 'failed'])
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
@@ -1356,6 +1356,13 @@ export async function startPdfImportJob(file: File): Promise<string> {
   let job_id: string
   if (existing?.id) {
     job_id = existing.id
+    // Reset failed jobs so they can be re-processed
+    if (existing.status === 'failed') {
+      await supabase
+        .from('import_jobs')
+        .update({ status: 'queued', step: 'queued', progress_pct: 0, error: null, retry_at: null, attempt_count: 0, file_url: fileUrl })
+        .eq('id', job_id)
+    }
   } else {
     const { data: inserted, error: queueErr } = await supabase
       .from('import_jobs')
