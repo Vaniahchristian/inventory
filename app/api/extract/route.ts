@@ -11,6 +11,7 @@ export const maxDuration = 60
 
 export async function POST(req: Request) {
   const startMs = Date.now()
+  const debugId = crypto.randomUUID().slice(0, 8)
   const contentType = req.headers.get('content-type') ?? ''
 
   let text = ''
@@ -34,14 +35,27 @@ export async function POST(req: Request) {
 
     if (isReductoConfigured() && file) {
       try {
-        console.log(`[extract] Reducto path — file: ${fileName} size: ${file.size}`)
+        console.log(
+          `[extract][${debugId}] Reducto path — file: ${fileName} size: ${file.size} key_present=${Boolean(process.env.REDUCTO_API_KEY)}`
+        )
         const buffer = Buffer.from(await file.arrayBuffer())
-        const reductoResult = await extractWithReducto(buffer, fileName)
+        const reductoResult = await extractWithReducto(buffer, fileName, debugId)
         text = reductoResult.text
         extractionMethod = 'reducto'
-        console.log(`[extract] Reducto done — chars: ${text.length} pages: ${reductoResult.pageCount} credits: ${reductoResult.credits}`)
+        console.log(
+          `[extract][${debugId}] Reducto done — chars: ${text.length} pages: ${reductoResult.pageCount} credits: ${reductoResult.credits} job_id=${reductoResult.jobId}`
+        )
       } catch (reductoErr: any) {
-        console.warn(`[extract] Reducto failed, falling back to pdfjs text — ${reductoErr?.message}`)
+        const fullErr = JSON.stringify(
+          reductoErr,
+          Object.getOwnPropertyNames(reductoErr ?? {}),
+          2
+        )
+        console.warn(
+          `[extract][${debugId}] Reducto failed, falling back to pdfjs text — ${reductoErr?.name ?? 'Error'}: ${reductoErr?.message ?? reductoErr}`
+        )
+        if (reductoErr?.stack) console.warn(`[extract][${debugId}] Reducto stack: ${reductoErr.stack}`)
+        console.warn(`[extract][${debugId}] Reducto error object: ${fullErr}`)
         text = fallbackText
         extractionMethod = 'claude_text_fallback'
       }
@@ -72,15 +86,15 @@ export async function POST(req: Request) {
     ? detectDocTypeFromFilename(fileName)
     : detectDocType(lines)
 
-  console.log(`[extract] method: ${extractionMethod} doc_type: ${docType} lines: ${lines.length}`)
+  console.log(`[extract][${debugId}] method: ${extractionMethod} doc_type: ${docType} lines: ${lines.length}`)
 
   let extraction: Awaited<ReturnType<typeof extractWithClaude>>
   try {
     extraction = await extractWithClaude(lines, docType, 'extract-route')
   } catch (err: any) {
     const msg = err?.message ?? String(err)
-    console.error(`[extract] Claude call failed: ${msg}`)
-    if (err?.error) console.error(`[extract] api_error: ${JSON.stringify(err.error)}`)
+    console.error(`[extract][${debugId}] Claude call failed: ${msg}`)
+    if (err?.error) console.error(`[extract][${debugId}] api_error: ${JSON.stringify(err.error)}`)
     return NextResponse.json({ error: `Extraction failed: ${msg}` }, { status: 502 })
   }
 
@@ -100,13 +114,13 @@ export async function POST(req: Request) {
       const result = await insertToSupabase(fileName, fileSha256, extraction, validation, lines)
       documentId = result.document_id
     } catch (err: any) {
-      console.error(`[extract] DB insert failed: ${err?.message ?? err}`)
+      console.error(`[extract][${debugId}] DB insert failed: ${err?.message ?? err}`)
     }
   }
 
   const durationMs = Date.now() - startMs
   console.log(
-    `[extract] complete in ${durationMs}ms — rows: ${extraction.products.length} tokens_in: ${extraction.input_tokens} tokens_out: ${extraction.output_tokens}`
+    `[extract][${debugId}] complete in ${durationMs}ms — rows: ${extraction.products.length} tokens_in: ${extraction.input_tokens} tokens_out: ${extraction.output_tokens}`
   )
 
   return NextResponse.json({
