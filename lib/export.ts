@@ -3,10 +3,65 @@
 import * as XLSX from 'xlsx'
 import type { Product, StockMovement } from './types'
 import type { ImportMeta } from './types'
+import type { ExtractedProduct, ExtractedDocument } from './claude-extractor'
 import { parseCsvRows } from './csv-parse'
 import { formatDateTime } from './utils'
 import { extractStageSectionHeader, isGoodsLeftHeader, makeStageSectionSku, makeStageTotalSku, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX } from './sections'
 import { supabase } from './supabase'
+import { extractPdfText } from './pdf-text-extractor'
+
+export interface PdfExtractResult {
+  products: ExtractedProduct[]
+  document: ExtractedDocument
+  document_id: string | null
+  rows_extracted: number
+  rows_pass: number
+  rows_flagged: number
+  totals_match: boolean
+  totals_diff: Record<string, number>
+  validation_flags: string[]
+  metrics: { duration_ms: number; input_tokens: number; output_tokens: number; lines: number }
+}
+
+/**
+ * Fast synchronous PDF import:
+ *   1. Extract text client-side with pdfjs-dist  (< 1 s, no upload)
+ *   2. POST plain text to /api/extract            (Claude text API, ~15–25 s)
+ *   3. Return structured result directly           (no job queue, no Realtime)
+ */
+export async function importPdfDirect(
+  file: File,
+  onProgress?: (pct: number, stage: string) => void
+): Promise<PdfExtractResult> {
+  onProgress?.(5, 'Reading PDF…')
+  const { text, pageCount } = await extractPdfText(file)
+  logImport(`pdf text extracted — pages: ${pageCount} chars: ${text.length}`)
+
+  if (text.trim().length < 20) {
+    throw new Error('PDF appears to be image-only (no extractable text). Please use a text-based PDF.')
+  }
+
+  onProgress?.(15, 'Sending to Claude…')
+  const res = await fetch('/api/extract', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, file_name: file.name }),
+  })
+
+  onProgress?.(90, 'Processing response…')
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.error ?? `Extraction failed (HTTP ${res.status})`)
+  }
+
+  const data = await res.json()
+  if (!data.success) throw new Error(data.error ?? 'Extraction returned unsuccessful')
+
+  onProgress?.(100, 'Done!')
+  logImport('importPdfDirect complete', { rows: data.rows_extracted, duration_ms: data.metrics?.duration_ms })
+  return data as PdfExtractResult
+}
 
 /** Browser console + optional prod: set NEXT_PUBLIC_DEBUG_PRODUCT_IMPORT=1 */
 function importDebug(): boolean {

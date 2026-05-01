@@ -81,86 +81,89 @@ export interface ClaudeChunkingStats {
 export async function extractFromBuffer(
   fileBuffer: Buffer,
   mediaType: 'application/pdf' | 'image/png' | 'image/jpeg' | 'image/webp',
-  docType: DocType
+  docType: DocType,
+  onProgress?: (elapsedMs: number, charsReceived: number) => void
 ): Promise<ClaudeExtractionResult> {
   const base64Data = fileBuffer.toString('base64')
   const maxTokens = Math.max(4096, Number(process.env.CLAUDE_MAX_TOKENS ?? 32000))
   const prompt = getVisualPromptForDocType(docType)
 
-  console.log(`[claude-extractor] visual mode — media_type: ${mediaType} doc_type: ${docType} file_bytes: ${fileBuffer.length} max_tokens: ${maxTokens}`)
+  console.log(`[claude-extractor] visual stream — media_type: ${mediaType} doc_type: ${docType} file_bytes: ${fileBuffer.length} max_tokens: ${maxTokens}`)
 
   const contentBlock = mediaType === 'application/pdf'
     ? {
         type: 'document' as const,
-        source: {
-          type: 'base64' as const,
-          media_type: 'application/pdf' as const,
-          data: base64Data,
-        },
+        source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: base64Data },
       }
     : {
         type: 'image' as const,
-        source: {
-          type: 'base64' as const,
-          media_type: mediaType as 'image/png' | 'image/jpeg' | 'image/webp',
-          data: base64Data,
-        },
+        source: { type: 'base64' as const, media_type: mediaType as 'image/png' | 'image/jpeg' | 'image/webp', data: base64Data },
       }
 
   const callStart = Date.now()
-  let response: Awaited<ReturnType<typeof anthropic.beta.messages.stream>>
+
+  // .stream() avoids the SDK's "Streaming is required" guard on large payloads.
+  // Text events fire as tokens arrive — used to emit progress and keep the
+  // server-side connection alive during long extractions.
+  const stream = anthropic.beta.messages.stream({
+    model: 'claude-sonnet-4-6',
+    max_tokens: maxTokens,
+    betas: ['pdfs-2024-09-25'],
+    messages: [
+      {
+        role: 'user',
+        content: [contentBlock as any, { type: 'text', text: prompt }],
+      },
+    ],
+  })
+
+  let accumulated = ''
+  let lastProgressEmit = 0
+  const PROGRESS_INTERVAL_MS = 5_000
+
+  stream.on('text', (text) => {
+    accumulated += text
+    if (onProgress) {
+      const now = Date.now()
+      if (now - lastProgressEmit >= PROGRESS_INTERVAL_MS) {
+        lastProgressEmit = now
+        onProgress(now - callStart, accumulated.length)
+      }
+    }
+  })
+
+  stream.on('error', (err: any) => {
+    console.error(`[claude-extractor] stream error — status: ${err?.status ?? 'unknown'} message: ${err?.message ?? err}`)
+    if (err?.error) console.error(`[claude-extractor] error body: ${JSON.stringify(err.error)}`)
+  })
+
+  let finalResponse: Awaited<ReturnType<typeof stream.finalMessage>>
   try {
-    // Use .stream().finalMessage() — .create() throws "Streaming is required" for large PDFs
-    response = anthropic.beta.messages.stream({
-      model: 'claude-sonnet-4-6',
-      max_tokens: maxTokens,
-      betas: ['pdfs-2024-09-25'],
-      messages: [
-        {
-          role: 'user',
-          content: [
-            contentBlock as any,
-            { type: 'text', text: prompt },
-          ],
-        },
-      ],
-    })
+    finalResponse = await stream.finalMessage()
   } catch (err: any) {
     const callMs = Date.now() - callStart
-    console.error(`[claude-extractor] stream setup failed after ${callMs}ms`)
-    console.error(`[claude-extractor] status: ${err?.status ?? 'unknown'} message: ${err?.message ?? err}`)
+    console.error(`[claude-extractor] stream failed after ${callMs}ms — status: ${err?.status ?? 'unknown'} message: ${err?.message ?? err}`)
     if (err?.error) console.error(`[claude-extractor] error body: ${JSON.stringify(err.error)}`)
+    if (err?.headers) console.error(`[claude-extractor] request_id: ${err.headers?.['request-id'] ?? err.headers?.['x-request-id'] ?? 'n/a'}`)
     throw err
   }
 
-  let finalResponse: Awaited<ReturnType<typeof response.finalMessage>>
-  try {
-    finalResponse = await response.finalMessage()
-  } catch (err: any) {
-    const callMs = Date.now() - callStart
-    console.error(`[claude-extractor] stream finalMessage failed after ${callMs}ms`)
-    console.error(`[claude-extractor] status: ${err?.status ?? 'unknown'} message: ${err?.message ?? err}`)
-    if (err?.error) console.error(`[claude-extractor] error body: ${JSON.stringify(err.error)}`)
-    if (err?.headers) console.error(`[claude-extractor] request_id: ${err.headers['request-id'] ?? err.headers['x-request-id'] ?? 'n/a'}`)
-    throw err
-  }
   const callMs = Date.now() - callStart
+  // Use accumulated stream text rather than finalResponse.content — same data
+  // but avoids a redundant base64 decode on large responses.
+  const rawContent = accumulated || (finalResponse.content[0].type === 'text' ? finalResponse.content[0].text : '')
 
-  const rawContent = finalResponse.content[0].type === 'text' ? finalResponse.content[0].text : ''
-
-  console.log(`[claude-extractor] stream done in ${callMs}ms — input_tokens: ${finalResponse.usage.input_tokens} output_tokens: ${finalResponse.usage.output_tokens} stop_reason: ${finalResponse.stop_reason}`)
+  console.log(`[claude-extractor] done in ${callMs}ms — chars: ${rawContent.length} input_tokens: ${finalResponse.usage.input_tokens} output_tokens: ${finalResponse.usage.output_tokens} stop_reason: ${finalResponse.stop_reason}`)
 
   const truncated = finalResponse.stop_reason === 'max_tokens'
-  if (truncated) {
-    console.warn('[claude-extractor] WARNING: hit max_tokens — output may be incomplete')
-  }
+  if (truncated) console.warn('[claude-extractor] WARNING: hit max_tokens — output may be incomplete')
 
   let parsed: { document: ExtractedDocument; products: ExtractedProduct[] }
   try {
     parsed = parseClaudeResponse(rawContent)
   } catch (parseErr: any) {
     console.error(`[claude-extractor] JSON parse failed — raw_length: ${rawContent.length} error: ${parseErr?.message}`)
-    console.error(`[claude-extractor] raw_response_full: ${rawContent}`)
+    console.error(`[claude-extractor] raw_response: ${rawContent}`)
     throw parseErr
   }
 

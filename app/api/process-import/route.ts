@@ -7,10 +7,10 @@ import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 420
 
 const LOCK_STALE_MS = Math.max(60_000, Number(process.env.IMPORT_JOB_LOCK_STALE_MS ?? 8 * 60_000))
-const EXTRACT_TIMEOUT_MS = Math.max(20_000, Number(process.env.IMPORT_EXTRACT_TIMEOUT_MS ?? 240_000))
+const EXTRACT_TIMEOUT_MS = Math.max(20_000, Number(process.env.IMPORT_EXTRACT_TIMEOUT_MS ?? 420_000))
 const MAX_RETRIES = Math.max(0, Number(process.env.IMPORT_JOB_MAX_RETRIES ?? 2))
 const RETRY_BASE_DELAY_MS = Math.max(1000, Number(process.env.IMPORT_JOB_RETRY_BASE_DELAY_MS ?? 5000))
 
@@ -27,6 +27,7 @@ type ImportJob = {
   retry_at?: string | null
   updated_at: string
 }
+
 
 async function setStep(jobId: string, step: string, pct: number, extra?: Record<string, unknown>) {
   console.log(`[process-import] [${jobId}] ${step} (${pct}%)`)
@@ -103,6 +104,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
     if (timeoutHandle) clearTimeout(timeoutHandle)
   }
 }
+
 
 async function claimJob(jobId: string): Promise<ImportJob | null> {
   const { data: job, error } = await supabase
@@ -194,8 +196,22 @@ export async function POST(req: Request) {
 
     await setStep(jobId, 'extracting', 20)
     const extractStart = Date.now()
+    const ocrLines: string[] = []
+
+    // Stream directly — no self-HTTP call, no Google Vision dependency.
+    // onProgress fires every 5 s via the stream text event; each call
+    // writes an updated progress_pct so Realtime shows live advancement
+    // and the job never looks stale during long extractions.
+    let lastProgressPct = 20
     const extraction = await withTimeout(
-      extractFromBuffer(content, mediaType, docTypeHint),
+      extractFromBuffer(content, mediaType, docTypeHint, (elapsedMs) => {
+        // Advance from 20 → 75 over the first 5 minutes, then hold at 75.
+        const pct = Math.min(75, 20 + Math.floor(elapsedMs / 18_000) * 5)
+        if (pct > lastProgressPct) {
+          lastProgressPct = pct
+          setStep(jobId, 'extracting', pct).catch(() => {})
+        }
+      }),
       EXTRACT_TIMEOUT_MS,
       'Claude extraction'
     )
@@ -212,7 +228,7 @@ export async function POST(req: Request) {
     if (!skipInsert) {
       await setStep(jobId, 'saving', 88)
       const insertResult = await withTimeout(
-        insertToSupabase(fileName, fileSha256, extraction, validation, []),
+        insertToSupabase(fileName, fileSha256, extraction, validation, ocrLines),
         60_000,
         'Supabase insert'
       )
