@@ -35,7 +35,8 @@
       "Bash(curl -sf http://localhost:8001/health)",
       "Bash(docker stop *)",
       "mcp__supabase__get_logs",
-      "mcp__supabase__deploy_edge_function"
+      "mcp__supabase__deploy_edge_function",
+      "mcp__supabase__get_edge_function"
     ]
   },
   "enableAllProjectMcpServers": true,

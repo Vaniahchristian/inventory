@@ -62,6 +62,8 @@ export type ProductDocumentRef = {
   id: string
   source_file_name: string | null
   document_type: 'sales_order' | 'container_manifest'
+  extraction_status?: string
+  publish_state?: 'staged' | 'published'
   created_at: string
 }
 

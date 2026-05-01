@@ -73,6 +73,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
   const [importStage, setImportStage] = useState<string | null>(null)
   const [importJobId, setImportJobId] = useState<string | null>(null)
   const [importProgress, setImportProgress] = useState<number>(0)
+  const retriedJobIdsRef = useRef<Set<string>>(new Set())
   const realProducts = useMemo(() => products.filter(p => !isSectionDividerProduct(p)), [products])
   const filtered = useMemo(() => {
     const queryTrimmed = query.trim().toLowerCase()
@@ -203,14 +204,27 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
                 extracting: 'Claude is reading the PDF…',
                 validating: 'Validating extracted data…',
                 saving: 'Saving to database…',
+                retrying: 'Transient error — retrying…',
                 done: 'Done!',
                 failed: 'Extraction failed',
               }
               setImportStage(stepLabels[job.step] ?? `Processing… (${job.step})`)
 
+              if (job.status === 'retryable' && !retriedJobIdsRef.current.has(jobId)) {
+                retriedJobIdsRef.current.add(jobId)
+                const retryDelayMs = Number(job?.result?.retry_delay_ms ?? 2000)
+                importConsole('retry scheduled', { job_id: jobId, retry_delay_ms: retryDelayMs })
+                window.setTimeout(() => {
+                  supabase.functions
+                    .invoke('process-import', { body: { job_id: jobId } })
+                    .catch(err => importConsole('retry trigger failed', { job_id: jobId, error: String(err) }))
+                }, retryDelayMs)
+              }
+
               if (job.status === 'completed') {
                 channel.unsubscribe()
                 setImportJobId(null)
+                retriedJobIdsRef.current.delete(jobId)
                 const result = job.result as Record<string, any>
                 const products = Array.isArray(result?.products) ? result.products : []
                 const doc = result?.document ?? {}
@@ -266,14 +280,23 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
                   try {
                     const importResult = await importProducts(rows, meta)
                     const count = typeof importResult === 'number' ? importResult : importResult.importedCount
+                    const stagedOnly = typeof importResult === 'number' ? false : !!importResult.stagedOnly
                     const totalsMatch = typeof importResult === 'number' ? true : importResult.totalsMatch
                     const totalsDiff = typeof importResult === 'number' ? null : importResult.totalsDiff
-                    toast.success(`Imported ${count} products`)
+                    if (stagedOnly) {
+                      toast.success('Import staged successfully. Open Review Queue to finalize publishing.')
+                    } else {
+                      toast.success(`Imported ${count} products`)
+                    }
                     if (!totalsMatch && totalsDiff) {
                       toast.info(`Totals differ: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`)
                     }
                   } catch (err: unknown) {
-                    toast.error(err instanceof Error ? err.message : 'Save failed')
+                    const message = err instanceof Error ? err.message : 'Save failed'
+                    toast.error(message)
+                    if (message.toLowerCase().includes('held for review')) {
+                      toast.info('Review required: open the Review Queue and finalize only when rows/totals match.')
+                    }
                   } finally {
                     setImportStage(null)
                     setImportProgress(0)
@@ -284,6 +307,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
               if (job.status === 'failed') {
                 channel.unsubscribe()
                 setImportJobId(null)
+                retriedJobIdsRef.current.delete(jobId)
                 toast.error(`Extraction failed: ${job.error ?? 'unknown error'}`)
                 setImportStage(null)
                 setImportProgress(0)
@@ -316,10 +340,13 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
         try {
           const result = await importProducts(rows, meta)
           const count = typeof result === 'number' ? result : result.importedCount
+          const stagedOnly = typeof result === 'number' ? false : !!result.stagedOnly
           const llmAligned = typeof result === 'number' ? 0 : result.llmAligned
           const totalsMatch = typeof result === 'number' ? true : result.totalsMatch
           const totalsDiff = typeof result === 'number' ? null : result.totalsDiff
-          if (llmAligned > 0) {
+          if (stagedOnly) {
+            toast.success('Import staged successfully. Open Review Queue to finalize publishing.')
+          } else if (llmAligned > 0) {
             toast.success(`Imported ${count} products (LLM aligned ${llmAligned} rows)`)
           } else {
             toast.success(`Imported ${count} products`)
@@ -328,7 +355,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
             toast.info(`Totals differ: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`)
           }
         } catch (err: unknown) {
-          toast.error(err instanceof Error ? err.message : 'Import failed')
+          const message = err instanceof Error ? err.message : 'Import failed'
+          toast.error(message)
+          if (message.toLowerCase().includes('held for review')) {
+            toast.info('Review required: open the Review Queue and finalize only when rows/totals match.')
+          }
         } finally {
           setImportStage(null)
         }

@@ -6,13 +6,21 @@ import { getSuppliers } from '@/app/actions/suppliers'
 import { CompiledProductsClient } from './compiled-client'
 
 export default async function CompiledProductsPage() {
-  const [products, importMeta, categories, suppliers, productDocuments] = await Promise.all([
-    getProducts(),
-    getLatestImportMeta(),
-    getCategories(),
-    getSuppliers(),
-    getProductDocuments(),
-  ])
+  const [productsResult, importMetaResult, categoriesResult, suppliersResult, productDocumentsResult] =
+    await Promise.allSettled([
+      getProducts(),
+      getLatestImportMeta(),
+      getCategories(),
+      getSuppliers(),
+      getProductDocuments(),
+    ])
+
+  if (productsResult.status === 'rejected') throw productsResult.reason
+  const products = productsResult.value
+  const importMeta = importMetaResult.status === 'fulfilled' ? importMetaResult.value : null
+  const categories = categoriesResult.status === 'fulfilled' ? categoriesResult.value : []
+  const suppliers = suppliersResult.status === 'fulfilled' ? suppliersResult.value : []
+  const productDocuments = productDocumentsResult.status === 'fulfilled' ? productDocumentsResult.value : []
 
   return (
     <CompiledProductsClient

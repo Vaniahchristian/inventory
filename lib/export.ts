@@ -1319,11 +1319,16 @@ export async function parseImportFile(file: File): Promise<Record<string, unknow
  *
  * Flow:
  *   browser → Supabase Storage (no serverless body limit)
- *   → POST /api/queue-import  → job_id (instant)
- *   → POST /api/process-import (fire-and-forget, runs up to 300s on Vercel Pro)
+ *   → insert public.import_jobs directly via Supabase client
+ *   → invoke Supabase Edge Function process-import (fire-and-forget)
  *   → Supabase Realtime pushes progress to subscribers
  */
 export async function startPdfImportJob(file: File): Promise<string> {
+  const fileBuffer = await file.arrayBuffer()
+  const hashBuffer = await crypto.subtle.digest('SHA-256', fileBuffer)
+  const fileHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('')
+  const idempotencyKey = `pdf:${fileHash}`
+
   // 1. Upload to Supabase Storage
   const importPath = `imports/${Date.now()}-${file.name.replace(/[^\w.\-()]/g, '_')}`
   logImport('uploading to storage:', importPath)
@@ -1338,27 +1343,47 @@ export async function startPdfImportJob(file: File): Promise<string> {
   const fileUrl = pub.publicUrl
   logImport('upload done, url:', fileUrl)
 
-  // 2. Create job record → returns job_id instantly
-  const queueRes = await fetch('/api/queue-import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_url: fileUrl, file_name: file.name, skip_db_insert: false }),
-  })
-  if (!queueRes.ok) {
-    const err = await queueRes.json().catch(() => ({}))
-    throw new Error(`Queue failed: ${err.error ?? queueRes.status}`)
+  // 2. Create job record directly in Supabase → returns job_id instantly
+  const { data: existing } = await supabase
+    .from('import_jobs')
+    .select('id')
+    .eq('idempotency_key', idempotencyKey)
+    .in('status', ['queued', 'processing', 'retryable', 'completed'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  let job_id: string
+  if (existing?.id) {
+    job_id = existing.id
+  } else {
+    const { data: inserted, error: queueErr } = await supabase
+      .from('import_jobs')
+      .insert({
+        file_url: fileUrl,
+        file_name: file.name,
+        idempotency_key: idempotencyKey,
+        attempt_count: 0,
+        retry_at: null,
+        skip_db_insert: false,
+        status: 'queued',
+        step: 'queued',
+        progress_pct: 0,
+      })
+      .select('id')
+      .single()
+    if (queueErr || !inserted?.id) {
+      throw new Error(`Queue failed: ${queueErr?.message ?? 'missing job id'}`)
+    }
+    job_id = inserted.id
   }
-  const { job_id } = await queueRes.json()
   logImport('job queued:', job_id)
 
-  // 3. Fire the Supabase Edge Function — runs up to 400s, no Vercel timeout constraint.
-  //    Fire-and-forget: the browser tracks progress via Supabase Realtime, not this response.
-  const edgeFnUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/process-import`
-  fetch(edgeFnUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id }),
-  }).catch(err => logImport('edge function fire-and-forget error:', err?.message ?? err))
+  // 3. Fire Supabase Edge Function.
+  //    Fire-and-forget: browser tracks progress via Supabase Realtime, not this response.
+  supabase.functions
+    .invoke('process-import', { body: { job_id } })
+    .catch(err => logImport('edge process-import fire-and-forget error:', err?.message ?? err))
 
   return job_id
 }

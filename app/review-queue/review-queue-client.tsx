@@ -1,8 +1,8 @@
 'use client'
 
-import { useTransition } from 'react'
+import { useState, useTransition } from 'react'
 import { toast } from 'sonner'
-import { approveDocumentReview } from '@/app/actions/products'
+import { approveDocumentReview, finalizeDocumentPublish, getReviewDocumentItems, rerunReviewItemWithDeepseek, setReviewItemStatus } from '@/app/actions/products'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -19,16 +19,93 @@ type ReviewDoc = {
   created_at: string
 }
 
+type ReviewItem = {
+  id: string
+  line_no: number
+  item_code: string | null
+  description: string | null
+  packaging: string | null
+  total_cartons: number | null
+  total_quantity: number | null
+  unit_price_rmb: number | null
+  total_amount_rmb: number | null
+  validation_flags: string[]
+  review_status: 'pending' | 'accepted' | 'rejected'
+  model_source: string | null
+  rerun_count: number
+}
+
+type ReviewDetail = {
+  document: { id: string; source_file_name: string; extraction_status: string }
+  gate: {
+    rowParityMatch: boolean
+    totalsMatch: boolean
+    hasBlockingFlags: boolean
+    counts: { accepted: number; total: number }
+  }
+  items: ReviewItem[]
+}
+
 export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
   const [isPending, startTransition] = useTransition()
+  const [activeDocId, setActiveDocId] = useState<string | null>(null)
+  const [detailByDoc, setDetailByDoc] = useState<Record<string, ReviewDetail>>({})
+
+  function loadDetails(id: string) {
+    startTransition(async () => {
+      try {
+        const detail = await getReviewDocumentItems(id)
+        setDetailByDoc(prev => ({ ...prev, [id]: detail as ReviewDetail }))
+        setActiveDocId(id)
+      } catch (e: any) {
+        toast.error(e.message ?? 'Failed to load review rows')
+      }
+    })
+  }
 
   function handleApprove(id: string) {
     startTransition(async () => {
       try {
         await approveDocumentReview(id)
         toast.success('Document approved')
+        if (activeDocId === id) loadDetails(id)
       } catch (e: any) {
         toast.error(e.message ?? 'Approval failed')
+      }
+    })
+  }
+
+  function handleFinalize(id: string) {
+    startTransition(async () => {
+      try {
+        const result = await finalizeDocumentPublish(id)
+        toast.success(`Finalized and published ${result.publishedCount} row(s)`)
+        if (activeDocId === id) loadDetails(id)
+      } catch (e: any) {
+        toast.error(e.message ?? 'Finalize failed')
+      }
+    })
+  }
+
+  function handleSetStatus(documentId: string, itemId: string, status: 'pending' | 'accepted' | 'rejected') {
+    startTransition(async () => {
+      try {
+        await setReviewItemStatus(itemId, status)
+        await loadDetails(documentId)
+      } catch (e: any) {
+        toast.error(e.message ?? 'Failed to update row status')
+      }
+    })
+  }
+
+  function handleRerun(documentId: string, itemId: string) {
+    startTransition(async () => {
+      try {
+        await rerunReviewItemWithDeepseek(itemId)
+        toast.success('Row rerun completed')
+        await loadDetails(documentId)
+      } catch (e: any) {
+        toast.error(e.message ?? 'Rerun failed')
       }
     })
   }
@@ -82,9 +159,17 @@ export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
                   </TableCell>
                   <TableCell>{new Date(doc.created_at).toLocaleString()}</TableCell>
                   <TableCell className="text-right">
-                    <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleApprove(doc.id)}>
-                      Approve
-                    </Button>
+                    <div className="flex items-center gap-2 justify-end">
+                      <Button size="sm" variant="outline" disabled={isPending} onClick={() => loadDetails(doc.id)}>
+                        Review Rows
+                      </Button>
+                      <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleApprove(doc.id)}>
+                        Approve
+                      </Button>
+                      <Button size="sm" disabled={isPending} onClick={() => handleFinalize(doc.id)}>
+                        Finalize
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))
@@ -92,6 +177,81 @@ export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
           </TableBody>
         </Table>
       </div>
+
+      {activeDocId && detailByDoc[activeDocId] && (
+        <div className="rounded-md border bg-white p-3 space-y-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <h2 className="text-sm font-semibold">Row Review — {detailByDoc[activeDocId].document.source_file_name}</h2>
+            <Badge variant={detailByDoc[activeDocId].gate.rowParityMatch ? 'outline' : 'destructive'}>
+              Row parity: {detailByDoc[activeDocId].gate.rowParityMatch ? 'OK' : 'Mismatch'}
+            </Badge>
+            <Badge variant={detailByDoc[activeDocId].gate.totalsMatch ? 'outline' : 'destructive'}>
+              Totals: {detailByDoc[activeDocId].gate.totalsMatch ? 'Match' : 'Mismatch'}
+            </Badge>
+            <Badge variant={detailByDoc[activeDocId].gate.hasBlockingFlags ? 'destructive' : 'outline'}>
+              Blocking flags: {detailByDoc[activeDocId].gate.hasBlockingFlags ? 'Yes' : 'No'}
+            </Badge>
+            <span className="text-xs text-slate-500 ml-auto">
+              Accepted {detailByDoc[activeDocId].gate.counts.accepted}/{detailByDoc[activeDocId].gate.counts.total}
+            </span>
+          </div>
+
+          <div className="rounded-md border overflow-x-auto">
+            <Table className="text-xs min-w-[1200px]">
+              <TableHeader>
+                <TableRow className="bg-slate-50">
+                  <TableHead>#</TableHead>
+                  <TableHead>Item Code</TableHead>
+                  <TableHead>Description</TableHead>
+                  <TableHead>Packing</TableHead>
+                  <TableHead className="text-right">CTN</TableHead>
+                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Unit Price</TableHead>
+                  <TableHead className="text-right">Amount</TableHead>
+                  <TableHead>Flags</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Model</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {detailByDoc[activeDocId].items.map(row => (
+                  <TableRow key={row.id}>
+                    <TableCell>{row.line_no}</TableCell>
+                    <TableCell>{row.item_code ?? '-'}</TableCell>
+                    <TableCell className="max-w-[220px] truncate">{row.description ?? '-'}</TableCell>
+                    <TableCell>{row.packaging ?? '-'}</TableCell>
+                    <TableCell className="text-right">{row.total_cartons ?? '-'}</TableCell>
+                    <TableCell className="text-right">{row.total_quantity ?? '-'}</TableCell>
+                    <TableCell className="text-right">{row.unit_price_rmb ?? '-'}</TableCell>
+                    <TableCell className="text-right">{row.total_amount_rmb ?? '-'}</TableCell>
+                    <TableCell className="max-w-[260px] truncate">{row.validation_flags.join(', ') || '-'}</TableCell>
+                    <TableCell>
+                      <Badge variant={row.review_status === 'accepted' ? 'outline' : row.review_status === 'rejected' ? 'destructive' : 'secondary'}>
+                        {row.review_status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{row.model_source ?? '-'} ({row.rerun_count})</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center gap-1 justify-end">
+                        <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleSetStatus(activeDocId, row.id, 'accepted')}>
+                          Accept
+                        </Button>
+                        <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleSetStatus(activeDocId, row.id, 'rejected')}>
+                          Reject
+                        </Button>
+                        <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleRerun(activeDocId, row.id)}>
+                          Rerun (DeepSeek)
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
