@@ -1379,11 +1379,14 @@ export async function startPdfImportJob(file: File): Promise<string> {
   }
   logImport('job queued:', job_id)
 
-  // 3. Fire Supabase Edge Function.
+  // 3. Fire the Next.js API route (maxDuration=300) instead of the Supabase Edge Function
+  //    (edge functions have a 150s wall-clock limit that kills the process before cleanup runs).
   //    Fire-and-forget: browser tracks progress via Supabase Realtime, not this response.
-  supabase.functions
-    .invoke('process-import', { body: { job_id } })
-    .catch(err => logImport('edge process-import fire-and-forget error:', err?.message ?? err))
+  fetch('/api/process-import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_id }),
+  }).catch(err => logImport('process-import fire-and-forget error:', err?.message ?? err))
 
   return job_id
 }

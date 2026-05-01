@@ -215,9 +215,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
                 const retryDelayMs = Number(job?.result?.retry_delay_ms ?? 2000)
                 importConsole('retry scheduled', { job_id: jobId, retry_delay_ms: retryDelayMs })
                 window.setTimeout(() => {
-                  supabase.functions
-                    .invoke('process-import', { body: { job_id: jobId } })
-                    .catch(err => importConsole('retry trigger failed', { job_id: jobId, error: String(err) }))
+                  fetch('/api/process-import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ job_id: jobId }),
+                  }).catch(err => importConsole('retry trigger failed', { job_id: jobId, error: String(err) }))
                 }, retryDelayMs)
               }
 
