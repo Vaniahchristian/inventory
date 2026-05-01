@@ -442,6 +442,17 @@ function parseJsonArray(value: unknown): string[] {
 }
 
 async function recomputeDocumentReviewStatus(documentId: string) {
+  const { data: currentDoc, error: currentDocErr } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('documents')
+        .select('publish_state, extraction_status, published_at, published_by')
+        .eq('id', documentId)
+        .maybeSingle(),
+    'recomputeDocumentReviewStatus.currentDoc'
+  )
+  if (currentDocErr) throw new Error(currentDocErr.message)
+
   const { data: items, error: itemsErr } = await withSupabaseRetry(
     () =>
       supabase
@@ -497,6 +508,13 @@ async function recomputeDocumentReviewStatus(documentId: string) {
   const blockingFlags = new Set(['missing_name', 'missing_packing', 'amount_mismatch', 'price_missing_but_amount_present'])
   const hasBlockingFlags = accepted.some(r => parseJsonArray(r.validation_flags).some(f => blockingFlags.has(f)))
   const status = rowParityMatch && totalsMatch && !hasBlockingFlags ? 'approved' : 'review_needed'
+  const keepPublished = String(currentDoc?.publish_state ?? '') === 'published'
+  if (keepPublished && status !== 'approved') {
+    logImport('recomputeDocumentReviewStatus preserving published state despite gate mismatch', {
+      documentId,
+      computedStatus: status,
+    })
+  }
 
   await withSupabaseRetry(
     () =>
@@ -526,11 +544,13 @@ async function recomputeDocumentReviewStatus(documentId: string) {
       supabase
         .from('documents')
         .update({
-          extraction_status: status,
-          publish_state: 'staged',
-          ...(status !== 'approved'
-            ? { published_at: null, published_by: null }
-            : {}),
+          extraction_status: keepPublished ? 'approved' : status,
+          publish_state: keepPublished ? 'published' : 'staged',
+          ...(keepPublished
+            ? {}
+            : (status !== 'approved'
+                ? { published_at: null, published_by: null }
+                : {})),
         })
         .eq('id', documentId),
     'recomputeDocumentReviewStatus.updateDocument'
@@ -591,6 +611,39 @@ export async function getReviewDocumentItems(documentId: string) {
       rerun_count: intOrNull(r.rerun_count) ?? 0,
     } satisfies ReviewRow)),
   }
+}
+
+export async function deleteReviewDocument(documentId: string) {
+  const { data: currentDoc, error: currentDocErr } = await withSupabaseRetry(
+    () => supabase.from('documents').select('id, source_file_name').eq('id', documentId).single(),
+    'deleteReviewDocument.getDocument'
+  )
+  if (currentDocErr) throw new Error(currentDocErr.message)
+  const sourceFileName = str((currentDoc as Record<string, unknown>)?.source_file_name) || null
+
+  await withSupabaseRetry(
+    () => supabase.from('products').delete().eq('source_document_id', documentId),
+    'deleteReviewDocument.products'
+  )
+  await withSupabaseRetry(
+    () => supabase.from('import_jobs').delete().eq('document_id', documentId),
+    'deleteReviewDocument.importJobs'
+  )
+  if (sourceFileName) {
+    await withSupabaseRetry(
+      () => supabase.from('product_import_audit').delete().eq('source_file_name', sourceFileName),
+      'deleteReviewDocument.importAudit'
+    )
+  }
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('documents').delete().eq('id', documentId),
+    'deleteReviewDocument.document'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/review-queue')
+  revalidatePath('/products')
+  revalidatePath('/compiled-products')
+  revalidatePath('/')
 }
 
 export async function setReviewItemStatus(itemId: string, status: ReviewRowStatus, note?: string) {

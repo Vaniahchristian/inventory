@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from 'react'
 import { toast } from 'sonner'
-import { approveDocumentReview, finalizeDocumentPublish, getReviewDocumentItems, rerunReviewItemWithDeepseek, setReviewItemStatus } from '@/app/actions/products'
+import { deleteReviewDocument, finalizeDocumentPublish, getReviewDocumentItems } from '@/app/actions/products'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -63,49 +63,27 @@ export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
     })
   }
 
-  function handleApprove(id: string) {
-    startTransition(async () => {
-      try {
-        await approveDocumentReview(id)
-        toast.success('Document approved')
-        if (activeDocId === id) loadDetails(id)
-      } catch (e: any) {
-        toast.error(e.message ?? 'Approval failed')
-      }
-    })
-  }
-
-  function handleFinalize(id: string) {
+  function handlePushToProducts(id: string) {
     startTransition(async () => {
       try {
         const result = await finalizeDocumentPublish(id)
-        toast.success(`Finalized and published ${result.publishedCount} row(s)`)
+        toast.success(`Pushed ${result.publishedCount} row(s) to products`)
         if (activeDocId === id) loadDetails(id)
       } catch (e: any) {
-        toast.error(e.message ?? 'Finalize failed')
+        toast.error(e.message ?? 'Push to products failed')
       }
     })
   }
 
-  function handleSetStatus(documentId: string, itemId: string, status: 'pending' | 'accepted' | 'rejected') {
+  function handleDeleteDocument(id: string) {
+    if (!confirm('Delete this review document and its published products? This cannot be undone.')) return
     startTransition(async () => {
       try {
-        await setReviewItemStatus(itemId, status)
-        await loadDetails(documentId)
+        await deleteReviewDocument(id)
+        toast.success('Review document deleted')
+        if (activeDocId === id) setActiveDocId(null)
       } catch (e: any) {
-        toast.error(e.message ?? 'Failed to update row status')
-      }
-    })
-  }
-
-  function handleRerun(documentId: string, itemId: string) {
-    startTransition(async () => {
-      try {
-        await rerunReviewItemWithDeepseek(itemId)
-        toast.success('Row rerun completed')
-        await loadDetails(documentId)
-      } catch (e: any) {
-        toast.error(e.message ?? 'Rerun failed')
+        toast.error(e.message ?? 'Delete failed')
       }
     })
   }
@@ -163,11 +141,11 @@ export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
                       <Button size="sm" variant="outline" disabled={isPending} onClick={() => loadDetails(doc.id)}>
                         Review Rows
                       </Button>
-                      <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleApprove(doc.id)}>
-                        Approve
+                      <Button size="sm" variant="destructive" disabled={isPending} onClick={() => handleDeleteDocument(doc.id)}>
+                        Delete
                       </Button>
-                      <Button size="sm" disabled={isPending} onClick={() => handleFinalize(doc.id)}>
-                        Finalize
+                      <Button size="sm" disabled={isPending} onClick={() => handlePushToProducts(doc.id)}>
+                        Push to Products
                       </Button>
                     </div>
                   </TableCell>
@@ -211,7 +189,6 @@ export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
                   <TableHead>Flags</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Model</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -232,19 +209,6 @@ export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
                       </Badge>
                     </TableCell>
                     <TableCell>{row.model_source ?? '-'} ({row.rerun_count})</TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center gap-1 justify-end">
-                        <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleSetStatus(activeDocId, row.id, 'accepted')}>
-                          Accept
-                        </Button>
-                        <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleSetStatus(activeDocId, row.id, 'rejected')}>
-                          Reject
-                        </Button>
-                        <Button size="sm" variant="outline" disabled={isPending} onClick={() => handleRerun(activeDocId, row.id)}>
-                          Rerun (DeepSeek)
-                        </Button>
-                      </div>
-                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

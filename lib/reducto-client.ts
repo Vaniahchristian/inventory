@@ -1,4 +1,6 @@
 const REDUCTO_BASE = 'https://platform.reducto.ai'
+const REDUCTO_PARSE_TIMEOUT_MS = Number(process.env.REDUCTO_PARSE_TIMEOUT_MS ?? 360000)
+const REDUCTO_PARSE_MAX_ATTEMPTS = Math.max(1, Number(process.env.REDUCTO_PARSE_MAX_ATTEMPTS ?? 2))
 
 interface ReductoChunk {
   content: string
@@ -62,30 +64,54 @@ export async function extractWithReducto(
   // HTML table format preserves colspan/rowspan — critical for merged cells (T.CTN, MARKS).
   // Agentic table scope adds AI-powered table structure understanding.
   const parseStart = Date.now()
-  let parseRes: Response
-  try {
-    parseRes = await fetch(`${REDUCTO_BASE}/parse`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        input: file_id,
-        formatting: {
-          table_output_format: 'html',
-          add_page_markers: false,
+  const parseBody = JSON.stringify({
+    input: file_id,
+    formatting: {
+      table_output_format: 'html',
+      add_page_markers: false,
+    },
+    enhance: {
+      agentic: [{ scope: 'table' }],
+    },
+    settings: {
+      extraction_mode: 'hybrid',
+    },
+  })
+
+  let parseRes: Response | null = null
+  let lastNetworkError: unknown = null
+  for (let attempt = 1; attempt <= REDUCTO_PARSE_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), REDUCTO_PARSE_TIMEOUT_MS)
+    try {
+      parseRes = await fetch(`${REDUCTO_BASE}/parse`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
-        enhance: {
-          agentic: [{ scope: 'table' }],
-        },
-        settings: {
-          extraction_mode: 'hybrid',
-        },
-      }),
-    })
-  } catch (err: any) {
-    throw new Error(`Reducto parse network error: ${err?.message ?? err}`)
+        body: parseBody,
+        signal: controller.signal,
+      })
+      lastNetworkError = null
+      break
+    } catch (err: any) {
+      lastNetworkError = err
+      const detail = err?.name === 'AbortError'
+        ? `timeout after ${REDUCTO_PARSE_TIMEOUT_MS}ms`
+        : err?.message ?? String(err)
+      console.warn(`${tag} parse attempt ${attempt}/${REDUCTO_PARSE_MAX_ATTEMPTS} network error: ${detail}`)
+      if (attempt < REDUCTO_PARSE_MAX_ATTEMPTS) {
+        const backoffMs = attempt * 2000
+        await new Promise(resolve => setTimeout(resolve, backoffMs))
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+  if (!parseRes) {
+    const msg = (lastNetworkError as any)?.message ?? String(lastNetworkError)
+    throw new Error(`Reducto parse network error: ${msg}`)
   }
   if (!parseRes.ok) {
     const err = await parseRes.text().catch(() => parseRes.statusText)

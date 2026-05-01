@@ -1,13 +1,32 @@
 import { NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { detectDocTypeFromFilename, detectDocType } from '@/lib/prompts'
-import { extractWithClaude } from '@/lib/claude-extractor'
+import { extractWithClaudeChunked } from '@/lib/claude-extractor'
 import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
 import { extractWithReducto, isReductoConfigured } from '@/lib/reducto-client'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 420
+
+function selectRelevantExtractionLines(input: string[]): string[] {
+  const lines = input.map(l => l.trim()).filter(Boolean)
+  const keep = lines.filter((line) => {
+    const u = line.toUpperCase()
+    return (
+      /^\d+\s+/.test(line) ||
+      /[¥￥]\s*[\d,]/.test(line) ||
+      /\b(CTN|CTNS|PCS|CBM|KGS|U\/P|AMOUNT|PACKING|ITEM NO|ORD NO|CUS NO|W\.H\.)\b/i.test(line) ||
+      /[\u4e00-\u9fff]/.test(line) ||
+      u.includes('TOTAL') ||
+      u.includes('SALES') ||
+      u.includes('WAREHOUSE') ||
+      u.includes('SANCARGO')
+    )
+  })
+  const maxLines = Math.max(200, Number(process.env.EXTRACT_MAX_LINES ?? 1200))
+  return keep.slice(0, maxLines)
+}
 
 export async function POST(req: Request) {
   const startMs = Date.now()
@@ -81,16 +100,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'No text content to extract from' }, { status: 400 })
   }
 
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const linesRaw = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const lines = selectRelevantExtractionLines(linesRaw)
   const docType = detectDocTypeFromFilename(fileName) !== 'unknown'
     ? detectDocTypeFromFilename(fileName)
     : detectDocType(lines)
 
-  console.log(`[extract][${debugId}] method: ${extractionMethod} doc_type: ${docType} lines: ${lines.length}`)
+  console.log(`[extract][${debugId}] method: ${extractionMethod} doc_type: ${docType} lines_raw: ${linesRaw.length} lines_used: ${lines.length}`)
 
-  let extraction: Awaited<ReturnType<typeof extractWithClaude>>
+  let extraction: Awaited<ReturnType<typeof extractWithClaudeChunked>>
   try {
-    extraction = await extractWithClaude(lines, docType, 'extract-route')
+    extraction = await extractWithClaudeChunked(lines, docType)
+    console.log(
+      `[extract][${debugId}] chunking: chunks=${extraction.chunking.chunk_count} subchunks=${extraction.chunking.subchunk_count} failed=${extraction.chunking.failed_chunks} truncated=${extraction.chunking.truncated_chunks}`
+    )
   } catch (err: any) {
     const msg = err?.message ?? String(err)
     console.error(`[extract][${debugId}] Claude call failed: ${msg}`)
@@ -120,7 +143,7 @@ export async function POST(req: Request) {
 
   const durationMs = Date.now() - startMs
   console.log(
-    `[extract][${debugId}] complete in ${durationMs}ms — rows: ${extraction.products.length} tokens_in: ${extraction.input_tokens} tokens_out: ${extraction.output_tokens}`
+    `[extract][${debugId}] complete in ${durationMs}ms — rows: ${extraction.products.length} tokens_in: ${extraction.input_tokens} tokens_out: ${extraction.output_tokens} stop_truncated=${extraction.truncated}`
   )
 
   return NextResponse.json({
@@ -140,7 +163,11 @@ export async function POST(req: Request) {
       duration_ms: durationMs,
       input_tokens: extraction.input_tokens,
       output_tokens: extraction.output_tokens,
-      lines: lines.length,
+      lines_raw: linesRaw.length,
+      lines_used: lines.length,
+      chunk_count: extraction.chunking.chunk_count,
+      failed_chunks: extraction.chunking.failed_chunks,
+      truncated_chunks: extraction.chunking.truncated_chunks,
     },
   })
 }
