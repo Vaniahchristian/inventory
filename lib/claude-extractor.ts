@@ -108,9 +108,10 @@ export async function extractFromBuffer(
       }
 
   const callStart = Date.now()
-  let response: Awaited<ReturnType<typeof anthropic.beta.messages.create>>
+  let response: Awaited<ReturnType<typeof anthropic.beta.messages.stream>>
   try {
-    response = await anthropic.beta.messages.create({
+    // Use .stream().finalMessage() — .create() throws "Streaming is required" for large PDFs
+    response = anthropic.beta.messages.stream({
       model: 'claude-sonnet-4-6',
       max_tokens: maxTokens,
       betas: ['pdfs-2024-09-25'],
@@ -126,7 +127,18 @@ export async function extractFromBuffer(
     })
   } catch (err: any) {
     const callMs = Date.now() - callStart
-    console.error(`[claude-extractor] API call failed after ${callMs}ms`)
+    console.error(`[claude-extractor] stream setup failed after ${callMs}ms`)
+    console.error(`[claude-extractor] status: ${err?.status ?? 'unknown'} message: ${err?.message ?? err}`)
+    if (err?.error) console.error(`[claude-extractor] error body: ${JSON.stringify(err.error)}`)
+    throw err
+  }
+
+  let finalResponse: Awaited<ReturnType<typeof response.finalMessage>>
+  try {
+    finalResponse = await response.finalMessage()
+  } catch (err: any) {
+    const callMs = Date.now() - callStart
+    console.error(`[claude-extractor] stream finalMessage failed after ${callMs}ms`)
     console.error(`[claude-extractor] status: ${err?.status ?? 'unknown'} message: ${err?.message ?? err}`)
     if (err?.error) console.error(`[claude-extractor] error body: ${JSON.stringify(err.error)}`)
     if (err?.headers) console.error(`[claude-extractor] request_id: ${err.headers['request-id'] ?? err.headers['x-request-id'] ?? 'n/a'}`)
@@ -134,11 +146,11 @@ export async function extractFromBuffer(
   }
   const callMs = Date.now() - callStart
 
-  const rawContent = response.content[0].type === 'text' ? response.content[0].text : ''
+  const rawContent = finalResponse.content[0].type === 'text' ? finalResponse.content[0].text : ''
 
-  console.log(`[claude-extractor] API done in ${callMs}ms — input_tokens: ${response.usage.input_tokens} output_tokens: ${response.usage.output_tokens} stop_reason: ${response.stop_reason}`)
+  console.log(`[claude-extractor] stream done in ${callMs}ms — input_tokens: ${finalResponse.usage.input_tokens} output_tokens: ${finalResponse.usage.output_tokens} stop_reason: ${finalResponse.stop_reason}`)
 
-  const truncated = response.stop_reason === 'max_tokens'
+  const truncated = finalResponse.stop_reason === 'max_tokens'
   if (truncated) {
     console.warn('[claude-extractor] WARNING: hit max_tokens — output may be incomplete')
   }
@@ -157,9 +169,9 @@ export async function extractFromBuffer(
   return {
     document: parsed.document,
     products: parsed.products,
-    model: response.model,
-    input_tokens: response.usage.input_tokens,
-    output_tokens: response.usage.output_tokens,
+    model: finalResponse.model,
+    input_tokens: finalResponse.usage.input_tokens,
+    output_tokens: finalResponse.usage.output_tokens,
     truncated,
   }
 }
