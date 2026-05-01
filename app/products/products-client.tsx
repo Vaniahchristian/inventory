@@ -186,10 +186,15 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
 
         const { products, document: doc } = result
 
-        const meta = {
+        const normalizedDocumentType: ImportMeta['document_type'] =
+          doc.document_type === 'sales_order' || doc.document_type === 'container_manifest'
+            ? doc.document_type
+            : 'container_manifest'
+
+        const meta: ImportMeta = {
           source_file_name: file.name,
           source_file_type: 'pdf' as const,
-          document_type: doc.document_type ?? 'container_manifest',
+          document_type: normalizedDocumentType,
           client_details: doc.client_id ?? null,
           container_no: doc.container_no ?? null,
           total_carton: doc.footer_totals?.total_cartons ?? null,
