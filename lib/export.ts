@@ -25,27 +25,33 @@ export interface PdfExtractResult {
 
 /**
  * Fast synchronous PDF import:
- *   1. Extract text client-side with pdfjs-dist  (< 1 s, no upload)
- *   2. POST plain text to /api/extract            (Claude text API, ~15–25 s)
- *   3. Return structured result directly           (no job queue, no Realtime)
+ *   1. Extract text client-side with pdfjs-dist  (< 1 s — serves as fallback text)
+ *   2. POST file + fallback_text to /api/extract
+ *        → server uses Reducto if configured (2–5 s, handles merged cells)
+ *        → falls back to pdfjs text → Claude if Reducto is not set
+ *   3. Return structured result directly (no job queue, no Realtime)
  */
 export async function importPdfDirect(
   file: File,
   onProgress?: (pct: number, stage: string) => void
 ): Promise<PdfExtractResult> {
   onProgress?.(5, 'Reading PDF…')
-  const { text, pageCount } = await extractPdfText(file)
-  logImport(`pdf text extracted — pages: ${pageCount} chars: ${text.length}`)
+  const { text: fallbackText, pageCount } = await extractPdfText(file)
+  logImport(`pdf text extracted — pages: ${pageCount} chars: ${fallbackText.length}`)
 
-  if (text.trim().length < 20) {
-    throw new Error('PDF appears to be image-only (no extractable text). Please use a text-based PDF.')
-  }
+  onProgress?.(15, 'Extracting with AI…')
 
-  onProgress?.(15, 'Sending to Claude…')
+  // Send the file (for Reducto) and the pdfjs text (as fallback) together.
+  // The server picks Reducto when REDUCTO_API_KEY is configured; otherwise
+  // it uses the fallback_text directly — no code change needed on the client.
+  const formData = new FormData()
+  formData.append('file', file, file.name)
+  formData.append('file_name', file.name)
+  formData.append('fallback_text', fallbackText)
+
   const res = await fetch('/api/extract', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, file_name: file.name }),
+    body: formData,
   })
 
   onProgress?.(90, 'Processing response…')
@@ -59,7 +65,11 @@ export async function importPdfDirect(
   if (!data.success) throw new Error(data.error ?? 'Extraction returned unsuccessful')
 
   onProgress?.(100, 'Done!')
-  logImport('importPdfDirect complete', { rows: data.rows_extracted, duration_ms: data.metrics?.duration_ms })
+  logImport('importPdfDirect complete', {
+    rows: data.rows_extracted,
+    method: data.extraction_method,
+    duration_ms: data.metrics?.duration_ms,
+  })
   return data as PdfExtractResult
 }
 

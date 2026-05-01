@@ -1,5 +1,9 @@
 {
   "mcpServers": {
+    "reducto": {
+      "command": "C:\\Users\\user\\.local\\bin\\uvx.exe",
+      "args": ["mcp-server-reducto"]
+    },
     "supabase": {
       "type": "http",
       "url": "https://mcp.supabase.com/mcp?project_ref=qquyetqvvjgwnodskptv"

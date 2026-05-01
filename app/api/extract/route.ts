@@ -4,27 +4,67 @@ import { detectDocTypeFromFilename, detectDocType } from '@/lib/prompts'
 import { extractWithClaude } from '@/lib/claude-extractor'
 import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
+import { extractWithReducto, isReductoConfigured } from '@/lib/reducto-client'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
 export async function POST(req: Request) {
   const startMs = Date.now()
+  const contentType = req.headers.get('content-type') ?? ''
 
-  let text: string
-  let fileName: string
-  let skipInsert: boolean
+  let text = ''
+  let fileName = 'document.pdf'
+  let skipInsert = false
+  let extractionMethod = 'claude_text'
 
-  try {
-    const body = await req.json()
-    text = body.text
-    fileName = body.file_name ?? body.fileName ?? 'document.pdf'
-    skipInsert = Boolean(body.skip_db_insert)
-    if (!text || typeof text !== 'string' || text.trim().length < 10) {
-      return NextResponse.json({ error: 'No text content provided' }, { status: 400 })
+  // ── Multipart (primary path: browser sends the actual PDF file) ─────────────
+  if (contentType.includes('multipart/form-data')) {
+    let formData: FormData
+    try {
+      formData = await req.formData()
+    } catch {
+      return NextResponse.json({ error: 'Failed to parse form data' }, { status: 400 })
     }
-  } catch {
-    return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+
+    fileName = String(formData.get('file_name') ?? formData.get('fileName') ?? 'document.pdf')
+    skipInsert = formData.get('skip_db_insert') === 'true'
+    const fallbackText = String(formData.get('fallback_text') ?? '')
+    const file = formData.get('file') as File | null
+
+    if (isReductoConfigured() && file) {
+      try {
+        console.log(`[extract] Reducto path — file: ${fileName} size: ${file.size}`)
+        const buffer = Buffer.from(await file.arrayBuffer())
+        const reductoResult = await extractWithReducto(buffer, fileName)
+        text = reductoResult.text
+        extractionMethod = 'reducto'
+        console.log(`[extract] Reducto done — chars: ${text.length} pages: ${reductoResult.pageCount} credits: ${reductoResult.credits}`)
+      } catch (reductoErr: any) {
+        console.warn(`[extract] Reducto failed, falling back to pdfjs text — ${reductoErr?.message}`)
+        text = fallbackText
+        extractionMethod = 'claude_text_fallback'
+      }
+    } else {
+      // Reducto not configured — use the pdfjs-extracted text the browser sent
+      text = fallbackText
+      extractionMethod = 'claude_text'
+    }
+
+  // ── JSON (fallback: browser sends pre-extracted text) ──────────────────────
+  } else {
+    try {
+      const body = await req.json()
+      text = body.text ?? ''
+      fileName = body.file_name ?? body.fileName ?? 'document.pdf'
+      skipInsert = Boolean(body.skip_db_insert)
+    } catch {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+    }
+  }
+
+  if (!text || text.trim().length < 10) {
+    return NextResponse.json({ error: 'No text content to extract from' }, { status: 400 })
   }
 
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
@@ -32,7 +72,7 @@ export async function POST(req: Request) {
     ? detectDocTypeFromFilename(fileName)
     : detectDocType(lines)
 
-  console.log(`[extract] file: ${fileName} doc_type: ${docType} lines: ${lines.length}`)
+  console.log(`[extract] method: ${extractionMethod} doc_type: ${docType} lines: ${lines.length}`)
 
   let extraction: Awaited<ReturnType<typeof extractWithClaude>>
   try {
@@ -45,7 +85,10 @@ export async function POST(req: Request) {
   }
 
   if (extraction.products.length === 0) {
-    return NextResponse.json({ error: 'Claude extracted 0 rows — check the PDF text is readable' }, { status: 422 })
+    return NextResponse.json(
+      { error: 'Extracted 0 rows — check that the PDF contains readable text' },
+      { status: 422 }
+    )
   }
 
   const validation = validateExtraction(extraction.document, extraction.products)
@@ -58,17 +101,19 @@ export async function POST(req: Request) {
       documentId = result.document_id
     } catch (err: any) {
       console.error(`[extract] DB insert failed: ${err?.message ?? err}`)
-      // Return results even if insert fails — caller can retry save separately
     }
   }
 
   const durationMs = Date.now() - startMs
-  console.log(`[extract] done in ${durationMs}ms — rows: ${extraction.products.length} tokens_in: ${extraction.input_tokens} tokens_out: ${extraction.output_tokens}`)
+  console.log(
+    `[extract] complete in ${durationMs}ms — rows: ${extraction.products.length} tokens_in: ${extraction.input_tokens} tokens_out: ${extraction.output_tokens}`
+  )
 
   return NextResponse.json({
     success: true,
     document_id: documentId,
     doc_type: docType,
+    extraction_method: extractionMethod,
     rows_extracted: extraction.products.length,
     rows_pass: validation.pass_count,
     rows_flagged: validation.flag_count,
