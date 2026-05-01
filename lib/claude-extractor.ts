@@ -87,8 +87,7 @@ export async function extractFromBuffer(
   const maxTokens = Math.max(4096, Number(process.env.CLAUDE_MAX_TOKENS ?? 32000))
   const prompt = getVisualPromptForDocType(docType)
 
-  console.log(`[claude-extractor] visual mode — media_type: ${mediaType}`)
-  console.log(`[claude-extractor] file_bytes: ${fileBuffer.length}`)
+  console.log(`[claude-extractor] visual mode — media_type: ${mediaType} doc_type: ${docType} file_bytes: ${fileBuffer.length} max_tokens: ${maxTokens}`)
 
   const contentBlock = mediaType === 'application/pdf'
     ? {
@@ -108,34 +107,52 @@ export async function extractFromBuffer(
         },
       }
 
-  const response = await anthropic.beta.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: maxTokens,
-    betas: ['pdfs-2024-09-25'],
-    messages: [
-      {
-        role: 'user',
-        content: [
-          contentBlock as any,
-          { type: 'text', text: prompt },
-        ],
-      },
-    ],
-  })
+  const callStart = Date.now()
+  let response: Awaited<ReturnType<typeof anthropic.beta.messages.create>>
+  try {
+    response = await anthropic.beta.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: maxTokens,
+      betas: ['pdfs-2024-09-25'],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            contentBlock as any,
+            { type: 'text', text: prompt },
+          ],
+        },
+      ],
+    })
+  } catch (err: any) {
+    const callMs = Date.now() - callStart
+    console.error(`[claude-extractor] API call failed after ${callMs}ms`)
+    console.error(`[claude-extractor] status: ${err?.status ?? 'unknown'} message: ${err?.message ?? err}`)
+    if (err?.error) console.error(`[claude-extractor] error body: ${JSON.stringify(err.error)}`)
+    if (err?.headers) console.error(`[claude-extractor] request_id: ${err.headers['request-id'] ?? err.headers['x-request-id'] ?? 'n/a'}`)
+    throw err
+  }
+  const callMs = Date.now() - callStart
 
   const rawContent = response.content[0].type === 'text' ? response.content[0].text : ''
 
-  console.log(`[claude-extractor] input_tokens: ${response.usage.input_tokens}`)
-  console.log(`[claude-extractor] output_tokens: ${response.usage.output_tokens}`)
-  console.log(`[claude-extractor] stop_reason: ${response.stop_reason}`)
-  console.log(`[claude-extractor] response_preview: ${rawContent.slice(0, 200)}`)
+  console.log(`[claude-extractor] API done in ${callMs}ms — input_tokens: ${response.usage.input_tokens} output_tokens: ${response.usage.output_tokens} stop_reason: ${response.stop_reason}`)
 
   const truncated = response.stop_reason === 'max_tokens'
   if (truncated) {
     console.warn('[claude-extractor] WARNING: hit max_tokens — output may be incomplete')
   }
 
-  const parsed = parseClaudeResponse(rawContent)
+  let parsed: { document: ExtractedDocument; products: ExtractedProduct[] }
+  try {
+    parsed = parseClaudeResponse(rawContent)
+  } catch (parseErr: any) {
+    console.error(`[claude-extractor] JSON parse failed — raw_length: ${rawContent.length} error: ${parseErr?.message}`)
+    console.error(`[claude-extractor] raw_response_full: ${rawContent}`)
+    throw parseErr
+  }
+
+  console.log(`[claude-extractor] extracted ${parsed.products.length} rows`)
 
   return {
     document: parsed.document,

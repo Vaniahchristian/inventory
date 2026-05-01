@@ -36,11 +36,11 @@ async function setStep(jobId: string, step: string, pct: number, extra?: Record<
     .eq('id', jobId)
 }
 
-async function failJob(jobId: string, message: string) {
+async function failJob(jobId: string, message: string, detail?: Record<string, unknown>) {
   console.error(`[process-import] [${jobId}] FAILED: ${message}`)
   await supabase
     .from('import_jobs')
-    .update({ status: 'failed', step: 'failed', error: message })
+    .update({ status: 'failed', step: 'failed', error: message, ...(detail ? { result: detail } : {}) })
     .eq('id', jobId)
 }
 
@@ -165,7 +165,10 @@ export async function POST(req: Request) {
 
     const { file_url: fileUrl, file_name: fileName, skip_db_insert: skipInsert } = activeJob
 
+    console.log(`[process-import] [${jobId}] file: ${fileName}`)
+
     await setStep(jobId, 'downloading', 5)
+    const dlStart = Date.now()
     const fileRes = await withTimeout(fetch(fileUrl), 30_000, 'file download')
     if (!fileRes.ok) {
       const msg = `Failed to download file: HTTP ${fileRes.status}`
@@ -176,6 +179,7 @@ export async function POST(req: Request) {
 
     const content = Buffer.from(await fileRes.arrayBuffer())
     const fileSha256 = crypto.createHash('sha256').update(content).digest('hex')
+    console.log(`[process-import] [${jobId}] download done in ${Date.now() - dlStart}ms — bytes: ${content.length}`)
     await setStep(jobId, 'downloading', 15, { progress_pct: 15 })
 
     const nameLower = fileName.toLowerCase()
@@ -189,11 +193,13 @@ export async function POST(req: Request) {
     const docTypeHint = detectDocTypeFromFilename(fileName)
 
     await setStep(jobId, 'extracting', 20)
+    const extractStart = Date.now()
     const extraction = await withTimeout(
       extractFromBuffer(content, mediaType, docTypeHint),
       EXTRACT_TIMEOUT_MS,
       'Claude extraction'
     )
+    console.log(`[process-import] [${jobId}] extraction done in ${Date.now() - extractStart}ms — rows: ${extraction.products.length} tokens_in: ${extraction.input_tokens} tokens_out: ${extraction.output_tokens}`)
     if (extraction.products.length === 0) {
       await failJob(jobId, 'Claude extracted 0 rows — check the PDF is text-readable')
       return NextResponse.json({ error: 'No rows extracted' }, { status: 422 })
@@ -248,13 +254,23 @@ export async function POST(req: Request) {
     })
   } catch (err: any) {
     const msg = err?.message ?? String(err)
-    console.error(`[process-import] [${jobId}] unhandled error: ${msg}`)
+    const detail: Record<string, unknown> = {
+      error: msg,
+      duration_ms: Date.now() - startMs,
+    }
+    if (err?.status) detail.http_status = err.status
+    if (err?.error) detail.api_error = err.error
+    if (err?.headers?.['request-id'] ?? err?.headers?.['x-request-id']) {
+      detail.request_id = err.headers['request-id'] ?? err.headers['x-request-id']
+    }
+    console.error(`[process-import] [${jobId}] unhandled error — status: ${err?.status ?? 'n/a'} message: ${msg}`)
+    if (err?.error) console.error(`[process-import] [${jobId}] api_error: ${JSON.stringify(err.error)}`)
     if (err?.stack) console.error(err.stack)
     if (jobId && activeJob) {
       if (isRetryableError(msg)) await queueRetry(activeJob, msg)
-      else await failJob(jobId, msg)
+      else await failJob(jobId, msg, detail)
     } else if (jobId) {
-      await failJob(jobId, msg)
+      await failJob(jobId, msg, detail)
     }
     return NextResponse.json({ error: msg, success: false }, { status: 500 })
   }

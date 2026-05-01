@@ -52,7 +52,7 @@ export async function insertToSupabase(
   const computedWeight = products.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
   const computedAmount = products.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
 
-  await supabase.from('document_totals').insert({
+  const { error: totalsError } = await supabase.from('document_totals').insert({
     document_id,
     total_cartons: ft.total_cartons,
     total_cbm: ft.total_cbm,
@@ -67,6 +67,7 @@ export async function insertToSupabase(
     totals_match: validation.totals_match,
     totals_diff: validation.totals_diff,
   })
+  if (totalsError) throw new Error(`Document totals insert failed: ${totalsError.message}`)
 
   // ── 3. Bulk insert all product rows ───────────────────────────────────────
   const rowValidationMap = new Map(
@@ -133,7 +134,7 @@ export async function insertToSupabase(
   }
 
   // ── 5. Log extraction run ─────────────────────────────────────────────────
-  const { data: runRow } = await supabase
+  const { data: runRow, error: runError } = await supabase
     .from('extraction_runs')
     .insert({
       document_id,
@@ -156,6 +157,7 @@ export async function insertToSupabase(
     })
     .select('id')
     .single()
+  if (runError) console.warn(`[supabase] extraction_runs insert warning: ${runError.message}`)
 
   const extraction_run_id = runRow?.id ?? ''
 
