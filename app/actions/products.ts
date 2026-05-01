@@ -355,19 +355,18 @@ export async function getProducts() {
   )
   if (manualErr) throw new Error(manualErr.message)
 
-  const { data: publishedRows, error: publishedErr } = await withSupabaseRetry(
+  // All rows tied to a document (any publish/review state) so /products can filter by PDF.
+  const { data: docLinkedRows, error: docLinkedErr } = await withSupabaseRetry(
     () =>
       supabase
         .from('products')
-        .select('*, categories(id,name), suppliers(id,name), documents!inner(id,publish_state,extraction_status)')
-        .not('source_document_id', 'is', null)
-        .eq('documents.publish_state', 'published')
-        .eq('documents.extraction_status', 'approved'),
-    'getProducts.published'
+        .select('*, categories(id,name), suppliers(id,name)')
+        .not('source_document_id', 'is', null),
+    'getProducts.docLinked'
   )
-  if (publishedErr) throw new Error(publishedErr.message)
+  if (docLinkedErr) throw new Error(docLinkedErr.message)
 
-  const merged = [...(manualRows ?? []), ...((publishedRows ?? []).map(({ documents: _d, ...rest }) => rest))]
+  const merged = [...(manualRows ?? []), ...(docLinkedRows ?? [])]
   return merged.sort(
     (a: Record<string, unknown>, b: Record<string, unknown>) =>
       String(a.created_at ?? '').localeCompare(String(b.created_at ?? ''))

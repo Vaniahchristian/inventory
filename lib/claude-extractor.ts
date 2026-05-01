@@ -266,9 +266,16 @@ export async function extractWithClaudeChunked(
   let subchunkCount = 0
   let claudeUnavailableForRequest = false
 
-  console.log(`[claude-extractor] chunked — total_lines=${ocrLines.length} chunks=${chunks.length} chunk_sizes=${chunks.map(c => c.length).join(',')}`)
+  const chunkDeadlineMs = Number(process.env.EXTRACT_CHUNK_TIMEOUT_MS ?? 300_000) // 5 min default
+  const deadline = Date.now() + chunkDeadlineMs
+
+  console.log(`[claude-extractor] chunked — total_lines=${ocrLines.length} chunks=${chunks.length} chunk_sizes=${chunks.map(c => c.length).join(',')} deadline_ms=${chunkDeadlineMs}`)
 
   for (let i = 0; i < chunks.length; i++) {
+    if (Date.now() > deadline) {
+      console.warn(`[claude-extractor] chunk deadline exceeded — stopping at chunk ${i + 1}/${chunks.length} with ${allProducts.length} rows already extracted`)
+      break
+    }
     const chunk = chunks[i]
     const chunkLabel = `chunk ${i + 1}/${chunks.length}`
     console.log(`[claude-extractor] ── ${chunkLabel} start (lines=${chunk.length}) ──`)

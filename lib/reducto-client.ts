@@ -1,3 +1,5 @@
+import type { ExtractedDocument, ExtractedProduct } from './claude-extractor'
+
 const REDUCTO_BASE = 'https://platform.reducto.ai'
 const REDUCTO_PARSE_TIMEOUT_MS = Number(process.env.REDUCTO_PARSE_TIMEOUT_MS ?? 360000)
 const REDUCTO_PARSE_MAX_ATTEMPTS = Math.max(1, Number(process.env.REDUCTO_PARSE_MAX_ATTEMPTS ?? 2))
@@ -148,5 +150,176 @@ export async function extractWithReducto(
     pageCount: parsed.usage.num_pages,
     jobId: parsed.job_id,
     credits: parsed.usage.credits,
+  }
+}
+
+// ── Structured extraction schema ──────────────────────────────────────────────
+// Mirrors ExtractedDocument + ExtractedProduct so Reducto returns typed JSON
+// directly — no Claude text extraction needed.
+const EXTRACTION_SCHEMA = {
+  type: 'object',
+  properties: {
+    document: {
+      type: 'object',
+      properties: {
+        doc_number: { type: ['string', 'null'] },
+        client_id: { type: ['string', 'null'] },
+        container_no: { type: ['string', 'null'] },
+        document_date: { type: ['string', 'null'], description: 'ISO date YYYY-MM-DD or null' },
+        document_type: { type: 'string', enum: ['sales_order', 'packing_list', 'invoice', 'unknown'] },
+        footer_totals: {
+          type: 'object',
+          properties: {
+            total_cartons: { type: ['number', 'null'] },
+            total_cbm: { type: ['number', 'null'] },
+            total_weight_kg: { type: ['number', 'null'] },
+            total_amount_rmb: { type: ['number', 'null'] },
+            total_amount_usd: { type: ['number', 'null'] },
+            exchange_rate: { type: ['number', 'null'] },
+            goods_balance_usd: { type: ['number', 'null'] },
+            freight_usd: { type: ['number', 'null'] },
+            total_balance_usd: { type: ['number', 'null'] },
+          },
+        },
+        payments: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              payment_date: { type: ['string', 'null'] },
+              amount_usd: { type: ['number', 'null'] },
+              payment_type: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    products: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          line_no: { type: ['integer', 'null'], description: 'Sequential row number from the document (1-indexed)' },
+          marks: { type: ['string', 'null'], description: 'Product marks/code — propagate down from merged cells to every sub-row that lacks its own value' },
+          shop: { type: ['string', 'null'] },
+          item_code: { type: ['string', 'null'] },
+          description: { type: ['string', 'null'] },
+          packaging: { type: ['string', 'null'] },
+          qty_per_carton: { type: ['number', 'null'] },
+          total_cartons: { type: ['number', 'null'] },
+          total_qty: { type: ['number', 'null'] },
+          unit_price_rmb: { type: ['number', 'null'] },
+          total_amount_rmb: { type: ['number', 'null'] },
+          dim_l_cm: { type: ['number', 'null'] },
+          dim_w_cm: { type: ['number', 'null'] },
+          dim_h_cm: { type: ['number', 'null'] },
+          unit_cbm: { type: ['number', 'null'] },
+          total_cbm: { type: ['number', 'null'] },
+          unit_weight_kg: { type: ['number', 'null'] },
+          total_weight_kg: { type: ['number', 'null'] },
+          barcode: { type: ['string', 'null'] },
+          warehouse: { type: ['string', 'null'] },
+          box_no_start: { type: ['integer', 'null'] },
+          box_no_end: { type: ['integer', 'null'] },
+          section: { type: 'string', enum: ['shipped', 'left_in_warehouse', 'repacked'] },
+          remarks: { type: ['string', 'null'] },
+        },
+        required: ['line_no', 'marks', 'item_code', 'description', 'total_cartons', 'total_qty', 'total_amount_rmb', 'section'],
+      },
+    },
+  },
+  required: ['document', 'products'],
+}
+
+const EXTRACTION_SYSTEM_PROMPT = `
+You are extracting structured data from a Chinese packing list or sales order.
+- All monetary amounts are in RMB (元/¥) unless explicitly labelled USD
+- Dimensions are in cm; convert from mm if needed (÷10)
+- Weights are in kg
+- The MARKS column often spans multiple product rows (merged cell) — propagate the same marks value down to every sub-row that has no marks of its own
+- section defaults to "shipped"; use "left_in_warehouse" if the row is explicitly marked as remaining in warehouse; use "repacked" if explicitly labelled as repacked
+- Return null for any field that cannot be determined from the document
+`.trim()
+
+export interface ReductoStructuredResult {
+  document: ExtractedDocument
+  products: ExtractedProduct[]
+  pageCount: number
+  jobId: string
+  credits: number
+}
+
+export async function extractStructuredWithReducto(
+  fileBuffer: Buffer,
+  fileName: string,
+  debugId?: string
+): Promise<ReductoStructuredResult> {
+  const tag = debugId ? `[reducto][${debugId}]` : '[reducto]'
+  const apiKey = process.env.REDUCTO_API_KEY
+  if (!apiKey) throw new Error('REDUCTO_API_KEY not set')
+
+  // Step 1: Upload
+  const uploadForm = new FormData()
+  uploadForm.append(
+    'file',
+    new Blob([new Uint8Array(fileBuffer)], { type: 'application/pdf' }),
+    fileName
+  )
+  const uploadStart = Date.now()
+  const uploadRes = await fetch(`${REDUCTO_BASE}/upload`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: uploadForm,
+  })
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text().catch(() => uploadRes.statusText)
+    throw new Error(`Reducto upload failed (${uploadRes.status}): ${errText}`)
+  }
+  const { file_id } = await uploadRes.json()
+  console.log(`${tag} [structured] uploaded in ${Date.now() - uploadStart}ms — file_id: ${file_id}`)
+
+  // Step 2: Extract structured JSON with schema — replaces Claude text extraction
+  const extractStart = Date.now()
+  const extractRes = await fetch(`${REDUCTO_BASE}/extract`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      input: { file_id },
+      instructions: {
+        schema: EXTRACTION_SCHEMA,
+        system_prompt: EXTRACTION_SYSTEM_PROMPT,
+      },
+      settings: {
+        optimize_for_latency: true,
+      },
+    }),
+  })
+  if (!extractRes.ok) {
+    const errText = await extractRes.text().catch(() => extractRes.statusText)
+    throw new Error(`Reducto extract failed (${extractRes.status}): ${errText}`)
+  }
+  const data = await extractRes.json()
+  console.log(
+    `${tag} [structured] done in ${Date.now() - extractStart}ms — pages: ${data?.usage?.num_pages} credits: ${data?.usage?.credits} extract_mode: ${data?.usage?.extract_mode}`
+  )
+
+  // Reducto returns result as an array when extract_mode is "extract"
+  const rawResult = data?.result
+  const result = Array.isArray(rawResult) ? rawResult[0] : rawResult
+  if (!result || !result.document || !Array.isArray(result.products)) {
+    throw new Error(
+      `Reducto extract response invalid: ${JSON.stringify(data).slice(0, 300)}`
+    )
+  }
+
+  return {
+    document: result.document as ExtractedDocument,
+    products: result.products as ExtractedProduct[],
+    pageCount: data?.usage?.num_pages ?? 0,
+    jobId: data?.job_id ?? '',
+    credits: data?.usage?.credits ?? 0,
   }
 }

@@ -78,9 +78,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
     const q = query.toLowerCase()
     return products.filter(p => {
       const passesDoc =
-        selectedDocumentId === 'all' ||
-        p.source_document_id === selectedDocumentId ||
-        isSectionDividerProduct(p)
+        selectedDocumentId === 'all' || p.source_document_id === selectedDocumentId
       if (!passesDoc) return false
       if (!queryTrimmed) return true
       return (
@@ -324,7 +322,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Products</h1>
-          <p className="text-sm text-slate-500 mt-0.5">{realProducts.length} items total</p>
+          <p className="text-sm text-slate-500 mt-0.5">
+            {selectedDocumentId === 'all'
+              ? `${realProducts.length} items total`
+              : `${filteredDataRows.length} items · filtered by document`}
+          </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">

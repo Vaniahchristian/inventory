@@ -13,12 +13,29 @@ export async function extractPdfText(file: File): Promise<{ text: string; pageCo
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdf.getPage(i)
     const content = await page.getTextContent()
-    const pageText = content.items
-      .map((item: any) => ('str' in item ? item.str : ''))
-      .join(' ')
-      .replace(/\s{3,}/g, '  ')
-      .trim()
-    if (pageText) pageTexts.push(pageText)
+    const lines: string[] = []
+    let currentLine = ''
+    let lastY: number | null = null
+
+    for (const item of content.items as any[]) {
+      if (!('str' in item)) continue
+      const y = item.transform?.[5] ?? null
+      // New line when y-coordinate changes significantly (>2pt) or pdfjs flags EOL
+      if (lastY !== null && y !== null && Math.abs(y - lastY) > 2) {
+        if (currentLine.trim()) lines.push(currentLine.trim())
+        currentLine = ''
+      }
+      currentLine += item.str
+      if (item.hasEOL) {
+        if (currentLine.trim()) lines.push(currentLine.trim())
+        currentLine = ''
+        lastY = null
+      } else {
+        lastY = y
+      }
+    }
+    if (currentLine.trim()) lines.push(currentLine.trim())
+    if (lines.length) pageTexts.push(lines.join('\n'))
   }
 
   return { text: pageTexts.join('\n'), pageCount }

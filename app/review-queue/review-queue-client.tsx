@@ -64,6 +64,20 @@ export function ReviewQueueClient({ documents }: { documents: ReviewDoc[] }) {
   }
 
   function handlePushToProducts(id: string) {
+    const detail = detailByDoc[id]
+    if (detail) {
+      const { gate } = detail
+      const failures: string[] = []
+      if (!gate.totalsMatch) failures.push('totals do not reconcile with row sums')
+      if (gate.hasBlockingFlags) failures.push('one or more rows have blocking validation flags')
+      if (!gate.rowParityMatch) failures.push('row count mismatch')
+      if (failures.length > 0) {
+        const ok = window.confirm(
+          `Gate check failed:\n• ${failures.join('\n• ')}\n\nPublish anyway?`
+        )
+        if (!ok) return
+      }
+    }
     startTransition(async () => {
       try {
         const result = await finalizeDocumentPublish(id)

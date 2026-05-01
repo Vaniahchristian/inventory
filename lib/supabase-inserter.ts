@@ -70,15 +70,14 @@ export async function insertToSupabase(
   if (totalsError) throw new Error(`Document totals insert failed: ${totalsError.message}`)
 
   // ── 3. Bulk insert all product rows ───────────────────────────────────────
-  const rowValidationMap = new Map(
-    validation.row_results.map(r => [r.line_no, r])
-  )
-
+  // row_results is produced by products.map() in validator so index matches.
+  // We always write sequential line_no (idx+1) to avoid duplicate-key errors
+  // when Claude returns two rows with the same line_no across chunk boundaries.
   const itemRows = products.map((p, idx) => {
-    const rv = rowValidationMap.get(p.line_no ?? idx + 1)
+    const rv = validation.row_results[idx]
     return {
       document_id,
-      line_no: p.line_no ?? idx + 1,
+      line_no: idx + 1,
       item_code: p.item_code ?? p.marks ?? null,
       description: p.description,
       shop: p.shop ?? null,

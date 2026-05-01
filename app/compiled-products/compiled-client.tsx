@@ -186,9 +186,10 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
   )
 
   const visibleProducts = useMemo(
-    () => products.filter(
-      p => selectedDocumentId === 'all' || isSectionDividerProduct(p) || p.source_document_id === selectedDocumentId
-    ),
+    () =>
+      products.filter(
+        p => selectedDocumentId === 'all' || p.source_document_id === selectedDocumentId
+      ),
     [products, selectedDocumentId]
   )
 
