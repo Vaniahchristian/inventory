@@ -391,6 +391,135 @@ export async function getLatestImportMeta() {
   return data as ImportMeta | null
 }
 
+export type DocumentFooterPaymentRow = {
+  label: string
+  value: string
+  highlight?: boolean
+}
+
+export type DocumentImportMetaBundle = {
+  meta: ImportMeta
+  /** Render right-column fees/payments from DB (document_payments). */
+  paymentRows: DocumentFooterPaymentRow[]
+}
+
+function formatDdMmYyyy(isoDate: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(isoDate.trim())
+  if (!m) return isoDate
+  return `${m[3]}/${m[2]}/${m[1]}`
+}
+
+function fmtUsdAmount(n: number): string {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+/** Footer totals + payments for one document (documents / document_totals / document_payments). */
+export async function getDocumentImportMeta(documentId: string): Promise<DocumentImportMetaBundle | null> {
+  const { data: doc, error: docErr } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('documents')
+        .select('id, source_file_name, client_name, client_id, container_no, document_type')
+        .eq('id', documentId)
+        .maybeSingle(),
+    'getDocumentImportMeta.doc'
+  )
+  if (docErr || !doc) return null
+
+  const { data: totals } = await withSupabaseRetry(
+    () =>
+      supabase.from('document_totals').select('*').eq('document_id', documentId).maybeSingle(),
+    'getDocumentImportMeta.totals'
+  )
+
+  const { data: payments } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('document_payments')
+        .select('payment_date, amount_usd, payment_type, note')
+        .eq('document_id', documentId)
+        .order('payment_date', { ascending: true }),
+    'getDocumentImportMeta.payments'
+  )
+
+  const name = doc.source_file_name ?? ''
+  const lower = name.toLowerCase()
+  const source_file_type: 'pdf' | 'excel_or_csv' = lower.endsWith('.pdf') ? 'pdf' : 'excel_or_csv'
+
+  const meta: ImportMeta = {
+    source_file_name: name || 'document',
+    source_file_type,
+    document_type: doc.document_type as ImportMeta['document_type'],
+    client_details: doc.client_name ?? doc.client_id ?? null,
+    container_no: doc.container_no ?? null,
+    total_weight_kgs: totals?.total_weight_kg != null ? Number(totals.total_weight_kg) : null,
+    total_cbm: totals?.total_cbm != null ? Number(totals.total_cbm) : null,
+    total_carton: totals?.total_cartons != null ? Number(totals.total_cartons) : null,
+    total_cost_rmb: totals?.total_amount_rmb != null ? Number(totals.total_amount_rmb) : null,
+    total_cost_usd: totals?.total_amount_usd != null ? Number(totals.total_amount_usd) : null,
+    payment_date: null,
+    payment_usd: null,
+    goods_balance_usd: null,
+    credit_support_usd: null,
+    pivoc_usd: null,
+    freight_usd: null,
+    total_balance_usd: null,
+    exchange_rate: null,
+  }
+
+  const paymentRows: DocumentFooterPaymentRow[] = []
+  for (const p of payments ?? []) {
+    const amt = p.amount_usd != null ? Number(p.amount_usd) : null
+    const val = amt != null ? `$${fmtUsdAmount(amt)} USD` : '-'
+    const t = p.payment_type ?? ''
+    const note = (p.note ?? '').trim()
+
+    if (t === 'freight') {
+      meta.freight_usd = amt
+      paymentRows.push({ label: 'YIWU-MOMBASA FREIGHT', value: val })
+      continue
+    }
+    if (t === 'credit') {
+      meta.credit_support_usd = amt
+      paymentRows.push({ label: 'CREDIT SUPPORT TO MOMBASA', value: val })
+      continue
+    }
+    if (t === 'other') {
+      meta.pivoc_usd = amt
+      const lab = /PIVOC/i.test(note) ? 'PIVOC' : note || 'Other'
+      paymentRows.push({ label: lab, value: val })
+      continue
+    }
+    if (t === 'deposit' || t === 'balance') {
+      if (p.payment_date) {
+        const d = formatDdMmYyyy(String(p.payment_date))
+        paymentRows.push({
+          label: `${d} PAYMENT`,
+          value: val,
+          highlight: t === 'balance',
+        })
+        if (!meta.payment_date) {
+          meta.payment_date = d
+          meta.payment_usd = amt
+        }
+      } else {
+        paymentRows.push({
+          label: t === 'balance' ? 'BALANCE PAYMENT' : 'PAYMENT',
+          value: val,
+          highlight: t === 'balance',
+        })
+      }
+      continue
+    }
+    paymentRows.push({
+      label: note || t || 'Payment',
+      value: val,
+    })
+  }
+
+  return { meta, paymentRows }
+}
+
 export async function getReviewDocuments() {
   const { data, error } = await withSupabaseRetry(
     () =>

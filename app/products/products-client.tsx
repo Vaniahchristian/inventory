@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useTransition, useRef, useMemo } from 'react'
+import React, { useState, useTransition, useRef, useMemo, useEffect } from 'react'
 import { toast } from 'sonner'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -23,8 +23,13 @@ import {
   Plus, Minus, Search, MoreHorizontal, Pencil, Trash2,
   Download, Upload, FileSpreadsheet, FileText, ImageIcon, AlertTriangle, Loader2,
 } from 'lucide-react'
-import { createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons } from '@/app/actions/products'
+import {
+  createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons,
+  getDocumentImportMeta,
+  type DocumentFooterPaymentRow,
+} from '@/app/actions/products'
 import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed, importPdfDirect } from '@/lib/export'
+import { useImportStore } from '@/lib/import-store'
 import { supabase } from '@/lib/supabase'
 import { stockStatus } from '@/lib/utils'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE, STAGE_TOTAL_MARKER_PREFIX, parseSectionMarkerTitle } from '@/lib/sections'
@@ -70,8 +75,40 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
   const [query, setQuery] = useState('')
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
-  const [importStage, setImportStage] = useState<string | null>(null)
-  const [importProgress, setImportProgress] = useState<number>(0)
+  const [footerMeta, setFooterMeta] = useState<ImportMeta | null>(importMeta)
+  const [footerPaymentRows, setFooterPaymentRows] = useState<DocumentFooterPaymentRow[] | null>(null)
+  const { status: importStatus, progress: importProgress, stage: importStage, startImport, updateProgress, finishImport, failImport } = useImportStore()
+
+  useEffect(() => {
+    if (selectedDocumentId === 'all') {
+      setFooterMeta(importMeta)
+      setFooterPaymentRows(null)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const bundle = await getDocumentImportMeta(selectedDocumentId)
+        if (cancelled) return
+        if (bundle) {
+          setFooterMeta(bundle.meta)
+          setFooterPaymentRows(bundle.paymentRows.length > 0 ? bundle.paymentRows : null)
+        } else {
+          setFooterMeta(null)
+          setFooterPaymentRows(null)
+        }
+      } catch {
+        if (!cancelled) {
+          setFooterMeta(null)
+          setFooterPaymentRows(null)
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDocumentId, importMeta])
+
   const realProducts = useMemo(() => products.filter(p => !isSectionDividerProduct(p)), [products])
   const filtered = useMemo(() => {
     const queryTrimmed = query.trim().toLowerCase()
@@ -175,11 +212,10 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
     if (isPdf) {
       try {
         importConsole('▶ import started (sync)', { file: file.name, size_bytes: file.size })
-        setImportProgress(0)
+        startImport(file.name)
 
         const result = await importPdfDirect(file, (pct, stage) => {
-          setImportProgress(pct)
-          setImportStage(stage)
+          updateProgress(pct, stage)
         })
 
         const { products, document: doc } = result
@@ -229,11 +265,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
 
         if (rows.length === 0) {
           toast.error('PDF processed but no product rows found')
-          setImportStage(null)
+          failImport('No product rows found')
           return
         }
 
-        setImportStage(`Saving ${rows.length} rows…`)
+        updateProgress(92, `Saving ${rows.length} rows…`)
         startTransition(async () => {
           try {
             const importResult = await importProducts(rows, meta)
@@ -256,15 +292,14 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
               toast.info('Review required: open the Review Queue and finalize only when rows/totals match.')
             }
           } finally {
-            setImportStage(null)
-            setImportProgress(0)
+            finishImport()
           }
         })
       } catch (err: unknown) {
-        toast.error(err instanceof Error ? err.message : 'Failed to import PDF')
+        const msg = err instanceof Error ? err.message : 'Failed to import PDF'
+        toast.error(msg)
         importConsole('✗ pdf import failed', { error: String(err) })
-        setImportStage(null)
-        setImportProgress(0)
+        failImport(msg)
       }
       e.target.value = ''
       return
@@ -273,13 +308,14 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
     // ── Sync path for Excel / CSV ─────────────────────────────────────────────
     try {
       importConsole('▶ import started (sync)', { file: file.name, size_bytes: file.size })
-      setImportStage(`Parsing ${file.name}…`)
+      startImport(file.name)
+      updateProgress(10, `Parsing ${file.name}…`)
       const { rows, importMeta: meta } = await parseImportFileDetailed(file)
       importConsole('parse complete', { rows: rows.length, elapsed_ms: Date.now() - startedAt })
       if (rows.length === 0) {
         throw new Error('No rows detected from file.')
       }
-      setImportStage(`Saving ${rows.length} rows…`)
+      updateProgress(60, `Saving ${rows.length} rows…`)
       startTransition(async () => {
         try {
           const result = await importProducts(rows, meta)
@@ -305,12 +341,13 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
             toast.info('Review required: open the Review Queue and finalize only when rows/totals match.')
           }
         } finally {
-          setImportStage(null)
+          finishImport()
         }
       })
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to parse file')
-      setImportStage(null)
+      const msg = err instanceof Error ? err.message : 'Failed to parse file'
+      toast.error(msg)
+      failImport(msg)
     }
     e.target.value = ''
   }
@@ -403,14 +440,20 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
         </div>
       </div>
 
-      {importStage && (
-        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-900 space-y-1.5">
+      {importStatus !== 'idle' && (
+        <div className={`rounded-md border px-3 py-2.5 text-xs space-y-1.5 ${
+          importStatus === 'error' ? 'border-red-200 bg-red-50 text-red-900' :
+          importStatus === 'done'  ? 'border-green-200 bg-green-50 text-green-900' :
+          'border-blue-200 bg-blue-50 text-blue-900'
+        }`}>
           <div className="flex items-center gap-2">
-            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+            {importStatus === 'importing' && <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />}
             <span>{importStage}</span>
-            {importProgress > 0 && <span className="ml-auto text-blue-400 font-mono">{importProgress}%</span>}
+            {importStatus === 'importing' && importProgress > 0 && (
+              <span className="ml-auto text-blue-400 font-mono">{importProgress}%</span>
+            )}
           </div>
-          {importProgress > 0 && (
+          {importStatus === 'importing' && importProgress > 0 && (
             <div className="w-full h-1.5 bg-blue-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-blue-500 rounded-full transition-all duration-500"
@@ -421,11 +464,11 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
         </div>
       )}
 
-      {importMeta && (
+      {footerMeta && (
         <div className="rounded-md border bg-amber-50 border-amber-200 px-3 py-2 text-xs flex flex-wrap gap-x-6 gap-y-0.5 items-center">
-          <span className="font-semibold text-slate-800">CLIENT DETAILS: <span className="text-amber-800">{importMeta.client_details ?? '-'}</span></span>
-          <span className="font-semibold text-slate-800">CONTAINER NO: <span className="text-amber-800">{importMeta.container_no ?? '-'}</span></span>
-          <span className="text-slate-500 text-[10px] ml-auto">{importMeta.source_file_name}</span>
+          <span className="font-semibold text-slate-800">CLIENT DETAILS: <span className="text-amber-800">{footerMeta.client_details ?? '-'}</span></span>
+          <span className="font-semibold text-slate-800">CONTAINER NO: <span className="text-amber-800">{footerMeta.container_no ?? '-'}</span></span>
+          <span className="text-slate-500 text-[10px] ml-auto">{footerMeta.source_file_name}</span>
         </div>
       )}
 
@@ -598,50 +641,70 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
         </Table>
       </div>
 
-      {/* Financial summary — mirrors PDF bottom section */}
-      {importMeta && (
+      {/* Financial summary — mirrors PDF bottom section (per-document when filtered) */}
+      {footerMeta && (
         <div className="rounded-md border bg-white overflow-hidden text-xs">
           <div className="grid grid-cols-2 divide-x divide-slate-200">
             {/* Left: document-wide weight/volume/cost totals */}
             <table className="w-full">
               <tbody>
-                <MetaRow label="TOTAL WEIGHT" value={importMeta.total_weight_kgs != null ? `${fmt(importMeta.total_weight_kgs, 1)} KGS` : '-'} />
-                <MetaRow label="TOTAL CBM" value={importMeta.total_cbm != null ? `${fmt(importMeta.total_cbm, 1)} CBM` : '-'} />
-                <MetaRow label="TOTAL CARTON" value={importMeta.total_carton != null ? `${fmt(importMeta.total_carton, 0)} CTN` : '-'} />
+                <MetaRow label="TOTAL WEIGHT" value={footerMeta.total_weight_kgs != null ? `${fmt(footerMeta.total_weight_kgs, 1)} KGS` : '-'} />
+                <MetaRow label="TOTAL CBM" value={footerMeta.total_cbm != null ? `${fmt(footerMeta.total_cbm, 1)} CBM` : '-'} />
+                <MetaRow label="TOTAL CARTON" value={footerMeta.total_carton != null ? `${fmt(footerMeta.total_carton, 0)} CTN` : '-'} />
                 <MetaRow
                   label="TOTAL COST"
                   value={
                     <>
-                      {importMeta.total_cost_rmb != null && <span className="mr-3">¥{fmt(importMeta.total_cost_rmb, 2)} RMB</span>}
-                      {importMeta.total_cost_usd != null && <span>${fmt(importMeta.total_cost_usd, 2)} USD</span>}
+                      {footerMeta.total_cost_rmb != null && <span className="mr-3">¥{fmt(footerMeta.total_cost_rmb, 2)} RMB</span>}
+                      {footerMeta.total_cost_usd != null && <span>${fmt(footerMeta.total_cost_usd, 2)} USD</span>}
+                      {footerMeta.total_cost_rmb == null && footerMeta.total_cost_usd == null && '-'}
                     </>
                   }
                 />
               </tbody>
             </table>
-            {/* Right: balance breakdown */}
+            {/* Right: balance breakdown — DB-backed rows when a document is selected */}
             <table className="w-full">
               <tbody>
-                {importMeta.payment_date != null && importMeta.payment_usd != null && (
-                  <MetaRow label={`${importMeta.payment_date} PAYMENT`} value={`$${fmt(importMeta.payment_usd, 2)} USD`} />
-                )}
-                {importMeta.goods_balance_usd != null && (
-                  <MetaRow label="GOODS BALANCE" value={`$${fmt(importMeta.goods_balance_usd, 2)} USD`} />
-                )}
-                {importMeta.credit_support_usd != null && (
-                  <MetaRow label="CREDIT SUPPORT TO MOMBASA" value={`$${fmt(importMeta.credit_support_usd, 2)} USD`} />
-                )}
-                {importMeta.pivoc_usd != null && (
-                  <MetaRow label="PIVOC" value={`$${fmt(importMeta.pivoc_usd, 2)} USD`} />
-                )}
-                {importMeta.freight_usd != null && (
-                  <MetaRow label="YIWU-MOMBASA FREIGHT" value={`$${fmt(importMeta.freight_usd, 2)} USD`} />
-                )}
-                {importMeta.total_balance_usd != null && (
-                  <MetaRow label="TOTAL BALANCE" value={`$${fmt(importMeta.total_balance_usd, 2)} USD`} highlight />
-                )}
-                {importMeta.exchange_rate != null && (
-                  <MetaRow label="EXCHANGE RATE" value={`¥${fmt(importMeta.exchange_rate, 2)} RMB`} />
+                {footerPaymentRows && footerPaymentRows.length > 0 ? (
+                  <>
+                    {footerPaymentRows.map((row, idx) => (
+                      <MetaRow key={`${row.label}-${idx}`} label={row.label} value={row.value} highlight={row.highlight} />
+                    ))}
+                    {footerMeta.goods_balance_usd != null && (
+                      <MetaRow label="GOODS BALANCE" value={`$${fmt(footerMeta.goods_balance_usd, 2)} USD`} />
+                    )}
+                    {footerMeta.total_balance_usd != null && (
+                      <MetaRow label="TOTAL BALANCE" value={`$${fmt(footerMeta.total_balance_usd, 2)} USD`} highlight />
+                    )}
+                    {footerMeta.exchange_rate != null && (
+                      <MetaRow label="EXCHANGE RATE" value={`¥${fmt(footerMeta.exchange_rate, 2)} RMB`} />
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {footerMeta.payment_date != null && footerMeta.payment_usd != null && (
+                      <MetaRow label={`${footerMeta.payment_date} PAYMENT`} value={`$${fmt(footerMeta.payment_usd, 2)} USD`} />
+                    )}
+                    {footerMeta.goods_balance_usd != null && (
+                      <MetaRow label="GOODS BALANCE" value={`$${fmt(footerMeta.goods_balance_usd, 2)} USD`} />
+                    )}
+                    {footerMeta.credit_support_usd != null && (
+                      <MetaRow label="CREDIT SUPPORT TO MOMBASA" value={`$${fmt(footerMeta.credit_support_usd, 2)} USD`} />
+                    )}
+                    {footerMeta.pivoc_usd != null && (
+                      <MetaRow label="PIVOC" value={`$${fmt(footerMeta.pivoc_usd, 2)} USD`} />
+                    )}
+                    {footerMeta.freight_usd != null && (
+                      <MetaRow label="YIWU-MOMBASA FREIGHT" value={`$${fmt(footerMeta.freight_usd, 2)} USD`} />
+                    )}
+                    {footerMeta.total_balance_usd != null && (
+                      <MetaRow label="TOTAL BALANCE" value={`$${fmt(footerMeta.total_balance_usd, 2)} USD`} highlight />
+                    )}
+                    {footerMeta.exchange_rate != null && (
+                      <MetaRow label="EXCHANGE RATE" value={`¥${fmt(footerMeta.exchange_rate, 2)} RMB`} />
+                    )}
+                  </>
                 )}
               </tbody>
             </table>
