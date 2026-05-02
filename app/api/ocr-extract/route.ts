@@ -7,6 +7,7 @@ import { detectDocType } from '@/lib/prompts'
 import { extractWithClaudeChunked } from '@/lib/claude-extractor'
 import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
+import { filterToInventoryProducts } from '@/lib/sections'
 
 export const runtime = 'nodejs'
 
@@ -242,7 +243,16 @@ export async function POST(req: Request) {
     // ── Step 4: Validate ──────────────────────────────────────────────────────
     console.log('[route] ── STEP 4: Validation ──')
     timer.step('validation start')
-    const validation = validateExtraction(extraction.document, extraction.products)
+    const inventoryProducts = filterToInventoryProducts(extraction.products)
+    if (inventoryProducts.length === 0) {
+      console.error('[route] all rows were in non-inventory sections')
+      return NextResponse.json(
+        { error: 'No shippable rows after excluding warehouse and repacked sections' },
+        { status: 422 }
+      )
+    }
+
+    const validation = validateExtraction(extraction.document, inventoryProducts)
     timer.step(`validation complete — totals_match=${validation.totals_match} flags=${validation.validation_flags.length}`)
 
     if (validation.validation_flags.length > 0) {
@@ -254,7 +264,7 @@ export async function POST(req: Request) {
     if (!skipInsert) {
       console.log('[route] ── STEP 5: Supabase insert ──')
       timer.step('Supabase insert start')
-      insertResult = await insertToSupabase(fileName, fileSha256, extraction, validation, lines)
+      insertResult = await insertToSupabase(fileName, fileSha256, extraction, lines)
       timer.step(`Supabase insert complete — document_id=${insertResult.document_id} items=${insertResult.items_inserted}`)
     } else {
       console.log('[route] ── STEP 5: Supabase insert SKIPPED (skip_insert=true) ──')
@@ -264,11 +274,13 @@ export async function POST(req: Request) {
     console.log(`[route] ✓ done in ${totalMs}ms`)
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 
+    const extractionForClient = { ...extraction, products: inventoryProducts }
+
     return NextResponse.json({
       success: true,
       document_id: insertResult?.document_id ?? null,
       doc_type: docType,
-      rows_extracted: extraction.products.length,
+      rows_extracted: inventoryProducts.length,
       rows_pass: validation.pass_count,
       rows_flagged: validation.flag_count,
       totals_match: validation.totals_match,
@@ -286,7 +298,7 @@ export async function POST(req: Request) {
         duration_ms: totalMs,
       },
       chunking: extraction.chunking,
-      products: extraction.products,
+      products: extractionForClient.products,
       document: extraction.document,
       lines,
     })

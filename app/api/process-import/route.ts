@@ -5,6 +5,7 @@ import { detectDocTypeFromFilename } from '@/lib/prompts'
 import { extractFromBuffer } from '@/lib/claude-extractor'
 import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
+import { filterToInventoryProducts } from '@/lib/sections'
 
 export const runtime = 'nodejs'
 export const maxDuration = 420
@@ -221,14 +222,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No rows extracted' }, { status: 422 })
     }
 
+    const inventoryProducts = filterToInventoryProducts(extraction.products)
+    if (inventoryProducts.length === 0) {
+      await failJob(jobId, 'No shippable rows after excluding warehouse and repacked sections')
+      return NextResponse.json({ error: 'No inventory rows' }, { status: 422 })
+    }
+
     await setStep(jobId, 'validating', 80)
-    const validation = validateExtraction(extraction.document, extraction.products)
+    const validation = validateExtraction(extraction.document, inventoryProducts)
 
     let documentId: string | null = null
     if (!skipInsert) {
       await setStep(jobId, 'saving', 88)
       const insertResult = await withTimeout(
-        insertToSupabase(fileName, fileSha256, extraction, validation, ocrLines),
+        insertToSupabase(fileName, fileSha256, extraction, ocrLines),
         60_000,
         'Supabase insert'
       )
@@ -241,13 +248,13 @@ export async function POST(req: Request) {
       step: 'done',
       progress_pct: 100,
       doc_type: extraction.document.document_type,
-      rows_extracted: extraction.products.length,
+      rows_extracted: inventoryProducts.length,
       rows_pass: validation.pass_count,
       rows_flagged: validation.flag_count,
       totals_match: validation.totals_match,
       document_id: documentId,
       result: {
-        products: extraction.products,
+        products: inventoryProducts,
         document: extraction.document,
         validation_flags: validation.validation_flags,
         totals_diff: validation.totals_diff,
@@ -265,7 +272,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       success: true,
       job_id: jobId,
-      rows_extracted: extraction.products.length,
+      rows_extracted: inventoryProducts.length,
       duration_ms: totalMs,
     })
   } catch (err: any) {

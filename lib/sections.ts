@@ -1,4 +1,14 @@
+import type { ExtractedProduct } from '@/lib/claude-extractor'
 import type { Product } from '@/lib/types'
+
+/** Ship-to-inventory rows only: exclude GOODS LEFT IN SANCARGO and REPACKED GOODS sections. */
+export function shouldPublishExtractedProduct(section: ExtractedProduct['section'] | undefined): boolean {
+  return (section ?? 'shipped') === 'shipped'
+}
+
+export function filterToInventoryProducts(products: ExtractedProduct[]): ExtractedProduct[] {
+  return products.filter(p => shouldPublishExtractedProduct(p.section))
+}
 
 export const REPACKAGED_SECTION_MARKER_SKU = '__SECTION_REPACKAGED__'
 export const REPACKAGED_SECTION_TITLE = 'GOODS STUFFED INTO THIS CONTAINER (REPACKAGED GOODS)'

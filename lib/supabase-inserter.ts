@@ -1,5 +1,6 @@
 import { ExtractedDocument, ExtractedProduct, ClaudeExtractionResult } from './claude-extractor'
-import { ValidationResult } from './validator'
+import { filterToInventoryProducts } from '@/lib/sections'
+import { ValidationResult, validateExtraction } from './validator'
 import { supabase } from './supabase'
 
 export interface InsertResult {
@@ -13,11 +14,17 @@ export async function insertToSupabase(
   fileName: string,
   fileSha256: string | null,
   extraction: ClaudeExtractionResult,
-  validation: ValidationResult,
   ocrLines: string[]
 ): Promise<InsertResult> {
   const doc = extraction.document
-  const products = extraction.products
+  const fullProducts = extraction.products
+  const products = filterToInventoryProducts(fullProducts)
+  if (products.length === 0) {
+    throw new Error(
+      'No inventory rows to save — every row was in GOODS LEFT IN SANCARGO or REPACKED GOODS (drop sections).'
+    )
+  }
+  const validation = validateExtraction(doc, products)
   const ft = doc.footer_totals
 
   // ── 1. Insert document record ─────────────────────────────────────────────
@@ -35,7 +42,7 @@ export async function insertToSupabase(
       extraction_confidence: computeOverallConfidence(validation),
       model_name: extraction.model,
       validation_flags: validation.validation_flags,
-      raw_extraction: { products, document: doc },
+      raw_extraction: { products: fullProducts, document: doc },
     })
     .select('id')
     .single()
@@ -142,7 +149,7 @@ export async function insertToSupabase(
       model_name: extraction.model,
       status: 'completed',
       llm_attempts: 1,
-      llm_applied: products.length,
+        llm_applied: fullProducts.length,
       metrics: {
         input_tokens: extraction.input_tokens,
         output_tokens: extraction.output_tokens,

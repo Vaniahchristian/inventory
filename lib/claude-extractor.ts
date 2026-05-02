@@ -656,7 +656,7 @@ ${shared}`
 
 Columns to find: MARKS (唛头), SHOP# (supplier name), ITEM NO., DESCRIPTION OF GOODS, PACKING (e.g. "2pcs/ctn"), T.CTN (total cartons), T.QTY (total pieces), H/W/L (dimensions cm), UNIT CBM, T.CBM, UNIT WEIGHT (kg), T.WEIGHT (kg), U.PRICE (RMB), T.AMOUNT (RMB), BOX NO range.
 
-Sections: main shipped goods, "GOODS LEFT IN SANCARGO" (section="left_in_warehouse"), repacked goods (section="repacked").
+Sections: main shipped goods only use section="shipped". "GOODS LEFT IN SANCARGO" → section="left_in_warehouse". "GOODS STUFFED INTO THIS CONTAINER (REPACKED GOODS)" / repacked-banner rows → section="repacked" (not inventory — same exclusion as goods-left).
 
 Return a JSON object with EXACTLY this structure:
 {

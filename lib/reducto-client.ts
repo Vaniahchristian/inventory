@@ -3,6 +3,9 @@ import type { ExtractedDocument, ExtractedProduct } from './claude-extractor'
 const REDUCTO_BASE = 'https://platform.reducto.ai'
 const REDUCTO_PARSE_TIMEOUT_MS = Number(process.env.REDUCTO_PARSE_TIMEOUT_MS ?? 360000)
 const REDUCTO_PARSE_MAX_ATTEMPTS = Math.max(1, Number(process.env.REDUCTO_PARSE_MAX_ATTEMPTS ?? 2))
+// Long /extract calls still need headroom (slow networks, large PDFs)
+const REDUCTO_EXTRACT_TIMEOUT_MS = Number(process.env.REDUCTO_EXTRACT_TIMEOUT_MS ?? 800000)
+const REDUCTO_EXTRACT_MAX_ATTEMPTS = Math.max(1, Number(process.env.REDUCTO_EXTRACT_MAX_ATTEMPTS ?? 2))
 
 interface ReductoChunk {
   content: string
@@ -232,13 +235,28 @@ const EXTRACTION_SCHEMA = {
 }
 
 const EXTRACTION_SYSTEM_PROMPT = `
-You are extracting structured data from a Chinese packing list or sales order.
+You are extracting structured data from a Chinese packing list or sales order. Read EVERY product row — do not skip any.
+
+SECTION CLASSIFICATION:
+- section defaults to "shipped"
+- Use "left_in_warehouse" for ALL rows under "GOODS LEFT IN SANCARGO", "LEFT IN WAREHOUSE", or similar
+- Use "repacked" for ALL rows under the yellow banner "GOODS STUFFED INTO THIS CONTAINER (REPACKED GOODS)" / "REPACKED GOODS" / "REPACKAGED GOODS" and every green-highlighted row below it — these are NOT stored as inventory (same as goods left)
+- NEVER assign left_in_warehouse or repacked to rows in the main NEW ORDER / shipped table above those section banners
+
+YELLOW HIGHLIGHTED ROWS (subtotal bars):
+- The document contains yellow/orange highlighted rows that show running subtotals (e.g. "1042CTNS | 70.125CBM | ¥327,239.30")
+- These are SECTION SUBTOTALS, NOT product rows — do NOT add them to the products array
+- footer_totals should come from the GRAND TOTAL at the very bottom of the entire document (the last total row covering all sections), NOT from per-section yellow bars
+
+MARKS PROPAGATION:
+- The MARKS column often spans multiple rows (merged cell) — copy the marks value down to every sub-row that has no marks of its own
+
+OTHER RULES:
 - All monetary amounts are in RMB (元/¥) unless explicitly labelled USD
-- Dimensions are in cm; convert from mm if needed (÷10)
-- Weights are in kg
-- The MARKS column often spans multiple product rows (merged cell) — propagate the same marks value down to every sub-row that has no marks of its own
-- section defaults to "shipped"; use "left_in_warehouse" if the row is explicitly marked as remaining in warehouse; use "repacked" if explicitly labelled as repacked
-- Return null for any field that cannot be determined from the document
+- Dimensions in cm; convert from mm if needed (÷10)
+- Weights in kg
+- document_type: "sales_order" if header says SALES ORDER, "packing_list" if it says PACKING LIST, otherwise "unknown"
+- Return null for any field that cannot be determined
 `.trim()
 
 export interface ReductoStructuredResult {
@@ -279,26 +297,57 @@ export async function extractStructuredWithReducto(
   console.log(`${tag} [structured] uploaded in ${Date.now() - uploadStart}ms — file_id: ${file_id}`)
 
   // Step 2: Extract structured JSON with schema — replaces Claude text extraction
+  // Timeout + retry so a dropped connection doesn't silently fail
   const extractStart = Date.now()
-  const extractRes = await fetch(`${REDUCTO_BASE}/extract`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
+  const extractBody = JSON.stringify({
+    input: { file_id },
+    instructions: {
+      schema: EXTRACTION_SCHEMA,
+      system_prompt: EXTRACTION_SYSTEM_PROMPT,
     },
-    body: JSON.stringify({
-      input: { file_id },
-      instructions: {
-        schema: EXTRACTION_SCHEMA,
-        system_prompt: EXTRACTION_SYSTEM_PROMPT,
-      },
-      settings: {
-        optimize_for_latency: true,
-      },
-    }),
+    settings: {
+      // deep_extract is slower (often many minutes on large PDFs) but can improve row completeness.
+      // Default off; set REDUCTO_DEEP_EXTRACT=1 to enable.
+      deep_extract: process.env.REDUCTO_DEEP_EXTRACT === '1',
+    },
   })
+
+  let extractRes: Response | null = null
+  let lastExtractNetworkError: unknown = null
+  for (let attempt = 1; attempt <= REDUCTO_EXTRACT_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), REDUCTO_EXTRACT_TIMEOUT_MS)
+    try {
+      extractRes = await fetch(`${REDUCTO_BASE}/extract`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: extractBody,
+        signal: controller.signal,
+      })
+      lastExtractNetworkError = null
+      break
+    } catch (err: any) {
+      lastExtractNetworkError = err
+      const detail = err?.name === 'AbortError'
+        ? `timeout after ${REDUCTO_EXTRACT_TIMEOUT_MS}ms`
+        : err?.message ?? String(err)
+      console.warn(`${tag} extract attempt ${attempt}/${REDUCTO_EXTRACT_MAX_ATTEMPTS} network error: ${detail}`)
+      if (attempt < REDUCTO_EXTRACT_MAX_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, attempt * 2000))
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+  if (!extractRes) {
+    const msg = (lastExtractNetworkError as any)?.message ?? String(lastExtractNetworkError)
+    throw new Error(`Reducto extract network error: ${msg}`)
+  }
   if (!extractRes.ok) {
-    const errText = await extractRes.text().catch(() => extractRes.statusText)
+    const errText = await extractRes.text().catch(() => extractRes!.statusText)
     throw new Error(`Reducto extract failed (${extractRes.status}): ${errText}`)
   }
   const data = await extractRes.json()

@@ -5,6 +5,7 @@ import { extractWithClaudeChunked, type ClaudeExtractionResult } from '@/lib/cla
 import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
 import { extractStructuredWithReducto, isReductoConfigured } from '@/lib/reducto-client'
+import { filterToInventoryProducts } from '@/lib/sections'
 
 export const runtime = 'nodejs'
 export const maxDuration = 420
@@ -112,12 +113,21 @@ export async function POST(req: Request) {
           truncated: false,
         }
 
-        const validation = validateExtraction(extraction.document, extraction.products)
+        const inventoryProducts = filterToInventoryProducts(structured.products)
+        if (inventoryProducts.length === 0) {
+          return NextResponse.json(
+            { error: 'No shippable rows after excluding GOODS LEFT IN SANCARGO and REPACKED GOODS sections' },
+            { status: 422 }
+          )
+        }
+
+        const validation = validateExtraction(extraction.document, inventoryProducts)
+        const extractionForClient: ClaudeExtractionResult = { ...extraction, products: inventoryProducts }
         let documentId: string | null = null
         if (!skipInsert) {
           try {
             const fileSha256 = crypto.createHash('sha256').update(fallbackText || fileName).digest('hex')
-            const result = await insertToSupabase(fileName, fileSha256, extraction, validation, [])
+            const result = await insertToSupabase(fileName, fileSha256, extraction, [])
             documentId = result.document_id
           } catch (err: any) {
             console.error(`[extract][${debugId}] DB insert failed: ${err?.message ?? err}`)
@@ -127,7 +137,7 @@ export async function POST(req: Request) {
         const durationMs = Date.now() - startMs
         console.log(`[extract][${debugId}] reducto_extract complete in ${durationMs}ms — rows: ${structured.products.length} pages: ${structured.pageCount} credits: ${structured.credits}`)
 
-        return buildResponse(extraction, 'reducto_extract', documentId, validation, startMs)
+        return buildResponse(extractionForClient, 'reducto_extract', documentId, validation, startMs)
       } catch (err: any) {
         console.warn(`[extract][${debugId}] Reducto structured extract failed — ${err?.message ?? err}; falling back to pdfjs + Claude`)
         text = fallbackText
@@ -181,13 +191,22 @@ export async function POST(req: Request) {
     )
   }
 
-  const validation = validateExtraction(extraction.document, extraction.products)
+  const inventoryProducts = filterToInventoryProducts(extraction.products)
+  if (inventoryProducts.length === 0) {
+    return NextResponse.json(
+      { error: 'No shippable rows after excluding GOODS LEFT IN SANCARGO and REPACKED GOODS sections' },
+      { status: 422 }
+    )
+  }
+
+  const validation = validateExtraction(extraction.document, inventoryProducts)
+  const extractionForClient: ClaudeExtractionResult = { ...extraction, products: inventoryProducts }
 
   let documentId: string | null = null
   if (!skipInsert) {
     try {
       const fileSha256 = crypto.createHash('sha256').update(text).digest('hex')
-      const result = await insertToSupabase(fileName, fileSha256, extraction, validation, lines)
+      const result = await insertToSupabase(fileName, fileSha256, extraction, lines)
       documentId = result.document_id
     } catch (err: any) {
       console.error(`[extract][${debugId}] DB insert failed: ${err?.message ?? err}`)
@@ -200,7 +219,7 @@ export async function POST(req: Request) {
   )
 
   return buildResponse(
-    extraction,
+    extractionForClient,
     isReductoConfigured() ? 'reducto_fallback_claude' : 'claude_text',
     documentId,
     validation,

@@ -32,7 +32,7 @@ import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed, im
 import { useImportStore } from '@/lib/import-store'
 import { supabase } from '@/lib/supabase'
 import { stockStatus } from '@/lib/utils'
-import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE, STAGE_TOTAL_MARKER_PREFIX, parseSectionMarkerTitle } from '@/lib/sections'
+import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE, STAGE_TOTAL_MARKER_PREFIX, parseSectionMarkerTitle, shouldPublishExtractedProduct } from '@/lib/sections'
 import type { Product, Category, Supplier, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
 type Props = {
@@ -130,6 +130,10 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
     })
   }, [products, query, selectedDocumentId])
   const filteredDataRows = useMemo(() => filtered.filter(p => !isSectionDividerProduct(p)), [filtered])
+  const scopedDeleteCount = useMemo(() => {
+    if (selectedDocumentId === 'all') return products.length
+    return products.filter(p => p.source_document_id === selectedDocumentId).length
+  }, [products, selectedDocumentId])
 
   function importConsole(msg: string, meta?: unknown) {
     if (meta !== undefined) {
@@ -183,12 +187,24 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
   }
 
   function handleDeleteAll() {
-    if (!products.length) return
-    if (!confirm(`Delete ALL ${products.length} products? This cannot be undone.`)) return
+    if (scopedDeleteCount === 0) return
+    if (selectedDocumentId === 'all') {
+      if (!confirm(`Delete ALL ${scopedDeleteCount} products? This cannot be undone.`)) return
+      startTransition(async () => {
+        try {
+          await deleteAllProducts()
+          toast.success(`Deleted ${scopedDeleteCount} products`)
+        } catch (e: any) {
+          toast.error(e.message)
+        }
+      })
+      return
+    }
+    if (!confirm(`Delete all ${scopedDeleteCount} products linked to this document? This cannot be undone.`)) return
     startTransition(async () => {
       try {
-        await deleteAllProducts()
-        toast.success(`Deleted ${products.length} products`)
+        await deleteAllProducts({ sourceDocumentId: selectedDocumentId })
+        toast.success(`Deleted ${scopedDeleteCount} products`)
       } catch (e: any) {
         toast.error(e.message)
       }
@@ -242,7 +258,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
         }
 
         const rows = products
-          .filter((p: any) => (p.section ?? 'shipped') === 'shipped')
+          .filter((p: any) => shouldPublishExtractedProduct(p.section))
           .map((p: any) => ({
             MARKS: String(p.marks ?? p.item_code ?? ''),
             'SHOP#': String(p.shop ?? ''),
@@ -430,7 +446,7 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
             size="sm"
             className="h-8 gap-1.5 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
             onClick={handleDeleteAll}
-            disabled={isPending || products.length === 0}
+            disabled={isPending || scopedDeleteCount === 0}
           >
             <Trash2 className="h-3.5 w-3.5" /> Delete All
           </Button>

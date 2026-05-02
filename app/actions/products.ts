@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 import type { ImportMeta, ProductDocumentRef } from '@/lib/types'
-import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle } from '@/lib/sections'
+import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle, makeStageTotalSku } from '@/lib/sections'
 import Anthropic from '@anthropic-ai/sdk'
 import { callLlm } from '@/lib/llm-client'
 
@@ -1026,37 +1026,50 @@ async function publishDocumentProducts(documentId: string, publishedBy: string) 
   }
   if (publishSourceRows.length === 0) throw new Error('Cannot finalize: no document rows found')
 
-  const publishRows = publishSourceRows.map((row) => ({
-    name: str(row.description) || str(row.item_code) || null,
-    sku: str(row.item_code) || null,
-    source_item_no: str(row.source_item_no) || null,
-    description: str(row.description) || null,
-    unit: parseUnit(str(row.packaging) || 'pcs/ctn'),
-    packing: str(row.packaging) || null,
-    cartons: intOrNull(row.total_cartons),
-    quantity: intOrNull(row.total_quantity) ?? 0,
-    unit_cbm: numOrNull(row.unit_cbm),
-    cbm: numOrNull(row.total_cbm),
-    unit_weight: numOrNull(row.unit_weight_kg) == null ? null : `${numOrNull(row.unit_weight_kg)}KGS`,
-    total_weight: numOrNull(row.total_weight_kg) == null ? null : `${numOrNull(row.total_weight_kg)}KGS`,
-    cost_price: numOrNull(row.unit_price_rmb) ?? 0,
-    selling_price: 0,
-    total_amount_rmb: numOrNull(row.total_amount_rmb),
-    reorder_level: 0,
-    warehouse: str(row.warehouse) || null,
-    remarks: str(row.remarks) || null,
-    barcode: str(row.barcode) || null,
-    code: str(row.code) || null,
-    photo: str(row.photo) || null,
-    photo2: str(row.photo2) || null,
-    dim_l_cm: numOrNull(row.dim_l_cm),
-    dim_w_cm: numOrNull(row.dim_w_cm),
-    dim_h_cm: numOrNull(row.dim_h_cm),
-    source_document_id: documentId,
-    source_document_item_id: str(row.id) || null,
-    extraction_confidence: 95,
-    extraction_flags: [],
-  }))
+  // buildRemarks() encodes section into remarks as "section:repacked" / "section:left_in_warehouse"
+  function rowSection(remarks: string | null | undefined): 'shipped' | 'repacked' | 'left_in_warehouse' {
+    const m = (remarks ?? '').match(/\bsection:(repacked|left_in_warehouse)\b/)
+    return (m?.[1] as 'repacked' | 'left_in_warehouse' | undefined) ?? 'shipped'
+  }
+
+  function toProductRow(row: any) {
+    return {
+      name: str(row.description) || str(row.item_code) || null,
+      sku: str(row.item_code) || null,
+      source_item_no: str(row.source_item_no) || null,
+      description: str(row.description) || null,
+      unit: parseUnit(str(row.packaging) || 'pcs/ctn'),
+      packing: str(row.packaging) || null,
+      cartons: intOrNull(row.total_cartons),
+      quantity: intOrNull(row.total_quantity) ?? 0,
+      unit_cbm: numOrNull(row.unit_cbm),
+      cbm: numOrNull(row.total_cbm),
+      unit_weight: numOrNull(row.unit_weight_kg) == null ? null : `${numOrNull(row.unit_weight_kg)}KGS`,
+      total_weight: numOrNull(row.total_weight_kg) == null ? null : `${numOrNull(row.total_weight_kg)}KGS`,
+      cost_price: numOrNull(row.unit_price_rmb) ?? 0,
+      selling_price: 0,
+      total_amount_rmb: numOrNull(row.total_amount_rmb),
+      reorder_level: 0,
+      warehouse: str(row.warehouse) || null,
+      remarks: str(row.remarks) || null,
+      barcode: str(row.barcode) || null,
+      code: str(row.code) || null,
+      photo: str(row.photo) || null,
+      photo2: str(row.photo2) || null,
+      dim_l_cm: numOrNull(row.dim_l_cm),
+      dim_w_cm: numOrNull(row.dim_w_cm),
+      dim_h_cm: numOrNull(row.dim_h_cm),
+      source_document_id: documentId,
+      source_document_item_id: str(row.id) || null,
+      extraction_confidence: 95,
+      extraction_flags: [],
+    }
+  }
+
+  // Only main shipment rows go to inventory — same as extract pipeline (exclude left_in_warehouse + repacked).
+  const shippedSourceRows = publishSourceRows.filter(r => rowSection(r.remarks) === 'shipped')
+
+  const publishRows: ReturnType<typeof toProductRow>[] = shippedSourceRows.map(toProductRow)
 
   await withSupabaseRetry(
     () => supabase.from('products').delete().eq('source_document_id', documentId),
@@ -1215,16 +1228,25 @@ export async function deleteProduct(id: string) {
   revalidatePath('/')
 }
 
-export async function deleteAllProducts() {
-  const { error } = await withSupabaseRetry(
-    () => supabase.from('products').delete().not('id', 'is', null),
-    'deleteAllProducts'
-  )
-  if (error) throw new Error(error.message)
-  await withSupabaseRetry(
-    () => supabase.from('product_import_meta').delete().eq('id', 1),
-    'deleteImportMeta'
-  )
+export async function deleteAllProducts(options?: { sourceDocumentId?: string | null }) {
+  const docId = options?.sourceDocumentId
+  if (docId) {
+    const { error } = await withSupabaseRetry(
+      () => supabase.from('products').delete().eq('source_document_id', docId),
+      'deleteAllProducts.scoped'
+    )
+    if (error) throw new Error(error.message)
+  } else {
+    const { error } = await withSupabaseRetry(
+      () => supabase.from('products').delete().not('id', 'is', null),
+      'deleteAllProducts'
+    )
+    if (error) throw new Error(error.message)
+    await withSupabaseRetry(
+      () => supabase.from('product_import_meta').delete().eq('id', 1),
+      'deleteImportMeta'
+    )
+  }
   revalidatePath('/products')
   revalidatePath('/compiled-products')
   revalidatePath('/')

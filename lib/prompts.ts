@@ -162,9 +162,9 @@ CONTAINER MANIFEST SPECIFIC:
 - shop: the SHOP# column — this is a supplier name (e.g. "佛伦斯", "悠肯", "新南方"), NOT a warehouse
 - item_code: use the marks value if no separate item code column exists
 - section field must be one of: "shipped", "left_in_warehouse", "repacked"
-  - "shipped" = main order rows
-  - "left_in_warehouse" = rows under "GOODS LEFT IN SANCARGO" heading
-  - "repacked" = rows under repacked/stuffed section headings
+  - "shipped" = main order rows only (above any yellow section banners)
+  - "left_in_warehouse" = rows under "GOODS LEFT IN SANCARGO" / warehouse-left headings
+  - "repacked" = rows under "GOODS STUFFED INTO THIS CONTAINER (REPACKED GOODS)" and similar — excluded from inventory like goods-left
 - packaging: format "Npcs/ctn" (e.g. "2pcs/ctn", "16pcs/ctn")
 - box_no_start / box_no_end: parse from BOX NO column (e.g. "170-278" → start:170, end:278)
 - payments: extract all payment lines at the bottom (date, amount, type)
