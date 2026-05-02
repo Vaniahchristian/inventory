@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
-import type { ImportMeta } from '@/lib/types'
+import type { ImportMeta, ProductDocumentRef } from '@/lib/types'
 import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle } from '@/lib/sections'
 import Anthropic from '@anthropic-ai/sdk'
 import { callLlm } from '@/lib/llm-client'
@@ -797,18 +797,45 @@ export async function rerunReviewItemWithDeepseek(itemId: string) {
   revalidatePath('/review-queue')
 }
 
-export async function getProductDocuments() {
-  const { data, error } = await withSupabaseRetry(
+export async function getProductDocuments(): Promise<ProductDocumentRef[]> {
+  const { data: productRows, error: prodErr } = await withSupabaseRetry(
     () =>
-      supabase
-        .from('documents')
-        .select('id, source_file_name, document_type, extraction_status, publish_state, created_at')
-        .order('created_at', { ascending: false })
-        .limit(300),
-    'getProductDocuments'
+      supabase.from('products').select('source_document_id').not('source_document_id', 'is', null),
+    'getProductDocuments.productIds'
   )
-  if (error) throw new Error(error.message)
-  return data ?? []
+  if (prodErr) throw new Error(prodErr.message)
+
+  const docIdSet = new Set<string>()
+  for (const r of productRows ?? []) {
+    const id = (r as { source_document_id?: string | null }).source_document_id
+    if (typeof id === 'string' && id.length > 0) docIdSet.add(id)
+  }
+  const docIds = [...docIdSet]
+  if (docIds.length === 0) return []
+
+  const chunkSize = 80
+  const byId = new Map<string, ProductDocumentRef & { created_at: string }>()
+  for (let i = 0; i < docIds.length; i += chunkSize) {
+    const chunk = docIds.slice(i, i + chunkSize)
+    const { data: rows, error } = await withSupabaseRetry(
+      () =>
+        supabase
+          .from('documents')
+          .select('id, source_file_name, document_type, extraction_status, publish_state, created_at')
+          .in('id', chunk),
+      'getProductDocuments.documents'
+    )
+    if (error) throw new Error(error.message)
+    for (const row of rows ?? []) {
+      const rec = row as ProductDocumentRef & { created_at: string }
+      if (rec.id && !byId.has(rec.id)) byId.set(rec.id, rec)
+    }
+  }
+
+  const merged = [...byId.values()].sort((a, b) =>
+    String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''))
+  )
+  return merged.slice(0, 300)
 }
 
 export async function approveDocumentReview(id: string) {
