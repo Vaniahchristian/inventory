@@ -13,7 +13,7 @@ import type { ExtractedDocument, ExtractedProduct } from './claude-extractor'
 import type { DocType } from './prompts'
 import { expandHtmlTable } from './html-table-parser'
 import { resolveColumn, type ProductField } from './column-map'
-import { FULL_EXTRACT_ITEM_CODE } from './full-extract'
+import { FULL_EXTRACT_ITEM_CODE, SECTION_SUBTOTAL_ITEM_CODE } from './full-extract'
 import { isGoodsLeftHeader, isNewOrderSectionHeader, isRepackagedSectionHeader } from './sections'
 
 type Section = ExtractedProduct['section']
@@ -537,8 +537,9 @@ function parseGridToProducts(
     const raw = buildRawFromRow(row, colMap)
 
     // Yellow / rolled section subtotal bars (CTNS+CBM+KGS+¥)
-    // In full mode: pass through so numbers are visible in the literal view.
-    // In inventory mode: skip (they are not real product rows).
+    // In inventory mode: skip entirely — not real product rows.
+    // In full mode: emit tagged with SECTION_SUBTOTAL_ITEM_CODE so live view shows them
+    // in yellow, but the DB inserter knows to exclude them.
     if (
       isLikelyYellowSubtotalRow(row) ||
       isSubtotalAggregateRaw(raw) ||
@@ -546,6 +547,11 @@ function parseGridToProducts(
     ) {
       prevMarks = null
       if (parseMode !== 'full') continue
+      const sub = rawToProduct(raw, currentSection, lineNo, null)
+      sub.item_code = SECTION_SUBTOTAL_ITEM_CODE
+      products.push(sub)
+      lineNo++
+      continue
     }
     // Infer marks from visible cells FIRST so a new section mark isn't overwritten by carry-forward
     const inferredMarks = inferMarksFromRowCells(row)

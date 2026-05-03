@@ -1,5 +1,5 @@
 import { ExtractedDocument, ExtractedProduct, ClaudeExtractionResult } from './claude-extractor'
-import { isFullExtractBanner } from '@/lib/full-extract'
+import { isFullExtractBanner, isSubtotalBanner } from '@/lib/full-extract'
 import { filterToInventoryProducts } from '@/lib/sections'
 import { ValidationResult, validateExtraction } from './validator'
 import { supabase } from './supabase'
@@ -19,7 +19,7 @@ export async function insertToSupabase(
 ): Promise<InsertResult> {
   const doc = extraction.document
   const rawAuditProducts = extraction.products
-  const fullProducts = extraction.products.filter(p => !isFullExtractBanner(p))
+  const fullProducts = extraction.products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p))
   if (fullProducts.length === 0) {
     throw new Error('No rows to save — extraction returned no product rows.')
   }

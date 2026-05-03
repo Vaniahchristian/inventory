@@ -4,7 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { MonitorPlay, Loader2, Save, FileUp, ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import type { ExtractedDocument, ExtractedProduct } from '@/lib/claude-extractor'
-import { isFullExtractBanner } from '@/lib/full-extract'
+import { isFullExtractBanner, isSubtotalBanner } from '@/lib/full-extract'
 import { extractPdfText } from '@/lib/pdf-text-extractor'
 import { saveLiveViewExtraction } from '@/app/actions/live-view'
 import { Button } from '@/components/ui/button'
@@ -90,11 +90,12 @@ export function LiveViewClient() {
     setProducts(prev => prev.filter((_, i) => i !== index))
   }, [])
 
-  const grandTotals = useMemo(() => sumGroup(products), [products])
-  const persistableCount = useMemo(
-    () => products.filter(p => !isFullExtractBanner(p)).length,
+  const realRows = useMemo(
+    () => products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p)),
     [products]
   )
+  const grandTotals = useMemo(() => sumGroup(realRows), [realRows])
+  const persistableCount = realRows.length
 
   async function handleExtract(file: File) {
     setExtracting(true)
@@ -145,7 +146,7 @@ export function LiveViewClient() {
   }
 
   async function handleSave() {
-    const persistable = products.filter(p => !isFullExtractBanner(p))
+    const persistable = products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p))
     if (!documentState || !fileName) {
       toast.error('Nothing to save — extract a PDF first')
       return
@@ -315,7 +316,9 @@ export function LiveViewClient() {
                   <tr
                     key={`${row.line_no}-${i}`}
                     className={
-                      isFullExtractBanner(row)
+                      isSubtotalBanner(row)
+                        ? 'border-b border-yellow-400 bg-yellow-200 hover:bg-yellow-300 font-semibold'
+                        : isFullExtractBanner(row)
                         ? 'border-b border-amber-200 bg-amber-50/90 hover:bg-amber-50'
                         : 'border-b border-slate-100 hover:bg-slate-50/80'
                     }
