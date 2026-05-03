@@ -16,6 +16,7 @@ import {
   deleteDocumentItem,
   deleteDocumentsByDocument,
   deleteAllDocumentItems,
+  deleteDocumentItemsBySection,
   importProducts,
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
@@ -128,6 +129,12 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     })
   }, [items, query, selectedDocumentId])
 
+  const sectionCounts = useMemo(() => ({
+    shipped: filtered.filter(p => p.section === 'shipped').length,
+    left_in_warehouse: filtered.filter(p => p.section === 'left_in_warehouse').length,
+    repacked: filtered.filter(p => p.section === 'repacked').length,
+  }), [filtered])
+
   const totals = useMemo(() => ({
     cartons: filtered.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
     qty: filtered.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
@@ -142,6 +149,20 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
       try {
         await deleteDocumentItem(id)
         toast.success('Row deleted')
+      } catch (e: any) { toast.error(e.message) }
+    })
+  }
+
+  function handleDeleteSection(section: DocumentItem['section']) {
+    const sectionLabel = section === 'left_in_warehouse' ? 'left in warehouse' : section
+    const scopeLabel = selectedDocumentId !== 'all' ? ' from this document' : ''
+    const count = filtered.filter(p => p.section === section).length
+    if (count === 0) return
+    if (!confirm(`Delete all ${count} "${sectionLabel}" rows${scopeLabel}? This cannot be undone.`)) return
+    startTransition(async () => {
+      try {
+        await deleteDocumentItemsBySection(section, selectedDocumentId !== 'all' ? selectedDocumentId : null)
+        toast.success(`Deleted ${count} "${sectionLabel}" rows`)
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -338,16 +359,41 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
         </div>
       )}
 
-      {/* Section legend */}
-      <div className="flex gap-3 text-[11px] text-slate-500">
+      {/* Section legend with per-section delete */}
+      <div className="flex gap-3 text-[11px] text-slate-500 flex-wrap">
         <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm bg-white border border-slate-200" /> shipped
+          <span className="inline-block w-3 h-3 rounded-sm bg-white border border-slate-200" />
+          shipped ({sectionCounts.shipped})
         </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm bg-sky-100 border border-sky-200" /> left in warehouse
+        <span className="flex items-center gap-2">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm bg-sky-100 border border-sky-200" />
+            left in warehouse ({sectionCounts.left_in_warehouse})
+          </span>
+          {sectionCounts.left_in_warehouse > 0 && (
+            <button
+              onClick={() => handleDeleteSection('left_in_warehouse')}
+              disabled={isPending}
+              className="text-[10px] text-red-400 hover:text-red-600 underline disabled:opacity-40"
+            >
+              delete section
+            </button>
+          )}
         </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm bg-violet-100 border border-violet-200" /> repacked
+        <span className="flex items-center gap-2">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm bg-violet-100 border border-violet-200" />
+            repacked ({sectionCounts.repacked})
+          </span>
+          {sectionCounts.repacked > 0 && (
+            <button
+              onClick={() => handleDeleteSection('repacked')}
+              disabled={isPending}
+              className="text-[10px] text-red-400 hover:text-red-600 underline disabled:opacity-40"
+            >
+              delete section
+            </button>
+          )}
         </span>
       </div>
 

@@ -1376,6 +1376,18 @@ export async function deleteAllDocumentItems(): Promise<void> {
   revalidatePath('/products')
 }
 
+/** Deletes all document_items rows for a given section, optionally scoped to one document. */
+export async function deleteDocumentItemsBySection(
+  section: 'shipped' | 'left_in_warehouse' | 'repacked',
+  documentId?: string | null
+): Promise<void> {
+  let query = supabase.from('document_items').delete().eq('section', section)
+  if (documentId) query = query.eq('document_id', documentId)
+  const { error } = await withSupabaseRetry(() => query, 'deleteDocumentItemsBySection')
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+}
+
 // ── End document items ────────────────────────────────────────────────────────
 
 async function saveImportMeta(meta: ImportMeta | null | undefined) {
