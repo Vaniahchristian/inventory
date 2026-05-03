@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { DocType, getPromptForDocType } from './prompts'
 import { callLlm } from './llm-client'
+import { coerceDocument, coerceProductArray } from './extract-coerce'
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
@@ -587,9 +588,11 @@ function parseClaudeResponse(raw: string): { document: ExtractedDocument; produc
     throw new Error('Claude response missing required "document" or "products" fields')
   }
 
-  console.log(`[claude-extractor] parsed rows: ${parsed.products.length}`)
+  const document = coerceDocument(parsed.document)
+  const products = coerceProductArray(parsed.products)
+  console.log(`[claude-extractor] parsed rows: ${products.length}`)
 
-  return { document: parsed.document, products: parsed.products }
+  return { document, products }
 }
 
 function repairJson(str: string): string {

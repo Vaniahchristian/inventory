@@ -4,11 +4,14 @@ import { detectDocTypeFromFilename, detectDocType } from '@/lib/prompts'
 import { extractWithClaudeChunked, type ClaudeExtractionResult } from '@/lib/claude-extractor'
 import { validateExtraction } from '@/lib/validator'
 import { insertToSupabase } from '@/lib/supabase-inserter'
-import { extractStructuredWithReducto, isReductoConfigured } from '@/lib/reducto-client'
-import { filterToInventoryProducts } from '@/lib/sections'
+import { extractStructuredWithReducto, extractWithReductoHtmlParser, isReductoConfigured } from '@/lib/reducto-client'
+import { isFullExtractBanner } from '@/lib/full-extract'
+import { filterToInventoryProducts, dropTotalRows } from '@/lib/sections'
+import type { ValidationResult } from '@/lib/validator'
 
 export const runtime = 'nodejs'
-export const maxDuration = 420
+// Must cover Reducto client timeout (default 12m) + upload + JSON; see lib/reducto-client.ts
+export const maxDuration = 900
 
 function selectRelevantExtractionLines(input: string[]): string[] {
   const lines = input.map(l => l.trim()).filter(Boolean)
@@ -33,13 +36,14 @@ function buildResponse(
   extraction: ClaudeExtractionResult,
   extractionMethod: string,
   documentId: string | null,
-  validation: ReturnType<typeof validateExtraction>,
+  validation: ValidationResult,
   startMs: number,
   linesRaw = 0,
   linesUsed = 0,
   chunkCount = 1,
   failedChunks = 0,
   truncatedChunks = 0,
+  responseOpts?: { full_extract?: boolean }
 ) {
   const durationMs = Date.now() - startMs
   return NextResponse.json({
@@ -55,6 +59,7 @@ function buildResponse(
     products: extraction.products,
     document: extraction.document,
     validation_flags: validation.validation_flags,
+    full_extract: responseOpts?.full_extract ?? false,
     metrics: {
       duration_ms: durationMs,
       input_tokens: extraction.input_tokens,
@@ -88,41 +93,79 @@ export async function POST(req: Request) {
 
     fileName = String(formData.get('file_name') ?? formData.get('fileName') ?? 'document.pdf')
     skipInsert = formData.get('skip_db_insert') === 'true'
+    const fullExtract = formData.get('full_extract') === 'true'
     fallbackText = String(formData.get('fallback_text') ?? '')
     const file = formData.get('file') as File | null
 
-    // ── PRIMARY PATH: Reducto structured extract — no Claude needed ────────────
-    // Reducto /extract with schema returns typed JSON directly. Total time: ~15-30s.
-    // Falls back to Claude text path if Reducto fails.
+    // ── PRIMARY PATH: Reducto /parse + deterministic HTML column parser ────────
+    // Fix 1: No LLM involved in column mapping — always returns same result.
+    // Falls back to Reducto /extract (LLM schema) then to pdfjs+Claude.
     if (isReductoConfigured() && file) {
+      let buffer: Buffer
       try {
-        console.log(`[extract][${debugId}] reducto_extract — file: ${fileName} size: ${file.size}`)
-        const buffer = Buffer.from(await file.arrayBuffer())
-        const structured = await extractStructuredWithReducto(buffer, fileName, debugId)
+        buffer = Buffer.from(await file.arrayBuffer())
+      } catch {
+        return NextResponse.json({ error: 'Failed to read uploaded file' }, { status: 400 })
+      }
 
-        if (structured.products.length === 0) {
-          return NextResponse.json({ error: 'Reducto extracted 0 rows' }, { status: 422 })
+      let structured: Awaited<ReturnType<typeof extractWithReductoHtmlParser>> | null = null
+      let extractionMethod = 'reducto_html_parse'
+
+      // Try 1: deterministic HTML parser
+      try {
+        console.log(
+          `[extract][${debugId}] reducto_html_parse — file: ${fileName} size: ${file.size} full_extract: ${fullExtract}`
+        )
+        structured = await extractWithReductoHtmlParser(buffer, fileName, debugId, {
+          parseMode: fullExtract ? 'full' : 'inventory',
+        })
+      } catch (htmlErr: any) {
+        console.warn(`[extract][${debugId}] HTML parser failed (${htmlErr?.message ?? htmlErr}) — trying schema extract`)
+        // Try 2: Reducto /extract with LLM schema (original approach)
+        try {
+          structured = await extractStructuredWithReducto(buffer, fileName, debugId)
+          extractionMethod = 'reducto_extract'
+        } catch (schemaErr: any) {
+          console.warn(`[extract][${debugId}] Schema extract also failed (${schemaErr?.message ?? schemaErr}) — falling back to Claude`)
+          text = fallbackText
         }
+      }
 
+      if (structured && structured.products.length > 0) {
         const extraction: ClaudeExtractionResult = {
           document: structured.document,
           products: structured.products,
-          model: 'reducto',
+          model: extractionMethod,
           input_tokens: 0,
           output_tokens: 0,
           truncated: false,
         }
 
-        const inventoryProducts = filterToInventoryProducts(structured.products)
-        if (inventoryProducts.length === 0) {
+        const forInventorySource = structured.products.filter(p => !isFullExtractBanner(p))
+        const inventoryProducts = dropTotalRows(filterToInventoryProducts(forInventorySource))
+
+        if (!fullExtract && inventoryProducts.length === 0) {
           return NextResponse.json(
             { error: 'No shippable rows after excluding GOODS LEFT IN SANCARGO and REPACKED GOODS sections' },
             { status: 422 }
           )
         }
 
-        const validation = validateExtraction(extraction.document, inventoryProducts)
-        const extractionForClient: ClaudeExtractionResult = { ...extraction, products: inventoryProducts }
+        const validation: ValidationResult = fullExtract
+          ? {
+              totals_match: true,
+              totals_diff: {},
+              validation_flags: ['full_extract: footer checksums skipped — delete heading rows before save if needed'],
+              row_results: [],
+              pass_count: inventoryProducts.length,
+              flag_count: 0,
+            }
+          : validateExtraction(extraction.document, inventoryProducts, forInventorySource)
+
+        const extractionForClient: ClaudeExtractionResult = fullExtract
+          ? extraction
+          : { ...extraction, products: inventoryProducts }
+
         let documentId: string | null = null
         if (!skipInsert) {
           try {
@@ -135,13 +178,25 @@ export async function POST(req: Request) {
         }
 
         const durationMs = Date.now() - startMs
-        console.log(`[extract][${debugId}] reducto_extract complete in ${durationMs}ms — rows: ${structured.products.length} pages: ${structured.pageCount} credits: ${structured.credits}`)
+        console.log(`[extract][${debugId}] ${extractionMethod} complete in ${durationMs}ms — rows: ${structured.products.length} pages: ${structured.pageCount} credits: ${structured.credits}`)
 
-        return buildResponse(extractionForClient, 'reducto_extract', documentId, validation, startMs)
-      } catch (err: any) {
-        console.warn(`[extract][${debugId}] Reducto structured extract failed — ${err?.message ?? err}; falling back to pdfjs + Claude`)
-        text = fallbackText
+        return buildResponse(
+          extractionForClient,
+          extractionMethod,
+          documentId,
+          validation,
+          startMs,
+          0,
+          0,
+          1,
+          0,
+          0,
+          { full_extract: fullExtract }
+        )
+      } else if (structured && structured.products.length === 0) {
+        return NextResponse.json({ error: 'Reducto extracted 0 rows' }, { status: 422 })
       }
+      // else: text was set to fallbackText above, fall through to Claude path
     } else {
       text = fallbackText
     }
@@ -191,7 +246,7 @@ export async function POST(req: Request) {
     )
   }
 
-  const inventoryProducts = filterToInventoryProducts(extraction.products)
+  const inventoryProducts = dropTotalRows(filterToInventoryProducts(extraction.products))
   if (inventoryProducts.length === 0) {
     return NextResponse.json(
       { error: 'No shippable rows after excluding GOODS LEFT IN SANCARGO and REPACKED GOODS sections' },
@@ -199,7 +254,7 @@ export async function POST(req: Request) {
     )
   }
 
-  const validation = validateExtraction(extraction.document, inventoryProducts)
+  const validation = validateExtraction(extraction.document, inventoryProducts, extraction.products)
   const extractionForClient: ClaudeExtractionResult = { ...extraction, products: inventoryProducts }
 
   let documentId: string | null = null

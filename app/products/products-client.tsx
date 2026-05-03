@@ -2,81 +2,75 @@
 
 import React, { useState, useTransition, useRef, useMemo, useEffect } from 'react'
 import { toast } from 'sonner'
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
-} from '@/components/ui/dialog'
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
-import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import {
-  Plus, Minus, Search, MoreHorizontal, Pencil, Trash2,
-  Download, Upload, FileSpreadsheet, FileText, ImageIcon, AlertTriangle, Loader2,
+  Search, Trash2, Upload, Loader2,
 } from 'lucide-react'
 import {
-  createProduct, updateProduct, deleteProduct, deleteAllProducts, importProducts, markOutOfStock, adjustProductCartons,
   getDocumentImportMeta,
+  deleteDocumentItem,
+  deleteDocumentsByDocument,
+  deleteAllDocumentItems,
+  importProducts,
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
-import { exportProductsToExcel, exportProductsToPdf, parseImportFileDetailed, importPdfDirect } from '@/lib/export'
+import { importPdfDirect } from '@/lib/export'
 import { useImportStore } from '@/lib/import-store'
-import { supabase } from '@/lib/supabase'
-import { stockStatus } from '@/lib/utils'
-import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE, STAGE_TOTAL_MARKER_PREFIX, parseSectionMarkerTitle, shouldPublishExtractedProduct } from '@/lib/sections'
-import type { Product, Category, Supplier, ImportMeta, ProductDocumentRef } from '@/lib/types'
+import { shouldPublishExtractedProduct } from '@/lib/sections'
+import type { DocumentItem, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
 type Props = {
-  products: Product[]
-  categories: Category[]
-  suppliers: Supplier[]
+  items: DocumentItem[]
   importMeta: ImportMeta | null
   productDocuments: ProductDocumentRef[]
 }
 
-const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
-
-function fmt(n: number | null | undefined, decimals = 2) {
+function fmtN(n: number | null | undefined, dec = 2): string {
   if (n == null) return '-'
-  return n.toLocaleString('en-UG', { minimumFractionDigits: 0, maximumFractionDigits: decimals })
+  const v = typeof n === 'string' ? parseFloat(n) : n
+  if (!isFinite(v)) return '-'
+  return v.toLocaleString('en-UG', { minimumFractionDigits: 0, maximumFractionDigits: dec })
 }
 
-function parseWeight(w: string | null | undefined): number {
-  return parseFloat((w ?? '0').replace(/[^\d.]/g, '')) || 0
+function fmtMoney(n: number | null | undefined): string {
+  if (n == null) return '-'
+  const v = typeof n === 'string' ? parseFloat(n) : n
+  if (!isFinite(v)) return '-'
+  return `¥${v.toLocaleString('en-UG', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`
 }
 
-function parseStageTotalValues(text: string) {
-  const ctns = text.match(/(\d+)CTNS?/i)?.[1]
-  const cbm = text.match(/([\d.]+)CBM/i)?.[1]
-  const kgs = text.match(/([\d.]+)KGS/i)?.[1]
-  const amountRaw = text.match(/[¥￥]([\d,]+(?:\.\d+)?)/)?.[1]
-  return {
-    cartons: ctns ? parseInt(ctns) : null,
-    cbm: cbm ? parseFloat(cbm) : null,
-    weight: kgs ? parseFloat(kgs) : null,
-    amount: amountRaw ? parseFloat(amountRaw.replace(/,/g, '')) : null,
-  }
+function boxLabel(start: number | null, end: number | null): string {
+  if (start == null) return '-'
+  if (end != null && end !== start) return `${start}–${end}`
+  return String(start)
 }
 
-export function ProductsClient({ products, categories, suppliers, importMeta, productDocuments }: Props) {
-  const [editing, setEditing] = useState<Product | null>(null)
-  const [adding, setAdding] = useState(false)
-  const [isPending, startTransition] = useTransition()
-  const fileInputRef = useRef<HTMLInputElement>(null)
+function sectionClass(section: DocumentItem['section']): string {
+  if (section === 'left_in_warehouse') return 'bg-sky-50 hover:bg-sky-100'
+  if (section === 'repacked') return 'bg-violet-50 hover:bg-violet-100'
+  return 'hover:bg-slate-50'
+}
+
+function SectionBadge({ section }: { section: DocumentItem['section'] }) {
+  if (section === 'left_in_warehouse')
+    return <Badge variant="outline" className="text-[10px] border-sky-300 text-sky-700 bg-sky-50">left</Badge>
+  if (section === 'repacked')
+    return <Badge variant="outline" className="text-[10px] border-violet-300 text-violet-700 bg-violet-50">repacked</Badge>
+  return <Badge variant="outline" className="text-[10px] border-emerald-300 text-emerald-700 bg-emerald-50">shipped</Badge>
+}
+
+export function ProductsClient({ items, importMeta, productDocuments }: Props) {
   const [query, setQuery] = useState('')
-  const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
   const [footerMeta, setFooterMeta] = useState<ImportMeta | null>(importMeta)
   const [footerPaymentRows, setFooterPaymentRows] = useState<DocumentFooterPaymentRow[] | null>(null)
+  const [isPending, startTransition] = useTransition()
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const { status: importStatus, progress: importProgress, stage: importStage, startImport, updateProgress, finishImport, failImport } = useImportStore()
 
   useEffect(() => {
@@ -98,116 +92,62 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
           setFooterPaymentRows(null)
         }
       } catch {
-        if (!cancelled) {
-          setFooterMeta(null)
-          setFooterPaymentRows(null)
-        }
+        if (!cancelled) { setFooterMeta(null); setFooterPaymentRows(null) }
       }
     })()
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [selectedDocumentId, importMeta])
 
-  const realProducts = useMemo(() => products.filter(p => !isSectionDividerProduct(p)), [products])
   const filtered = useMemo(() => {
-    const queryTrimmed = query.trim().toLowerCase()
-    const q = query.toLowerCase()
-    return products.filter(p => {
-      const passesDoc =
-        selectedDocumentId === 'all' || p.source_document_id === selectedDocumentId
-      if (!passesDoc) return false
-      if (!queryTrimmed) return true
+    const q = query.trim().toLowerCase()
+    return items.filter(p => {
+      if (selectedDocumentId !== 'all' && p.document_id !== selectedDocumentId) return false
+      if (!q) return true
       return (
-        isSectionDividerProduct(p) ||
-        p.name?.toLowerCase().includes(q) ||
-        p.sku?.toLowerCase().includes(q) ||
-        p.shop_name?.toLowerCase().includes(q) ||
+        p.marks?.toLowerCase().includes(q) ||
+        p.item_code?.toLowerCase().includes(q) ||
         p.description?.toLowerCase().includes(q) ||
-        p.order_no?.toLowerCase().includes(q) ||
-        p.customer_no?.toLowerCase().includes(q)
+        p.shop?.toLowerCase().includes(q) ||
+        p.documents?.source_file_name?.toLowerCase().includes(q)
       )
     })
-  }, [products, query, selectedDocumentId])
-  const filteredDataRows = useMemo(() => filtered.filter(p => !isSectionDividerProduct(p)), [filtered])
-  const scopedDeleteCount = useMemo(() => {
-    if (selectedDocumentId === 'all') return products.length
-    return products.filter(p => p.source_document_id === selectedDocumentId).length
-  }, [products, selectedDocumentId])
-
-  function importConsole(msg: string, meta?: unknown) {
-    if (meta !== undefined) {
-      console.log(`[products-import] ${msg}`, meta)
-    } else {
-      console.log(`[products-import] ${msg}`)
-    }
-  }
-
-  async function handleMarkOutOfStock(id: string, name: string | null) {
-    if (!confirm(`Mark "${name ?? 'this product'}" as out of stock? Cartons and quantity will be set to 0.`)) return
-    startTransition(async () => {
-      try {
-        await markOutOfStock(id)
-        toast.success('Marked as out of stock')
-      } catch (e: any) {
-        toast.error(e.message)
-      }
-    })
-  }
-
-  async function handleAdjustCartons(id: string, delta: number) {
-    if (adjustingId) return
-    setAdjustingId(id)
-    try {
-      await adjustProductCartons(id, delta)
-    } catch (e: any) {
-      toast.error(e.message)
-    } finally {
-      setAdjustingId(null)
-    }
-  }
+  }, [items, query, selectedDocumentId])
 
   const totals = useMemo(() => ({
-    cartons: filteredDataRows.reduce((s, p) => s + (p.cartons ?? 0), 0),
-    cbm: filteredDataRows.reduce((s, p) => s + (p.cbm ?? 0), 0),
-    weight: filteredDataRows.reduce((s, p) => s + parseWeight(p.total_weight), 0),
-    amount: filteredDataRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
-  }), [filteredDataRows])
+    cartons: filtered.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
+    qty: filtered.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
+    cbm: filtered.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
+    weight: filtered.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
+    amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+  }), [filtered])
 
-  function handleDelete(id: string, name: string | null) {
-    if (!confirm(`Delete "${name ?? 'this product'}"? This cannot be undone.`)) return
+  function handleDeleteItem(id: string) {
+    if (!confirm('Delete this row?')) return
     startTransition(async () => {
       try {
-        await deleteProduct(id)
-        toast.success('Product deleted')
-      } catch (e: any) {
-        toast.error(e.message)
-      }
+        await deleteDocumentItem(id)
+        toast.success('Row deleted')
+      } catch (e: any) { toast.error(e.message) }
     })
   }
 
   function handleDeleteAll() {
-    if (scopedDeleteCount === 0) return
-    if (selectedDocumentId === 'all') {
-      if (!confirm(`Delete ALL ${scopedDeleteCount} products? This cannot be undone.`)) return
-      startTransition(async () => {
-        try {
-          await deleteAllProducts()
-          toast.success(`Deleted ${scopedDeleteCount} products`)
-        } catch (e: any) {
-          toast.error(e.message)
-        }
-      })
-      return
-    }
-    if (!confirm(`Delete all ${scopedDeleteCount} products linked to this document? This cannot be undone.`)) return
+    const count = selectedDocumentId === 'all' ? items.length : filtered.length
+    if (count === 0) return
+    const msg = selectedDocumentId === 'all'
+      ? `Delete ALL ${count} rows from all documents? This cannot be undone.`
+      : `Delete all ${count} rows from this document? This cannot be undone.`
+    if (!confirm(msg)) return
     startTransition(async () => {
       try {
-        await deleteAllProducts({ sourceDocumentId: selectedDocumentId })
-        toast.success(`Deleted ${scopedDeleteCount} products`)
-      } catch (e: any) {
-        toast.error(e.message)
-      }
+        if (selectedDocumentId === 'all') {
+          await deleteAllDocumentItems()
+        } else {
+          await deleteDocumentsByDocument(selectedDocumentId)
+          setSelectedDocumentId('all')
+        }
+        toast.success(`Deleted ${count} rows`)
+      } catch (e: any) { toast.error(e.message) }
     })
   }
 
@@ -216,47 +156,12 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
     const file = e.target.files?.[0]
     if (!file) return
 
-    if (file.type.startsWith('image/')) {
-      toast.info('To attach an image to a product, open the product and upload from the edit form.')
-      e.target.value = ''
-      return
-    }
-
     const isPdf = file.name.toLowerCase().endsWith('.pdf')
-
-    // ── Synchronous PDF path (text extraction → Claude text API, ~15–25 s) ──────
     if (isPdf) {
       try {
-        importConsole('▶ import started (sync)', { file: file.name, size_bytes: file.size })
         startImport(file.name)
-
-        const result = await importPdfDirect(file, (pct, stage) => {
-          updateProgress(pct, stage)
-        })
-
+        const result = await importPdfDirect(file, (pct, stage) => updateProgress(pct, stage))
         const { products, document: doc } = result
-
-        const normalizedDocumentType: ImportMeta['document_type'] =
-          doc.document_type === 'sales_order' || doc.document_type === 'container_manifest'
-            ? doc.document_type
-            : 'container_manifest'
-
-        const meta: ImportMeta = {
-          source_file_name: file.name,
-          source_file_type: 'pdf' as const,
-          document_type: normalizedDocumentType,
-          client_details: doc.client_id ?? null,
-          container_no: doc.container_no ?? null,
-          total_carton: doc.footer_totals?.total_cartons ?? null,
-          total_cbm: doc.footer_totals?.total_cbm ?? null,
-          total_weight_kgs: doc.footer_totals?.total_weight_kg ?? null,
-          total_cost_rmb: doc.footer_totals?.total_amount_rmb ?? null,
-          total_cost_usd: doc.footer_totals?.total_amount_usd ?? null,
-          payment_date: null, payment_usd: null, goods_balance_usd: null,
-          credit_support_usd: null, pivoc_usd: null, freight_usd: null,
-          total_balance_usd: null, exchange_rate: null,
-        }
-
         const rows = products
           .filter((p: any) => shouldPublishExtractedProduct(p.section))
           .map((p: any) => ({
@@ -276,130 +181,82 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
             __source: 'claude_core',
             __needs_llm: 'false',
           }))
-
-        importConsole('extract complete', { rows: rows.length, elapsed_ms: Date.now() - startedAt })
-
         if (rows.length === 0) {
           toast.error('PDF processed but no product rows found')
           failImport('No product rows found')
           return
         }
-
         updateProgress(92, `Saving ${rows.length} rows…`)
+        const normalizedDocumentType: ImportMeta['document_type'] =
+          doc.document_type === 'sales_order' || doc.document_type === 'container_manifest'
+            ? doc.document_type : 'container_manifest'
+        const meta: ImportMeta = {
+          source_file_name: file.name, source_file_type: 'pdf',
+          document_type: normalizedDocumentType,
+          client_details: doc.client_id ?? null,
+          container_no: doc.container_no ?? null,
+          total_carton: doc.footer_totals?.total_cartons ?? null,
+          total_cbm: doc.footer_totals?.total_cbm ?? null,
+          total_weight_kgs: doc.footer_totals?.total_weight_kg ?? null,
+          total_cost_rmb: doc.footer_totals?.total_amount_rmb ?? null,
+          total_cost_usd: doc.footer_totals?.total_amount_usd ?? null,
+          payment_date: null, payment_usd: null, goods_balance_usd: null,
+          credit_support_usd: null, pivoc_usd: null, freight_usd: null,
+          total_balance_usd: null, exchange_rate: null,
+        }
         startTransition(async () => {
           try {
-            const importResult = await importProducts(rows, meta)
-            const count = typeof importResult === 'number' ? importResult : importResult.importedCount
-            const stagedOnly = typeof importResult === 'number' ? false : !!importResult.stagedOnly
-            const totalsMatch = typeof importResult === 'number' ? true : importResult.totalsMatch
-            const totalsDiff = typeof importResult === 'number' ? null : importResult.totalsDiff
-            if (stagedOnly) {
-              toast.success('Import staged successfully. Open Review Queue to finalize publishing.')
-            } else {
-              toast.success(`Imported ${count} products`)
-            }
-            if (!totalsMatch && totalsDiff) {
-              toast.info(`Totals differ: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`)
-            }
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : 'Save failed'
-            toast.error(message)
-            if (message.toLowerCase().includes('held for review')) {
-              toast.info('Review required: open the Review Queue and finalize only when rows/totals match.')
-            }
-          } finally {
-            finishImport()
-          }
+            await importProducts(rows, meta)
+            toast.success(`Imported ${rows.length} rows — refresh to see them`)
+          } catch (err: any) {
+            toast.error(err?.message ?? 'Save failed')
+          } finally { finishImport() }
         })
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Failed to import PDF'
-        toast.error(msg)
-        importConsole('✗ pdf import failed', { error: String(err) })
-        failImport(msg)
+      } catch (err: any) {
+        toast.error(err?.message ?? 'Failed to import PDF')
+        failImport(String(err))
       }
       e.target.value = ''
       return
     }
 
-    // ── Sync path for Excel / CSV ─────────────────────────────────────────────
-    try {
-      importConsole('▶ import started (sync)', { file: file.name, size_bytes: file.size })
-      startImport(file.name)
-      updateProgress(10, `Parsing ${file.name}…`)
-      const { rows, importMeta: meta } = await parseImportFileDetailed(file)
-      importConsole('parse complete', { rows: rows.length, elapsed_ms: Date.now() - startedAt })
-      if (rows.length === 0) {
-        throw new Error('No rows detected from file.')
-      }
-      updateProgress(60, `Saving ${rows.length} rows…`)
-      startTransition(async () => {
-        try {
-          const result = await importProducts(rows, meta)
-          const count = typeof result === 'number' ? result : result.importedCount
-          const stagedOnly = typeof result === 'number' ? false : !!result.stagedOnly
-          const llmAligned = typeof result === 'number' ? 0 : result.llmAligned
-          const totalsMatch = typeof result === 'number' ? true : result.totalsMatch
-          const totalsDiff = typeof result === 'number' ? null : result.totalsDiff
-          if (stagedOnly) {
-            toast.success('Import staged successfully. Open Review Queue to finalize publishing.')
-          } else if (llmAligned > 0) {
-            toast.success(`Imported ${count} products (LLM aligned ${llmAligned} rows)`)
-          } else {
-            toast.success(`Imported ${count} products`)
-          }
-          if (!totalsMatch && totalsDiff) {
-            toast.info(`Totals differ: ΔCTN ${totalsDiff.cartons ?? 0}, ΔCBM ${totalsDiff.cbm ?? 0}, ΔRMB ${totalsDiff.amountRmb ?? 0}`)
-          }
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : 'Import failed'
-          toast.error(message)
-          if (message.toLowerCase().includes('held for review')) {
-            toast.info('Review required: open the Review Queue and finalize only when rows/totals match.')
-          }
-        } finally {
-          finishImport()
-        }
-      })
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to parse file'
-      toast.error(msg)
-      failImport(msg)
-    }
+    toast.info('For PDFs use Live View. CSV/Excel import writes to a separate products table.')
     e.target.value = ''
   }
 
+  const scopedDeleteCount = selectedDocumentId === 'all' ? items.length : filtered.length
 
   return (
     <div className="p-6 space-y-4">
-      {/* Header bar */}
+      {/* Header */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Products</h1>
           <p className="text-sm text-slate-500 mt-0.5">
             {selectedDocumentId === 'all'
-              ? `${realProducts.length} items total`
-              : `${filteredDataRows.length} items · filtered by document`}
+              ? `${items.length} rows total`
+              : `${filtered.length} rows · filtered by document`}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
             <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
             <Input
-              placeholder="Search name, SKU, shop…"
+              placeholder="Search marks, description, shop…"
               value={query}
               onChange={e => setQuery(e.target.value)}
-              className="pl-8 h-8 text-sm w-56"
+              className="pl-8 h-8 text-sm w-64"
             />
           </div>
-          <Select value={selectedDocumentId} onValueChange={(value) => setSelectedDocumentId(value ?? 'all')}>
-            <SelectTrigger className="h-8 text-xs w-[260px]">
+          <Select value={selectedDocumentId} onValueChange={v => setSelectedDocumentId(v ?? 'all')}>
+            <SelectTrigger className="h-8 text-xs w-[280px]">
               <SelectValue placeholder="All PDFs / documents" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All PDFs / documents</SelectItem>
               {productDocuments.map(doc => (
                 <SelectItem key={doc.id} value={doc.id}>
-                  {(doc.source_file_name ?? doc.id).slice(0, 70)}
+                  {(doc.source_file_name ?? doc.id).slice(0, 72)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -407,55 +264,31 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.xls,.csv,.pdf,image/*"
+            accept=".pdf,image/*"
             className="hidden"
             onChange={handleImport}
           />
-          <DropdownMenu>
-            <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-8 gap-1.5" />}>
-              <Download className="h-3.5 w-3.5" /> Export
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => exportProductsToExcel(products)}>
-                <FileSpreadsheet className="h-3.5 w-3.5 mr-2" /> Excel (.xlsx)
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => exportProductsToPdf(products)}>
-                <FileText className="h-3.5 w-3.5 mr-2" /> PDF
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
           <Button
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5"
+            variant="outline" size="sm" className="h-8 gap-1.5"
             onClick={() => fileInputRef.current?.click()}
             disabled={!!importStage}
           >
-            {importStage ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Importing...
-              </>
-            ) : (
-              <>
-                <Upload className="h-3.5 w-3.5" /> Import
-              </>
-            )}
+            {importStage
+              ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Importing...</>
+              : <><Upload className="h-3.5 w-3.5" /> Import</>}
           </Button>
           <Button
-            variant="outline"
-            size="sm"
+            variant="outline" size="sm"
             className="h-8 gap-1.5 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
             onClick={handleDeleteAll}
             disabled={isPending || scopedDeleteCount === 0}
           >
             <Trash2 className="h-3.5 w-3.5" /> Delete All
           </Button>
-          <Button size="sm" className="h-8 gap-1.5 bg-slate-900 hover:bg-slate-700" onClick={() => setAdding(true)}>
-            <Plus className="h-3.5 w-3.5" /> Add Product
-          </Button>
         </div>
       </div>
 
+      {/* Import progress */}
       {importStatus !== 'idle' && (
         <div className={`rounded-md border px-3 py-2.5 text-xs space-y-1.5 ${
           importStatus === 'error' ? 'border-red-200 bg-red-50 text-red-900' :
@@ -471,215 +304,147 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
           </div>
           {importStatus === 'importing' && importProgress > 0 && (
             <div className="w-full h-1.5 bg-blue-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 rounded-full transition-all duration-500"
-                style={{ width: `${importProgress}%` }}
-              />
+              <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${importProgress}%` }} />
             </div>
           )}
         </div>
       )}
 
+      {/* Document banner */}
       {footerMeta && (
         <div className="rounded-md border bg-amber-50 border-amber-200 px-3 py-2 text-xs flex flex-wrap gap-x-6 gap-y-0.5 items-center">
-          <span className="font-semibold text-slate-800">CLIENT DETAILS: <span className="text-amber-800">{footerMeta.client_details ?? '-'}</span></span>
-          <span className="font-semibold text-slate-800">CONTAINER NO: <span className="text-amber-800">{footerMeta.container_no ?? '-'}</span></span>
+          <span className="font-semibold text-slate-800">
+            CLIENT: <span className="text-amber-800">{footerMeta.client_details ?? '-'}</span>
+          </span>
+          <span className="font-semibold text-slate-800">
+            CONTAINER: <span className="text-amber-800">{footerMeta.container_no ?? '-'}</span>
+          </span>
           <span className="text-slate-500 text-[10px] ml-auto">{footerMeta.source_file_name}</span>
         </div>
       )}
 
-      {/* Wide scrollable table */}
-      <div className="rounded-md border bg-white overflow-x-auto">
-        <Table className="text-xs min-w-[1200px]">
-          <TableHeader>
-            <TableRow className="bg-slate-50">
-              <TableHead className="w-10 px-2" />
-              <TableHead className="w-28">SKU / MARKS</TableHead>
-              <TableHead>Name</TableHead>
-              <TableHead>Description</TableHead>
-              <TableHead>Order No</TableHead>
-              <TableHead>CUS No</TableHead>
-              <TableHead>Item No</TableHead>
-              <TableHead>Shop / Supplier</TableHead>
-              <TableHead>Packing</TableHead>
-              <TableHead className="text-right">CTN</TableHead>
-              <TableHead className="text-right">Qty</TableHead>
-              <TableHead className="text-right">U.CBM</TableHead>
-              <TableHead className="text-right">T.CBM</TableHead>
-              <TableHead className="text-right">L</TableHead>
-              <TableHead className="text-right">W</TableHead>
-              <TableHead className="text-right">H</TableHead>
-              <TableHead className="text-right">U.Weight</TableHead>
-              <TableHead className="text-right">T.Weight</TableHead>
-              <TableHead className="text-right">Unit Price</TableHead>
-              <TableHead className="text-right">T.Amount</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="w-10" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filtered.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={22} className="text-center text-slate-400 py-10">
-                  {importStage ? 'Import in progress... extracted rows will appear shortly.' : 'No products found.'}
-                </TableCell>
-              </TableRow>
-            ) : (
-              filtered.map(p => {
-                if (isSectionDividerProduct(p)) {
-                  const markerTitle = parseSectionMarkerTitle(p.sku)
-                  const isStageTotal = !!p.sku?.startsWith(STAGE_TOTAL_MARKER_PREFIX)
-                  if (isStageTotal && markerTitle) {
-                    const tv = parseStageTotalValues(markerTitle)
-                    return (
-                      <TableRow key={p.id} className="bg-amber-100 hover:bg-amber-100 font-semibold border-t-2 border-amber-400">
-                        <TableCell colSpan={22} className="text-center text-slate-800">
-                          Stage Total
-                          {tv.cartons != null ? ` | ${tv.cartons} CTNS` : ''}
-                          {tv.cbm != null ? ` | ${tv.cbm.toFixed(3)} CBM` : ''}
-                          {tv.weight != null ? ` | ${tv.weight.toFixed(1)} KGS` : ''}
-                          {tv.amount != null ? ` | ¥${fmt(tv.amount, 0)}` : ''}
-                        </TableCell>
-                      </TableRow>
-                    )
-                  }
-                  return (
-                    <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
-                      <TableCell colSpan={22} className="text-center py-2 tracking-wide font-semibold text-slate-800">
-                        {markerTitle ?? REPACKAGED_SECTION_TITLE}
-                      </TableCell>
-                    </TableRow>
-                  )
-                }
-                const status = stockStatus(p.quantity, p.reorder_level)
-                const isZeroStock = (p.cartons ?? 0) === 0 || p.quantity === 0
-                const rowClass = isZeroStock
-                  ? 'bg-red-100 hover:bg-red-100'
-                  : 'hover:bg-slate-50'
-                return (
-                  <TableRow key={p.id} className={rowClass}>
-                    <TableCell className="p-1">
-                      {p.image_url ? (
-                        <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
-                      ) : (
-                        <div className="h-8 w-8 rounded bg-slate-100 flex items-center justify-center">
-                          <ImageIcon className="h-3.5 w-3.5 text-slate-300" />
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="font-mono whitespace-nowrap">{p.sku ?? '-'}</TableCell>
-                    <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
-                    <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
-                    <TableCell className="whitespace-nowrap">{p.order_no ?? '-'}</TableCell>
-                    <TableCell className="whitespace-nowrap">{p.customer_no ?? '-'}</TableCell>
-                    <TableCell className="whitespace-nowrap">{p.source_item_no ?? '-'}</TableCell>
-                    <TableCell className="max-w-[120px] truncate">{p.shop_name ?? p.suppliers?.name ?? '-'}</TableCell>
-                    <TableCell className="whitespace-nowrap">{p.packing ?? '-'}</TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-0.5">
-                        <Button
-                          variant="ghost" size="icon"
-                          className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
-                          disabled={adjustingId === p.id}
-                          onClick={() => handleAdjustCartons(p.id, -1)}
-                        >
-                          <Minus className="h-2.5 w-2.5" />
-                        </Button>
-                        <span className="w-7 text-center tabular-nums">{p.cartons ?? '-'}</span>
-                        <Button
-                          variant="ghost" size="icon"
-                          className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
-                          disabled={adjustingId === p.id}
-                          onClick={() => handleAdjustCartons(p.id, +1)}
-                        >
-                          <Plus className="h-2.5 w-2.5" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
-                    <TableCell className="text-right">{p.unit_cbm != null ? p.unit_cbm.toFixed(3) : '-'}</TableCell>
-                    <TableCell className="text-right">{p.cbm != null ? p.cbm.toFixed(3) : '-'}</TableCell>
-                    <TableCell className="text-right">{p.dim_l_cm != null ? Number(p.dim_l_cm).toFixed(1) : '-'}</TableCell>
-                    <TableCell className="text-right">{p.dim_w_cm != null ? Number(p.dim_w_cm).toFixed(1) : '-'}</TableCell>
-                    <TableCell className="text-right">{p.dim_h_cm != null ? Number(p.dim_h_cm).toFixed(1) : '-'}</TableCell>
-                    <TableCell className="text-right whitespace-nowrap">{p.unit_weight ?? '-'}</TableCell>
-                    <TableCell className="text-right whitespace-nowrap">{p.total_weight ?? '-'}</TableCell>
-                    <TableCell className="text-right whitespace-nowrap">
-                      {p.cost_price > 0 ? `¥${fmt(p.cost_price)}` : '-'}
-                    </TableCell>
-                    <TableCell className="text-right whitespace-nowrap">
-                      {p.total_amount_rmb != null ? `¥${fmt(p.total_amount_rmb)}` : '-'}
-                    </TableCell>
-                    <TableCell>
-                      {status !== 'ok' && (
-                        <Badge
-                          variant={status === 'out' ? 'destructive' : 'outline'}
-                          className={status === 'low' ? 'border-amber-400 text-amber-700 bg-amber-50 text-[10px]' : 'text-[10px]'}
-                        >
-                          {status === 'out' ? 'Out' : 'Low'}
-                        </Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7" />}>
-                          <MoreHorizontal className="h-3.5 w-3.5" />
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => setEditing(p)}>
-                            <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            className="text-amber-600"
-                            onClick={() => handleMarkOutOfStock(p.id, p.name)}
-                          >
-                            <AlertTriangle className="h-3.5 w-3.5 mr-2" />
-                            Mark Out of Stock
-                          </DropdownMenuItem>
-                          <DropdownMenuItem className="text-red-600" onClick={() => handleDelete(p.id, p.name)}>
-                            <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                )
-              })
-            )}
-            {filteredDataRows.length > 0 && (
-              <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
-                <TableCell colSpan={22} className="text-right text-slate-900">
-                  {`TOTALS: ${fmt(totals.cartons, 0)} CTNS | ${fmt(totals.cbm, 4)} CBM | ${fmt(totals.weight, 1)} KGS | ¥${fmt(totals.amount, 0)}`}
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
+      {/* Section legend */}
+      <div className="flex gap-3 text-[11px] text-slate-500">
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-sm bg-white border border-slate-200" /> shipped
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-sm bg-sky-100 border border-sky-200" /> left in warehouse
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-sm bg-violet-100 border border-violet-200" /> repacked
+        </span>
       </div>
 
-      {/* Financial summary — mirrors PDF bottom section (per-document when filtered) */}
+      {/* Main table */}
+      <div className="rounded-md border bg-white overflow-x-auto">
+        <table className="w-full text-xs border-collapse min-w-[1900px]">
+          <thead>
+            <tr className="bg-slate-50 border-b text-left">
+              <th className="p-2 font-medium w-8 text-slate-500">#</th>
+              <th className="p-2 font-medium min-w-[120px]">Marks</th>
+              <th className="p-2 font-medium min-w-[80px]">Shop</th>
+              <th className="p-2 font-medium w-14">Item</th>
+              <th className="p-2 font-medium min-w-[180px]">Description</th>
+              <th className="p-2 font-medium min-w-[80px]">Packing</th>
+              <th className="p-2 font-medium w-14 text-right">CTN</th>
+              <th className="p-2 font-medium w-14 text-right">Qty</th>
+              <th className="p-2 font-medium w-12 text-right">L</th>
+              <th className="p-2 font-medium w-12 text-right">W</th>
+              <th className="p-2 font-medium w-12 text-right">H</th>
+              <th className="p-2 font-medium w-16 text-right">U.CBM</th>
+              <th className="p-2 font-medium w-16 text-right">T.CBM</th>
+              <th className="p-2 font-medium w-16 text-right">U.Wkg</th>
+              <th className="p-2 font-medium w-16 text-right">T.Wkg</th>
+              <th className="p-2 font-medium w-20 text-right">U.Price ¥</th>
+              <th className="p-2 font-medium w-20 text-right">Amount ¥</th>
+              <th className="p-2 font-medium w-16">Box No</th>
+              <th className="p-2 font-medium w-24">Section</th>
+              <th className="p-2 font-medium w-8" />
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={20} className="text-center text-slate-400 py-10">
+                  {importStage ? 'Import in progress…' : 'No rows found. Save a PDF via Live View.'}
+                </td>
+              </tr>
+            ) : (
+              filtered.map(p => (
+                <tr key={p.id} className={`border-b border-slate-100 ${sectionClass(p.section)}`}>
+                  <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
+                  <td className="p-2 font-mono text-slate-800 whitespace-nowrap">{p.marks ?? '-'}</td>
+                  <td className="p-2 text-slate-600 max-w-[100px] truncate">{p.shop ?? '-'}</td>
+                  <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+                  <td className="p-2 text-slate-700 max-w-[200px]">{p.description ?? '-'}</td>
+                  <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_cartons, 0)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_quantity, 0)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.dim_l_cm, 1)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.dim_w_cm, 1)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.dim_h_cm, 1)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.unit_cbm, 4)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_cbm, 4)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.unit_weight_kg, 3)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_weight_kg, 3)}</td>
+                  <td className="p-2 text-right tabular-nums">{fmtMoney(p.unit_price_rmb)}</td>
+                  <td className="p-2 text-right tabular-nums font-medium">{fmtMoney(p.total_amount_rmb)}</td>
+                  <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
+                  <td className="p-2"><SectionBadge section={p.section} /></td>
+                  <td className="p-1">
+                    <Button
+                      type="button" variant="ghost" size="icon"
+                      className="h-7 w-7 text-slate-300 hover:text-red-600"
+                      disabled={isPending}
+                      onClick={() => handleDeleteItem(p.id)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </td>
+                </tr>
+              ))
+            )}
+            {filtered.length > 0 && (
+              <tr className="bg-yellow-300 font-bold border-t-2 border-yellow-500 text-xs">
+                <td className="p-2" colSpan={6}>TOTALS</td>
+                <td className="p-2 text-right tabular-nums">{fmtN(totals.cartons, 0)}</td>
+                <td className="p-2 text-right tabular-nums">{fmtN(totals.qty, 0)}</td>
+                <td colSpan={3} />
+                <td />
+                <td className="p-2 text-right tabular-nums">{fmtN(totals.cbm, 4)}</td>
+                <td />
+                <td className="p-2 text-right tabular-nums">{fmtN(totals.weight, 3)}</td>
+                <td />
+                <td className="p-2 text-right tabular-nums">¥{fmtN(totals.amount, 0)}</td>
+                <td colSpan={3} />
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Financial summary */}
       {footerMeta && (
         <div className="rounded-md border bg-white overflow-hidden text-xs">
           <div className="grid grid-cols-2 divide-x divide-slate-200">
-            {/* Left: document-wide weight/volume/cost totals */}
             <table className="w-full">
               <tbody>
-                <MetaRow label="TOTAL WEIGHT" value={footerMeta.total_weight_kgs != null ? `${fmt(footerMeta.total_weight_kgs, 1)} KGS` : '-'} />
-                <MetaRow label="TOTAL CBM" value={footerMeta.total_cbm != null ? `${fmt(footerMeta.total_cbm, 1)} CBM` : '-'} />
-                <MetaRow label="TOTAL CARTON" value={footerMeta.total_carton != null ? `${fmt(footerMeta.total_carton, 0)} CTN` : '-'} />
+                <MetaRow label="TOTAL WEIGHT" value={footerMeta.total_weight_kgs != null ? `${fmtN(footerMeta.total_weight_kgs, 1)} KGS` : '-'} />
+                <MetaRow label="TOTAL CBM" value={footerMeta.total_cbm != null ? `${fmtN(footerMeta.total_cbm, 1)} CBM` : '-'} />
+                <MetaRow label="TOTAL CARTON" value={footerMeta.total_carton != null ? `${fmtN(footerMeta.total_carton, 0)} CTN` : '-'} />
                 <MetaRow
                   label="TOTAL COST"
                   value={
                     <>
-                      {footerMeta.total_cost_rmb != null && <span className="mr-3">¥{fmt(footerMeta.total_cost_rmb, 2)} RMB</span>}
-                      {footerMeta.total_cost_usd != null && <span>${fmt(footerMeta.total_cost_usd, 2)} USD</span>}
+                      {footerMeta.total_cost_rmb != null && <span className="mr-3">¥{fmtN(footerMeta.total_cost_rmb, 2)} RMB</span>}
+                      {footerMeta.total_cost_usd != null && <span>${fmtN(footerMeta.total_cost_usd, 2)} USD</span>}
                       {footerMeta.total_cost_rmb == null && footerMeta.total_cost_usd == null && '-'}
                     </>
                   }
                 />
               </tbody>
             </table>
-            {/* Right: balance breakdown — DB-backed rows when a document is selected */}
             <table className="w-full">
               <tbody>
                 {footerPaymentRows && footerPaymentRows.length > 0 ? (
@@ -688,37 +453,37 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
                       <MetaRow key={`${row.label}-${idx}`} label={row.label} value={row.value} highlight={row.highlight} />
                     ))}
                     {footerMeta.goods_balance_usd != null && (
-                      <MetaRow label="GOODS BALANCE" value={`$${fmt(footerMeta.goods_balance_usd, 2)} USD`} />
+                      <MetaRow label="GOODS BALANCE" value={`$${fmtN(footerMeta.goods_balance_usd, 2)} USD`} />
                     )}
                     {footerMeta.total_balance_usd != null && (
-                      <MetaRow label="TOTAL BALANCE" value={`$${fmt(footerMeta.total_balance_usd, 2)} USD`} highlight />
+                      <MetaRow label="TOTAL BALANCE" value={`$${fmtN(footerMeta.total_balance_usd, 2)} USD`} highlight />
                     )}
                     {footerMeta.exchange_rate != null && (
-                      <MetaRow label="EXCHANGE RATE" value={`¥${fmt(footerMeta.exchange_rate, 2)} RMB`} />
+                      <MetaRow label="EXCHANGE RATE" value={`¥${fmtN(footerMeta.exchange_rate, 2)} RMB`} />
                     )}
                   </>
                 ) : (
                   <>
                     {footerMeta.payment_date != null && footerMeta.payment_usd != null && (
-                      <MetaRow label={`${footerMeta.payment_date} PAYMENT`} value={`$${fmt(footerMeta.payment_usd, 2)} USD`} />
+                      <MetaRow label={`${footerMeta.payment_date} PAYMENT`} value={`$${fmtN(footerMeta.payment_usd, 2)} USD`} />
                     )}
                     {footerMeta.goods_balance_usd != null && (
-                      <MetaRow label="GOODS BALANCE" value={`$${fmt(footerMeta.goods_balance_usd, 2)} USD`} />
+                      <MetaRow label="GOODS BALANCE" value={`$${fmtN(footerMeta.goods_balance_usd, 2)} USD`} />
                     )}
                     {footerMeta.credit_support_usd != null && (
-                      <MetaRow label="CREDIT SUPPORT TO MOMBASA" value={`$${fmt(footerMeta.credit_support_usd, 2)} USD`} />
+                      <MetaRow label="CREDIT SUPPORT TO MOMBASA" value={`$${fmtN(footerMeta.credit_support_usd, 2)} USD`} />
                     )}
                     {footerMeta.pivoc_usd != null && (
-                      <MetaRow label="PIVOC" value={`$${fmt(footerMeta.pivoc_usd, 2)} USD`} />
+                      <MetaRow label="PIVOC" value={`$${fmtN(footerMeta.pivoc_usd, 2)} USD`} />
                     )}
                     {footerMeta.freight_usd != null && (
-                      <MetaRow label="YIWU-MOMBASA FREIGHT" value={`$${fmt(footerMeta.freight_usd, 2)} USD`} />
+                      <MetaRow label="YIWU-MOMBASA FREIGHT" value={`$${fmtN(footerMeta.freight_usd, 2)} USD`} />
                     )}
                     {footerMeta.total_balance_usd != null && (
-                      <MetaRow label="TOTAL BALANCE" value={`$${fmt(footerMeta.total_balance_usd, 2)} USD`} highlight />
+                      <MetaRow label="TOTAL BALANCE" value={`$${fmtN(footerMeta.total_balance_usd, 2)} USD`} highlight />
                     )}
                     {footerMeta.exchange_rate != null && (
-                      <MetaRow label="EXCHANGE RATE" value={`¥${fmt(footerMeta.exchange_rate, 2)} RMB`} />
+                      <MetaRow label="EXCHANGE RATE" value={`¥${fmtN(footerMeta.exchange_rate, 2)} RMB`} />
                     )}
                   </>
                 )}
@@ -727,139 +492,6 @@ export function ProductsClient({ products, categories, suppliers, importMeta, pr
           </div>
         </div>
       )}
-
-      <ProductDialog
-        open={adding || !!editing}
-        product={editing}
-        categories={categories}
-        suppliers={suppliers}
-        onClose={() => { setAdding(false); setEditing(null) }}
-        isPending={isPending}
-        onSubmit={(formData) => {
-          startTransition(async () => {
-            try {
-              if (editing) {
-                await updateProduct(editing.id, formData)
-                toast.success('Product updated')
-              } else {
-                await createProduct(formData)
-                toast.success('Product created')
-              }
-              setAdding(false)
-              setEditing(null)
-            } catch (e: any) {
-              toast.error(e.message)
-            }
-          })
-        }}
-      />
-    </div>
-  )
-}
-
-function ProductDialog({
-  open, product, categories, suppliers, onClose, onSubmit, isPending,
-}: {
-  open: boolean
-  product: Product | null
-  categories: Category[]
-  suppliers: Supplier[]
-  onClose: () => void
-  onSubmit: (formData: FormData) => void
-  isPending: boolean
-}) {
-  const [preview, setPreview] = useState<string | null>(product?.image_url ?? null)
-
-  return (
-    <Dialog open={open} onOpenChange={v => !v && onClose()}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{product ? 'Edit Product' : 'Add Product'}</DialogTitle>
-        </DialogHeader>
-        <form action={onSubmit} className="space-y-3" encType="multipart/form-data">
-          {/* Core */}
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Name" name="name" defaultValue={product?.name ?? ''} />
-            <Field label="SKU / MARKS" name="sku" defaultValue={product?.sku ?? ''} />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <SelectField label="Category" name="category_id" defaultValue={product?.category_id ?? ''}
-              options={categories.map(c => ({ value: c.id, label: c.name }))} placeholder="None" />
-            <SelectField label="Supplier" name="supplier_id" defaultValue={product?.supplier_id ?? ''}
-              options={suppliers.map(s => ({ value: s.id, label: s.name ?? '' }))} placeholder="None" />
-          </div>
-          {/* Packing list fields */}
-          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide pt-1">Packing List Data</p>
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="Shop / SHOP#" name="shop_name" defaultValue={product?.shop_name ?? ''} />
-            <Field label="Packing" name="packing" defaultValue={product?.packing ?? ''} placeholder="e.g. 15pcs/ctn" />
-            <Field label="Cartons (T.CTN)" name="cartons" type="number" defaultValue={String(product?.cartons ?? '')} />
-          </div>
-          <div className="grid grid-cols-5 gap-3">
-            <SelectField label="Unit" name="unit" defaultValue={product?.unit ?? 'pcs'}
-              options={UNITS.map(u => ({ value: u, label: u }))} placeholder="pcs" />
-            <Field label="Qty (T.QTY)" name="quantity" type="number" defaultValue={String(product?.quantity ?? 0)} />
-            <Field label="U.CBM" name="unit_cbm" type="number" step="0.0001" defaultValue={String(product?.unit_cbm ?? '')} />
-            <Field label="T.CBM" name="cbm" type="number" step="0.0001" defaultValue={String(product?.cbm ?? '')} />
-            <Field label="Reorder Level" name="reorder_level" type="number" defaultValue={String(product?.reorder_level ?? 0)} />
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="Unit Weight" name="unit_weight" defaultValue={product?.unit_weight ?? ''} placeholder="e.g. 15.8KGS" />
-            <Field label="Total Weight (T.WEIGHT)" name="total_weight" defaultValue={product?.total_weight ?? ''} placeholder="e.g. 142.2KGS" />
-            <Field label="Unit Price ¥ (RMB)" name="cost_price" type="number" step="0.01" defaultValue={String(product?.cost_price ?? '')} />
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="Total Amount ¥ (T.AMOUNT)" name="total_amount_rmb" type="number" step="0.01" defaultValue={String(product?.total_amount_rmb ?? '')} />
-            <Field label="Selling Price" name="selling_price" type="number" step="0.01" defaultValue={String(product?.selling_price ?? '')} />
-          </div>
-          <div>
-            <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
-            <Textarea name="description" defaultValue={product?.description ?? ''} rows={2} className="text-sm resize-none" />
-          </div>
-          {/* Image */}
-          <div>
-            <Label className="text-xs text-slate-600 mb-1 block">Product Image (optional)</Label>
-            {preview && <img src={preview} alt="preview" className="h-20 w-20 object-cover rounded border border-slate-200 mb-2" />}
-            <Input name="image" type="file" accept="image/*" className="h-8 text-sm"
-              onChange={e => { const f = e.target.files?.[0]; if (f) setPreview(URL.createObjectURL(f)) }} />
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-            <Button type="submit" size="sm" disabled={isPending} className="bg-slate-900 hover:bg-slate-700">
-              {isPending ? 'Saving…' : product ? 'Save Changes' : 'Create Product'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function Field({ label, name, type = 'text', defaultValue, step, placeholder }: {
-  label: string; name: string; type?: string; defaultValue?: string; step?: string; placeholder?: string
-}) {
-  return (
-    <div>
-      <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
-      <Input name={name} type={type} defaultValue={defaultValue} step={step} placeholder={placeholder} className="h-8 text-sm" />
-    </div>
-  )
-}
-
-function SelectField({ label, name, defaultValue, options, placeholder }: {
-  label: string; name: string; defaultValue: string; options: { value: string; label: string }[]; placeholder: string
-}) {
-  return (
-    <div>
-      <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
-      <Select name={name} defaultValue={defaultValue || undefined}>
-        <SelectTrigger className="h-8 text-sm">
-          <SelectValue placeholder={placeholder} />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map(o => <SelectItem key={o.value} value={o.value} className="text-sm">{o.label}</SelectItem>)}
-        </SelectContent>
-      </Select>
     </div>
   )
 }

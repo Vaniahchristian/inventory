@@ -1,4 +1,5 @@
 import { ExtractedDocument, ExtractedProduct } from './claude-extractor'
+import { EXTRACT_TOLERANCE } from './validation-gate'
 
 export interface ValidationResult {
   totals_match: boolean
@@ -18,16 +19,27 @@ export interface RowValidation {
 
 export function validateExtraction(
   document: ExtractedDocument,
-  products: ExtractedProduct[]
+  products: ExtractedProduct[],
+  /** All extracted products including non-shipped sections.
+   * If provided: physical totals (cartons/CBM/weight) use shipped+repacked;
+   * amount total uses all sections. Matches how PDF footer totals are computed. */
+  allProducts?: ExtractedProduct[]
 ): ValidationResult {
   const flags: string[] = []
   const totals_diff: Record<string, number> = {}
 
+  // Physical totals (cartons/CBM/weight): footer covers shipped + repacked (not goods-left)
+  const physicalProducts = allProducts
+    ? allProducts.filter(p => (p.section ?? 'shipped') !== 'left_in_warehouse')
+    : products
+  // Amount total: footer covers all sections including goods-left
+  const amountProducts = allProducts ?? products
+
   // ── Compute row-level aggregates ──────────────────────────────────────────
-  const computedCBM = sum(products, p => p.total_cbm)
-  const computedWeight = sum(products, p => p.total_weight_kg)
-  const computedAmount = sum(products, p => p.total_amount_rmb)
-  const computedCartons = sum(products, p => p.total_cartons)
+  const computedCBM = sum(physicalProducts, p => p.total_cbm)
+  const computedWeight = sum(physicalProducts, p => p.total_weight_kg)
+  const computedAmount = sum(amountProducts, p => p.total_amount_rmb)
+  const computedCartons = sum(physicalProducts, p => p.total_cartons)
 
   const ft = document.footer_totals
 
@@ -35,25 +47,25 @@ export function validateExtraction(
   if (ft.total_cbm !== null) {
     const diff = Math.abs(computedCBM - ft.total_cbm)
     totals_diff['cbm'] = round(diff)
-    if (diff > 0.5) flags.push(`CBM mismatch: computed ${round(computedCBM)} vs footer ${ft.total_cbm}`)
+    if (diff > EXTRACT_TOLERANCE.cbm) flags.push(`CBM mismatch: computed ${round(computedCBM)} vs footer ${ft.total_cbm}`)
   }
 
   if (ft.total_weight_kg !== null) {
     const diff = Math.abs(computedWeight - ft.total_weight_kg)
     totals_diff['weight_kg'] = round(diff)
-    if (diff > 5) flags.push(`Weight mismatch: computed ${round(computedWeight)} vs footer ${ft.total_weight_kg}`)
+    if (diff > EXTRACT_TOLERANCE.weight_kg) flags.push(`Weight mismatch: computed ${round(computedWeight)} vs footer ${ft.total_weight_kg}`)
   }
 
   if (ft.total_amount_rmb !== null) {
     const diff = Math.abs(computedAmount - ft.total_amount_rmb)
     totals_diff['amount_rmb'] = round(diff)
-    if (diff > 100) flags.push(`Amount mismatch: computed ${round(computedAmount)} vs footer ${ft.total_amount_rmb}`)
+    if (diff > EXTRACT_TOLERANCE.amount_rmb) flags.push(`Amount mismatch: computed ${round(computedAmount)} vs footer ${ft.total_amount_rmb}`)
   }
 
   if (ft.total_cartons !== null) {
     const diff = Math.abs(computedCartons - ft.total_cartons)
     totals_diff['cartons'] = round(diff)
-    if (diff > 2) flags.push(`Carton count mismatch: computed ${computedCartons} vs footer ${ft.total_cartons}`)
+    if (diff > EXTRACT_TOLERANCE.cartons) flags.push(`Carton count mismatch: computed ${computedCartons} vs footer ${ft.total_cartons}`)
   }
 
   // ── Document-level checks ─────────────────────────────────────────────────

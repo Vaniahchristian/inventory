@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 import type { ImportMeta, ProductDocumentRef } from '@/lib/types'
 import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle, makeStageTotalSku } from '@/lib/sections'
+import { GATE_TOLERANCE, BLOCKING_FLAGS } from '@/lib/validation-gate'
 import Anthropic from '@anthropic-ai/sdk'
 import { callLlm } from '@/lib/llm-client'
 
@@ -345,27 +346,29 @@ async function alignPackingRowWithLlm(raw: Record<string, unknown>): Promise<Llm
 }
 
 export async function getProducts() {
-  const { data: manualRows, error: manualErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('products')
-        .select('*, categories(id,name), suppliers(id,name)')
-        .is('source_document_id', null),
-    'getProducts.manual'
-  )
-  if (manualErr) throw new Error(manualErr.message)
+  const [manualRes, docLinkedRes] = await Promise.all([
+    withSupabaseRetry(
+      () =>
+        supabase
+          .from('products')
+          .select('*, categories(id,name), suppliers(id,name)')
+          .is('source_document_id', null),
+      'getProducts.manual'
+    ),
+    withSupabaseRetry(
+      () =>
+        supabase
+          .from('products')
+          .select('*, categories(id,name), suppliers(id,name)')
+          .not('source_document_id', 'is', null),
+      'getProducts.docLinked'
+    ),
+  ])
+  if (manualRes.error) throw new Error(manualRes.error.message)
+  if (docLinkedRes.error) throw new Error(docLinkedRes.error.message)
 
-  // All rows tied to a document (any publish/review state) so /products can filter by PDF.
-  const { data: docLinkedRows, error: docLinkedErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('products')
-        .select('*, categories(id,name), suppliers(id,name)')
-        .not('source_document_id', 'is', null),
-    'getProducts.docLinked'
-  )
-  if (docLinkedErr) throw new Error(docLinkedErr.message)
-
+  const manualRows = manualRes.data
+  const docLinkedRows = docLinkedRes.data
   const merged = [...(manualRows ?? []), ...(docLinkedRows ?? [])]
   return merged.sort(
     (a: Record<string, unknown>, b: Record<string, unknown>) =>
@@ -426,21 +429,22 @@ export async function getDocumentImportMeta(documentId: string): Promise<Documen
   )
   if (docErr || !doc) return null
 
-  const { data: totals } = await withSupabaseRetry(
-    () =>
-      supabase.from('document_totals').select('*').eq('document_id', documentId).maybeSingle(),
-    'getDocumentImportMeta.totals'
-  )
-
-  const { data: payments } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_payments')
-        .select('payment_date, amount_usd, payment_type, note')
-        .eq('document_id', documentId)
-        .order('payment_date', { ascending: true }),
-    'getDocumentImportMeta.payments'
-  )
+  const [{ data: totals }, { data: payments }] = await Promise.all([
+    withSupabaseRetry(
+      () =>
+        supabase.from('document_totals').select('*').eq('document_id', documentId).maybeSingle(),
+      'getDocumentImportMeta.totals'
+    ),
+    withSupabaseRetry(
+      () =>
+        supabase
+          .from('document_payments')
+          .select('payment_date, amount_usd, payment_type, note')
+          .eq('document_id', documentId)
+          .order('payment_date', { ascending: true }),
+      'getDocumentImportMeta.payments'
+    ),
+  ])
 
   const name = doc.source_file_name ?? ''
   const lower = name.toLowerCase()
@@ -626,15 +630,14 @@ async function recomputeDocumentReviewStatus(documentId: string) {
 
   const hasExpectedTotals = expected.cartons != null && expected.cbm != null && expected.weight != null && expected.amount != null
   const totalsMatch = hasExpectedTotals && (
-    Math.abs(computed.cartons - (expected.cartons ?? 0)) <= 0.5 &&
-    (expected.qty == null || Math.abs(computed.qty - expected.qty) <= 0.5) &&
-    Math.abs(computed.cbm - (expected.cbm ?? 0)) <= 0.05 &&
-    Math.abs(computed.weight - (expected.weight ?? 0)) <= 1 &&
-    Math.abs(computed.amount - (expected.amount ?? 0)) <= 5
+    Math.abs(computed.cartons - (expected.cartons ?? 0)) <= GATE_TOLERANCE.cartons &&
+    (expected.qty == null || Math.abs(computed.qty - expected.qty) <= GATE_TOLERANCE.qty) &&
+    Math.abs(computed.cbm - (expected.cbm ?? 0)) <= GATE_TOLERANCE.cbm &&
+    Math.abs(computed.weight - (expected.weight ?? 0)) <= GATE_TOLERANCE.weight_kg &&
+    Math.abs(computed.amount - (expected.amount ?? 0)) <= GATE_TOLERANCE.amount_rmb
   )
 
-  const blockingFlags = new Set(['missing_name', 'missing_packing', 'amount_mismatch', 'price_missing_but_amount_present'])
-  const hasBlockingFlags = accepted.some(r => parseJsonArray(r.validation_flags).some(f => blockingFlags.has(f)))
+  const hasBlockingFlags = accepted.some(r => parseJsonArray(r.validation_flags).some(f => BLOCKING_FLAGS.has(f)))
   const status = rowParityMatch && totalsMatch && !hasBlockingFlags ? 'approved' : 'review_needed'
   const keepPublished = String(currentDoc?.publish_state ?? '') === 'published'
   if (keepPublished && status !== 'approved') {
@@ -995,7 +998,7 @@ export async function approveDocumentReview(id: string) {
 
 async function publishDocumentProducts(documentId: string, publishedBy: string) {
   const baseSelect =
-    'id, item_code, source_item_no, description, packaging, total_cartons, total_quantity, unit_cbm, total_cbm, unit_weight_kg, total_weight_kg, unit_price_rmb, total_amount_rmb, warehouse, remarks, barcode, code, photo, photo2, dim_l_cm, dim_w_cm, dim_h_cm'
+    'id, item_code, source_item_no, description, packaging, total_cartons, total_quantity, unit_cbm, total_cbm, unit_weight_kg, total_weight_kg, unit_price_rmb, total_amount_rmb, warehouse, section, remarks, barcode, code, photo, photo2, dim_l_cm, dim_w_cm, dim_h_cm'
   const { data: rows, error: rowsErr } = await withSupabaseRetry(
     () =>
       supabase
@@ -1024,11 +1027,20 @@ async function publishDocumentProducts(documentId: string, publishedBy: string) 
     if (allRowsErr) throw new Error(allRowsErr.message)
     publishSourceRows = allRows ?? []
   }
-  if (publishSourceRows.length === 0) throw new Error('Cannot finalize: no document rows found')
+  if (publishSourceRows.length === 0) {
+    throw new Error(
+      'Cannot finalize: no line items exist for this document in the database. ' +
+        'Extraction may not have saved rows, or they were removed. Re-import the source file or remove this document from the queue.'
+    )
+  }
 
-  // buildRemarks() encodes section into remarks as "section:repacked" / "section:left_in_warehouse"
-  function rowSection(remarks: string | null | undefined): 'shipped' | 'repacked' | 'left_in_warehouse' {
-    const m = (remarks ?? '').match(/\bsection:(repacked|left_in_warehouse)\b/)
+  // Fix 5: use dedicated section column; fall back to remarks encoding for pre-migration rows
+  function rowSection(row: { section?: string | null; remarks?: string | null }): 'shipped' | 'repacked' | 'left_in_warehouse' {
+    const col = row.section
+    if (col === 'repacked' || col === 'left_in_warehouse') return col
+    if (col === 'shipped') return 'shipped'
+    // Legacy fallback: pre-migration rows encoded section in remarks
+    const m = (row.remarks ?? '').match(/\bsection:(repacked|left_in_warehouse)\b/)
     return (m?.[1] as 'repacked' | 'left_in_warehouse' | undefined) ?? 'shipped'
   }
 
@@ -1067,7 +1079,7 @@ async function publishDocumentProducts(documentId: string, publishedBy: string) 
   }
 
   // Only main shipment rows go to inventory — same as extract pipeline (exclude left_in_warehouse + repacked).
-  const shippedSourceRows = publishSourceRows.filter(r => rowSection(r.remarks) === 'shipped')
+  const shippedSourceRows = publishSourceRows.filter(r => rowSection(r) === 'shipped')
 
   const publishRows: ReturnType<typeof toProductRow>[] = shippedSourceRows.map(toProductRow)
 
@@ -1104,6 +1116,12 @@ async function publishDocumentProducts(documentId: string, publishedBy: string) 
 
 export async function finalizeDocumentPublish(documentId: string) {
   const gate = await recomputeDocumentReviewStatus(documentId)
+  if (gate.counts.total === 0) {
+    throw new Error(
+      'Cannot finalize: this document has no line items to publish. ' +
+        'If you expected rows here, extraction may have failed to insert them—re-run import/extract. Otherwise delete this staging document.'
+    )
+  }
   if (!gate.rowParityMatch || !gate.totalsMatch || gate.hasBlockingFlags) {
     logImport('finalizeDocumentPublish override: allowing manual finalize despite gate failure', {
       documentId,
@@ -1251,6 +1269,64 @@ export async function deleteAllProducts(options?: { sourceDocumentId?: string | 
   revalidatePath('/compiled-products')
   revalidatePath('/')
 }
+
+// ── Document items (canonical PDF extraction store) ───────────────────────────
+
+export async function getDocumentItems() {
+  const { data, error } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('document_items')
+        .select('*, documents(source_file_name, client_id, container_no, document_date, doc_number)')
+        .order('created_at', { ascending: false })
+        .order('line_no', { ascending: true }),
+    'getDocumentItems'
+  )
+  if (error) throw new Error(`Failed to fetch document items: ${error.message}`)
+  return (data ?? []) as import('@/lib/types').DocumentItem[]
+}
+
+export async function getDocumentItemDocuments(): Promise<ProductDocumentRef[]> {
+  const { data, error } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('documents')
+        .select('id, source_file_name, document_type, extraction_status, publish_state, created_at')
+        .order('created_at', { ascending: false }),
+    'getDocumentItemDocuments'
+  )
+  if (error) throw new Error(error.message)
+  return (data ?? []) as ProductDocumentRef[]
+}
+
+export async function deleteDocumentItem(id: string): Promise<void> {
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('document_items').delete().eq('id', id),
+    'deleteDocumentItem'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+}
+
+export async function deleteDocumentsByDocument(documentId: string): Promise<void> {
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('documents').delete().eq('id', documentId),
+    'deleteDocumentsByDocument'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+}
+
+export async function deleteAllDocumentItems(): Promise<void> {
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('documents').delete().not('id', 'is', null),
+    'deleteAllDocumentItems'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+}
+
+// ── End document items ────────────────────────────────────────────────────────
 
 async function saveImportMeta(meta: ImportMeta | null | undefined) {
   if (!meta) return
@@ -1738,8 +1814,19 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         cbm = numOrNull(r['T.CBM'])
         unit_weight = str(r['UNIT WEIGHT'] ?? '') || null
         total_weight = str(r['T.WEIGHT'] ?? '') || null
-        cost_price = num(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? '')
+        cost_price = num(
+          r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? r['unit_price_rmb'] ?? ''
+        )
         total_amount_rmb = numOrNull(r['T.AMOUNT'])
+        if (
+          (!(cost_price > 0)) &&
+          total_amount_rmb != null &&
+          total_amount_rmb > 0 &&
+          quantity > 0
+        ) {
+          const inferred = Math.round((total_amount_rmb / quantity) * 100) / 100
+          if (inferred > 0) cost_price = inferred
+        }
       }
 
       let mappedRow: MappedRow = {

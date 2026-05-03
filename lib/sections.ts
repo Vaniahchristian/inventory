@@ -10,6 +10,21 @@ export function filterToInventoryProducts(products: ExtractedProduct[]): Extract
   return products.filter(p => shouldPublishExtractedProduct(p.section))
 }
 
+/**
+ * Remove rows that are section subtotals or grand totals mistakenly returned as products.
+ * A row with no description, no item_code, and no marks has no product identity —
+ * it is a bare total row and should be excluded.
+ * Value-based heuristics are intentionally avoided: the PDF is the source of truth,
+ * and a row with an item code is always a product regardless of its numeric values.
+ */
+export function dropTotalRows(products: ExtractedProduct[]): ExtractedProduct[] {
+  return products.filter(p => {
+    const hasNoIdentifier = !p.description?.trim() && !p.item_code?.trim() && !p.marks?.trim()
+    if (hasNoIdentifier && (p.total_cartons ?? 0) > 0) return false
+    return true
+  })
+}
+
 export const REPACKAGED_SECTION_MARKER_SKU = '__SECTION_REPACKAGED__'
 export const REPACKAGED_SECTION_TITLE = 'GOODS STUFFED INTO THIS CONTAINER (REPACKAGED GOODS)'
 export const STAGE_SECTION_MARKER_PREFIX = '__SECTION_STAGE__:'
@@ -24,9 +39,23 @@ export function isSectionDividerProduct(product: Pick<Product, 'sku'>): boolean 
   )
 }
 
+/** Repacked / stuffed-container banner, e.g. "37-T-1 18 CTN GOODS STUFFED INTO THIS CONTAINER(REPACKED GOODS)". */
 export function isRepackagedSectionHeader(raw: string): boolean {
   const u = raw.toUpperCase()
-  return u.includes('GOODS STUFFED INTO THIS CONTAINER') || u.includes('REPACKAGED GOODS')
+  return (
+    u.includes('GOODS STUFFED INTO THIS CONTAINER') ||
+    u.includes('REPACKAGED GOODS') ||
+    u.includes('REPACKED GOODS') ||
+    (u.includes('STUFFED INTO THIS CONTAINER') && /\bREPACK/.test(u))
+  )
+}
+
+/** Banner row "NEW ORDER" (possibly repeated across merged cells) — labels the main table block, not a product. */
+export function isNewOrderSectionHeader(raw: string): boolean {
+  const joined = raw.replace(/\s+/g, ' ').trim()
+  if (!joined || !/\bNEW\s+ORDER\b/i.test(joined)) return false
+  const remainder = joined.replace(/\bNEW\s+ORDER\b/gi, '').replace(/[\s.:—\-_]/g, '').trim()
+  return remainder.length === 0
 }
 
 export function extractStageSectionHeader(raw: string): string | null {

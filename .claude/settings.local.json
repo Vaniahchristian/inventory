@@ -38,7 +38,20 @@
       "mcp__supabase__deploy_edge_function",
       "mcp__supabase__get_edge_function",
       "WebFetch(domain:docs.reducto.ai)",
-      "WebSearch"
+      "WebSearch",
+      "mcp__reducto__get_documentation",
+      "mcp__reducto__upload_file",
+      "Bash(cp \"MS-3 20260407 .final.pdf\" /tmp/ms3.pdf)",
+      "Bash(cp \"37-T-1 20260330.pdf\" /tmp/37t1.pdf)",
+      "Bash(cp \"1_销售单C707CGC25-6083.pdf\" /tmp/sales.pdf)",
+      "mcp__reducto__parse_document",
+      "mcp__reducto__extract_data",
+      "Bash(curl -s -X POST https://platform.reducto.ai/parse -H 'Authorization: Bearer 8772184ecdb65946e1d1331446fae397fc13042261927e79295ba30eb3c80ce2caf9763ba32fc2aeea6ce58fa8ccc67d' -H 'Content-Type: application/json' -d '{ *)",
+      "Bash(curl -s https://platform.reducto.ai/parse -X POST -H 'Authorization: Bearer 8772184ecdb65946e1d1331446fae397fc13042261927e79295ba30eb3c80ce2caf9763ba32fc2aeea6ce58fa8ccc67d' -H 'Content-Type: application/json' --data-raw '{\"input\":\"reducto://e6e81cc9-1ae6-493d-8c02-092b9308a824.pdf\",\"formatting\":{\"table_output_format\":\"html\"},\"settings\":{\"page_range\":[{\"start\":6,\"end\":7}]}}' --max-time 120)",
+      "Bash(Get-ChildItem -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "PowerShell(head *)",
+      "Bash(npx supabase *)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -123,3 +123,42 @@ export type DashboardStats = {
   lowStockCount: number
   recentMovements: number
 }
+
+export type DocumentItem = {
+  id: string
+  document_id: string
+  line_no: number | null
+  marks: string | null
+  item_code: string | null
+  description: string | null
+  shop: string | null
+  packaging: string | null
+  qty_per_carton: number | null
+  total_cartons: number | null
+  total_quantity: number | null
+  unit_price_rmb: number | null
+  total_amount_rmb: number | null
+  dim_l_cm: number | null
+  dim_w_cm: number | null
+  dim_h_cm: number | null
+  unit_cbm: number | null
+  total_cbm: number | null
+  unit_weight_kg: number | null
+  total_weight_kg: number | null
+  warehouse: string | null
+  barcode: string | null
+  box_no_start: number | null
+  box_no_end: number | null
+  section: 'shipped' | 'left_in_warehouse' | 'repacked'
+  remarks: string | null
+  validation_flags: string[]
+  review_status: string
+  created_at: string
+  documents?: {
+    source_file_name: string | null
+    client_id: string | null
+    container_no: string | null
+    document_date: string | null
+    doc_number: string | null
+  } | null
+}

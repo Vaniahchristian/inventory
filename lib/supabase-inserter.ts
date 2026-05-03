@@ -1,4 +1,5 @@
 import { ExtractedDocument, ExtractedProduct, ClaudeExtractionResult } from './claude-extractor'
+import { isFullExtractBanner } from '@/lib/full-extract'
 import { filterToInventoryProducts } from '@/lib/sections'
 import { ValidationResult, validateExtraction } from './validator'
 import { supabase } from './supabase'
@@ -17,14 +18,15 @@ export async function insertToSupabase(
   ocrLines: string[]
 ): Promise<InsertResult> {
   const doc = extraction.document
-  const fullProducts = extraction.products
-  const products = filterToInventoryProducts(fullProducts)
-  if (products.length === 0) {
-    throw new Error(
-      'No inventory rows to save — every row was in GOODS LEFT IN SANCARGO or REPACKED GOODS (drop sections).'
-    )
+  const rawAuditProducts = extraction.products
+  const fullProducts = extraction.products.filter(p => !isFullExtractBanner(p))
+  if (fullProducts.length === 0) {
+    throw new Error('No rows to save — extraction returned no product rows.')
   }
-  const validation = validateExtraction(doc, products)
+  // Validation uses shipped-only rows (totals cross-check); insertion stores all sections.
+  const shippedProducts = filterToInventoryProducts(fullProducts)
+  const products = fullProducts
+  const validation = validateExtraction(doc, shippedProducts, fullProducts)
   const ft = doc.footer_totals
 
   // ── 1. Insert document record ─────────────────────────────────────────────
@@ -42,7 +44,7 @@ export async function insertToSupabase(
       extraction_confidence: computeOverallConfidence(validation),
       model_name: extraction.model,
       validation_flags: validation.validation_flags,
-      raw_extraction: { products: fullProducts, document: doc },
+      raw_extraction: { products: rawAuditProducts, document: doc },
     })
     .select('id')
     .single()
@@ -53,11 +55,14 @@ export async function insertToSupabase(
   console.log(`[supabase] document inserted: ${document_id}`)
 
   // ── 2. Insert document totals ─────────────────────────────────────────────
-  const computedCartons = products.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
-  const computedQty = products.reduce((s, p) => s + (p.total_qty ?? 0), 0)
-  const computedCBM = products.reduce((s, p) => s + (p.total_cbm ?? 0), 0)
-  const computedWeight = products.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
-  const computedAmount = products.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+  // Physical totals (cartons/CBM/weight): footer covers shipped+repacked, not goods-left
+  const physicalProducts = fullProducts.filter(p => (p.section ?? 'shipped') !== 'left_in_warehouse')
+  const computedCartons = physicalProducts.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
+  const computedQty = physicalProducts.reduce((s, p) => s + (p.total_qty ?? 0), 0)
+  const computedCBM = physicalProducts.reduce((s, p) => s + (p.total_cbm ?? 0), 0)
+  const computedWeight = physicalProducts.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
+  // Amount: footer covers all sections including goods-left
+  const computedAmount = fullProducts.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
 
   const { error: totalsError } = await supabase.from('document_totals').insert({
     document_id,
@@ -81,11 +86,13 @@ export async function insertToSupabase(
   // We always write sequential line_no (idx+1) to avoid duplicate-key errors
   // when Claude returns two rows with the same line_no across chunk boundaries.
   const itemRows = products.map((p, idx) => {
-    const rv = validation.row_results[idx]
+    const shippedIdx = shippedProducts.indexOf(p)
+    const rv = shippedIdx >= 0 ? validation.row_results[shippedIdx] : null
     return {
       document_id,
       line_no: idx + 1,
-      item_code: p.item_code ?? p.marks ?? null,
+      marks: p.marks ?? null,
+      item_code: p.item_code ?? null,
       description: p.description,
       shop: p.shop ?? null,
       packaging: p.packaging ?? null,
@@ -103,7 +110,10 @@ export async function insertToSupabase(
       total_weight_kg: p.total_weight_kg,
       warehouse: p.warehouse ?? null,
       barcode: p.barcode ?? null,
-      remarks: buildRemarks(p),
+      box_no_start: p.box_no_start ?? null,
+      box_no_end: p.box_no_end ?? null,
+      section: p.section ?? 'shipped',
+      remarks: p.remarks ?? null,
       extraction_confidence: rv?.confidence ?? 80,
       validation_flags: rv?.flags ?? [],
       source_page: null,
@@ -175,13 +185,6 @@ export async function insertToSupabase(
   }
 }
 
-function buildRemarks(p: ExtractedProduct): string | null {
-  const parts: string[] = []
-  if (p.remarks) parts.push(p.remarks)
-  if (p.section && p.section !== 'shipped') parts.push(`section:${p.section}`)
-  if (p.box_no_start !== null) parts.push(`box:${p.box_no_start}-${p.box_no_end ?? p.box_no_start}`)
-  return parts.length > 0 ? parts.join(' | ') : null
-}
 
 function computeOverallConfidence(validation: ValidationResult): number {
   if (validation.row_results.length === 0) return 0
