@@ -44,6 +44,21 @@ function fmtMoney(n: number | null | undefined): string {
   return `¥${v.toLocaleString('en-UG', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`
 }
 
+/** Label for the latest document per file name (see getDocumentItemDocuments). */
+function documentSelectLabel(doc: ProductDocumentRef): string {
+  const name = (doc.source_file_name ?? 'Document').trim() || 'Document'
+  const short = name.length > 52 ? `${name.slice(0, 50)}…` : name
+  if (!doc.created_at) return short
+  try {
+    const d = new Date(doc.created_at)
+    if (!isFinite(d.getTime())) return short
+    const when = d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    return `${short} — ${when}`
+  } catch {
+    return short
+  }
+}
+
 function boxLabel(start: number | null, end: number | null): string {
   if (start == null) return '-'
   if (end != null && end !== start) return `${start}–${end}`
@@ -234,8 +249,8 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
           <h1 className="text-xl font-semibold text-slate-900">Products</h1>
           <p className="text-sm text-slate-500 mt-0.5">
             {selectedDocumentId === 'all'
-              ? `${items.length} rows total`
-              : `${filtered.length} rows · filtered by document`}
+              ? `${items.length} rows total · filter shows latest import per file name`
+              : `${filtered.length} rows · latest import for this file`}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -249,14 +264,14 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
             />
           </div>
           <Select value={selectedDocumentId} onValueChange={v => setSelectedDocumentId(v ?? 'all')}>
-            <SelectTrigger className="h-8 text-xs w-[280px]">
+            <SelectTrigger className="h-8 text-xs min-w-[300px] max-w-[420px]">
               <SelectValue placeholder="All PDFs / documents" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All PDFs / documents</SelectItem>
               {productDocuments.map(doc => (
                 <SelectItem key={doc.id} value={doc.id}>
-                  {(doc.source_file_name ?? doc.id).slice(0, 72)}
+                  {documentSelectLabel(doc)}
                 </SelectItem>
               ))}
             </SelectContent>

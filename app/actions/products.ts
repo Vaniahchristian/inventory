@@ -1286,17 +1286,66 @@ export async function getDocumentItems() {
   return (data ?? []) as import('@/lib/types').DocumentItem[]
 }
 
+/**
+ * Documents that have at least one line item (excludes empty/failed inserts).
+ * Returns one row per distinct `source_file_name` (latest `created_at` wins) so the Products
+ * filter is not flooded by re-imports of the same PDF. “All PDFs” still lists every line from every run.
+ */
 export async function getDocumentItemDocuments(): Promise<ProductDocumentRef[]> {
-  const { data, error } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('documents')
-        .select('id, source_file_name, document_type, extraction_status, publish_state, created_at')
-        .order('created_at', { ascending: false }),
-    'getDocumentItemDocuments'
+  const idSet = new Set<string>()
+  const pageSize = 1000
+  let offset = 0
+  for (;;) {
+    const { data: itemRows, error: itemErr } = await withSupabaseRetry(
+      () =>
+        supabase.from('document_items').select('document_id').range(offset, offset + pageSize - 1),
+      'getDocumentItemDocuments.itemIds'
+    )
+    if (itemErr) throw new Error(itemErr.message)
+    const batch = itemRows ?? []
+    for (const r of batch) {
+      const id = (r as { document_id?: string | null }).document_id
+      if (typeof id === 'string' && id.length > 0) idSet.add(id)
+    }
+    if (batch.length < pageSize) break
+    offset += pageSize
+  }
+  const ids = [...idSet]
+  if (ids.length === 0) return []
+
+  const chunkSize = 80
+  const byId = new Map<string, ProductDocumentRef & { created_at: string }>()
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize)
+    const { data: rows, error } = await withSupabaseRetry(
+      () =>
+        supabase
+          .from('documents')
+          .select('id, source_file_name, document_type, extraction_status, publish_state, created_at')
+          .in('id', chunk),
+      'getDocumentItemDocuments.docs'
+    )
+    if (error) throw new Error(error.message)
+    for (const row of rows ?? []) {
+      const rec = row as ProductDocumentRef & { created_at: string }
+      if (rec.id) byId.set(rec.id, rec)
+    }
+  }
+
+  // Newest first, then take one document per source file name (re-imports share the same label).
+  // Older runs still appear in the grid when "All PDFs" is selected; this only declutters the filter.
+  const sortedNewestFirst = [...byId.values()].sort((a, b) =>
+    String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''))
   )
-  if (error) throw new Error(error.message)
-  return (data ?? []) as ProductDocumentRef[]
+  const onePerFileName = new Map<string, ProductDocumentRef & { created_at: string }>()
+  for (const rec of sortedNewestFirst) {
+    const nameKey = (rec.source_file_name ?? '').trim().toLowerCase()
+    const key = nameKey.length > 0 ? `name:${nameKey}` : `id:${rec.id}`
+    if (!onePerFileName.has(key)) onePerFileName.set(key, rec)
+  }
+  return [...onePerFileName.values()].sort((a, b) =>
+    String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''))
+  )
 }
 
 export async function deleteDocumentItem(id: string): Promise<void> {
@@ -1308,6 +1357,7 @@ export async function deleteDocumentItem(id: string): Promise<void> {
   revalidatePath('/products')
 }
 
+/** Deletes one document; line items cascade. Compiled `products` rows linked by source_document_id cascade (FK). */
 export async function deleteDocumentsByDocument(documentId: string): Promise<void> {
   const { error } = await withSupabaseRetry(
     () => supabase.from('documents').delete().eq('id', documentId),
