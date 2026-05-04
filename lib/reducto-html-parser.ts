@@ -168,13 +168,27 @@ function parseTableHtml(
   inheritedMarks: string | null,
   parseMode: ParseMode
 ): TableHtmlResult {
+  const nonTableText = html
+    .replace(/<table[\s\S]*?<\/table>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  let entrySection: Section = defaultSection
+  if (nonTableText) {
+    // Critical: some chunks are "GOODS LEFT IN SANCARGO" + table in one HTML block.
+    // We must switch section before parsing the first table.
+    if (isNewOrderSectionHeader(nonTableText)) entrySection = 'shipped'
+    else if (isGoodsLeftHeader(nonTableText)) entrySection = 'left_in_warehouse'
+    else if (isRepackagedSectionHeader(nonTableText)) entrySection = 'repacked'
+  }
+
   // A chunk may contain multiple <table> elements (e.g. header table + product table)
   const tableMatches = [...html.matchAll(/<table[\s\S]*?<\/table>/gi)]
 
   if (tableMatches.length === 0) {
     return parseGridToProducts(
       expandHtmlTable(html),
-      defaultSection,
+      entrySection,
       docType,
       startLineNo,
       inheritedMarks,
@@ -185,7 +199,7 @@ function parseTableHtml(
   const products: ExtractedProduct[] = []
   let lineNo = startLineNo
   let lastMarks = inheritedMarks
-  let exitSection = defaultSection
+  let exitSection = entrySection
 
   for (const tableMatch of tableMatches) {
     const result = parseGridToProducts(
@@ -202,12 +216,7 @@ function parseTableHtml(
     exitSection = result.exitSection
   }
 
-  // Check for section header text between tables
-  const nonTableText = html
-    .replace(/<table[\s\S]*?<\/table>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+  // Keep exit section consistent for subsequent chunks as well.
   if (nonTableText) {
     if (isNewOrderSectionHeader(nonTableText)) exitSection = 'shipped'
     else if (isGoodsLeftHeader(nonTableText)) exitSection = 'left_in_warehouse'
