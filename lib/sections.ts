@@ -70,8 +70,13 @@ export function extractStageSectionHeader(raw: string): string | null {
 }
 
 export function isGoodsLeftHeader(raw: string): boolean {
-  const compact = raw.toUpperCase().replace(/\s+/g, '')
-  return compact.includes('GOODSLEFTINSANCARGO')
+  const u = raw.toUpperCase()
+  const compact = u.replace(/\s+/g, '')
+  if (compact.includes('GOODSLEFTINSANCARGO')) return true
+  if (/\bGOODS\s+LEFT\b/.test(raw) && /\bSANCARGO\b/i.test(raw)) return true
+  if (/\bLEFT\s+IN\s+WAREHOUSE\b/i.test(u)) return true
+  if (/\bGOODS\s+LEFT\s+IN\s+WAREHOUSE\b/i.test(u)) return true
+  return false
 }
 
 export function makeStageSectionSku(title: string): string {

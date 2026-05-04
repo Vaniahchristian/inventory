@@ -1,6 +1,7 @@
 import { ExtractedDocument, ExtractedProduct, ClaudeExtractionResult } from './claude-extractor'
-import { isFullExtractBanner, isSubtotalBanner } from '@/lib/full-extract'
+import { isFullExtractBanner, isSubtotalBanner, isFooterBanner } from '@/lib/full-extract'
 import { filterToInventoryProducts } from '@/lib/sections'
+import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from '@/lib/manifest-section-fixer'
 import { ValidationResult, validateExtraction } from './validator'
 import { supabase } from './supabase'
 
@@ -19,10 +20,14 @@ export async function insertToSupabase(
 ): Promise<InsertResult> {
   const doc = extraction.document
   const rawAuditProducts = extraction.products
-  const fullProducts = extraction.products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p))
-  if (fullProducts.length === 0) {
+  const filtered = extraction.products.filter(
+    p => !isFullExtractBanner(p) && !isSubtotalBanner(p) && !isFooterBanner(p)
+  )
+  if (filtered.length === 0) {
     throw new Error('No rows to save — extraction returned no product rows.')
   }
+  const docType = doc.document_type
+  const fullProducts = dedupeShippedCartonCounts(fixManifestSectionContinuity(filtered, docType), docType)
   // Validation uses shipped-only rows (totals cross-check); insertion stores all sections.
   const shippedProducts = filterToInventoryProducts(fullProducts)
   const products = fullProducts

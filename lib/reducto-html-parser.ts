@@ -13,8 +13,9 @@ import type { ExtractedDocument, ExtractedProduct } from './claude-extractor'
 import type { DocType } from './prompts'
 import { expandHtmlTable } from './html-table-parser'
 import { resolveColumn, type ProductField } from './column-map'
-import { FULL_EXTRACT_ITEM_CODE, SECTION_SUBTOTAL_ITEM_CODE } from './full-extract'
+import { FULL_EXTRACT_ITEM_CODE, SECTION_SUBTOTAL_ITEM_CODE, FOOTER_ITEM_CODE } from './full-extract'
 import { isGoodsLeftHeader, isNewOrderSectionHeader, isRepackagedSectionHeader } from './sections'
+import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from './manifest-section-fixer'
 
 type Section = ExtractedProduct['section']
 
@@ -147,7 +148,8 @@ export function parseReductoChunks(
   }
 
   const document = buildDocument(headerTexts, footerTexts, docType, chunkPlainParts.join('\n'))
-  return { products, document, tablesFound, rowsMapped }
+  const productsFixed = dedupeShippedCartonCounts(fixManifestSectionContinuity(products, docType), docType)
+  return { products: productsFixed, document, tablesFound, rowsMapped }
 }
 
 // ── Table HTML parsing ────────────────────────────────────────────────────────
@@ -443,6 +445,39 @@ function isLikelyBannerNoiseRow(raw: Record<string, string>): boolean {
   return shop === 'NEW ORDER' && item === 'NEW ORDER' && desc === 'NEW ORDER' && pack === 'NEW ORDER'
 }
 
+/**
+ * Rows from the financial summary table / footer section at the bottom of the PDF.
+ * Covers: totals, payment lines, GOODS BALANCE, freight, payment terms text, reduce notes.
+ * These are already captured in document_totals / document_payments — not products.
+ */
+function isDocumentFooterRow(raw: Record<string, string>, rowText: string): boolean {
+  const combined = [
+    raw['marks'] ?? '',
+    raw['description'] ?? '',
+    raw['item_code'] ?? '',
+    raw['shop'] ?? '',
+    rowText,
+  ].join(' ').replace(/\s+/g, ' ').trim().toUpperCase()
+
+  // Standard totals
+  if (/\bTOTAL\s+(WEIGHT|CBM|CARTON|COST|BALANCE)\b/.test(combined)) return true
+  // Balance line items
+  if (/\b(GOODS\s+BALANCE|CREDIT\s+SUPPORT|PIVOC|EXCHANGE\s+RATE)\b/.test(combined)) return true
+  // Freight line
+  if (/YIWU.{0,10}MOMBASA.{0,10}FREIGHT/i.test(combined)) return true
+  // Payment rows (date + PAYMENT + USD, including "PAID IN CHINA" variants)
+  if (/\bPAYMENT\b/.test(combined) && /USD/.test(combined) && !/\bpcs\/ctn\b/i.test(combined)) return true
+  // Payment terms header and body text
+  if (/BALANCE\s+PAYMENT\s+TERMS/i.test(combined)) return true
+  if (/IF\s+OUTSTANDING\s+BALANCE\s+IS\s+NOT\s+PAID/i.test(combined)) return true
+  if (/PAYMENT\s+DELAY\s+SURCHARGE/i.test(combined)) return true
+  if (/VESSEL\s+ARRIVAL\s+MOMBASA/i.test(combined)) return true
+  // Reduce / adjustment notes that appear after TOTAL CARTON
+  if (/REDUCE\s+DETAILS/i.test(combined)) return true
+  if (/REDUCE\s+\d+\s*CTN/i.test(combined)) return true
+  return false
+}
+
 function parseGridToProducts(
   grid: string[][],
   defaultSection: Section,
@@ -545,6 +580,9 @@ function parseGridToProducts(
       isSubtotalAggregateRaw(raw) ||
       isRolledTotalsBlobInFields(raw, rowText)
     ) {
+      if (isGoodsLeftHeader(rowText)) {
+        currentSection = 'left_in_warehouse'
+      }
       prevMarks = null
       if (parseMode !== 'full') continue
       const sub = rawToProduct(raw, currentSection, lineNo, null)
@@ -553,6 +591,17 @@ function parseGridToProducts(
       lineNo++
       continue
     }
+    // Document footer rows (TOTAL WEIGHT/CBM, payment lines, GOODS BALANCE, etc.)
+    // Already stored in document_totals / document_payments — never save as product rows.
+    if (isDocumentFooterRow(raw, rowText)) {
+      if (parseMode !== 'full') continue
+      const ftr = rawToProduct(raw, currentSection, lineNo, null)
+      ftr.item_code = FOOTER_ITEM_CODE
+      products.push(ftr)
+      lineNo++
+      continue
+    }
+
     // Infer marks from visible cells FIRST so a new section mark isn't overwritten by carry-forward
     const inferredMarks = inferMarksFromRowCells(row)
     if (!(raw['marks'] ?? '').trim() && inferredMarks) raw['marks'] = inferredMarks

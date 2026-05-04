@@ -17,6 +17,7 @@ import {
   deleteDocumentsByDocument,
   deleteAllDocumentItems,
   deleteDocumentItemsBySection,
+  deleteDocumentFooterItems,
   importProducts,
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
@@ -64,6 +65,45 @@ function boxLabel(start: number | null, end: number | null): string {
   if (start == null) return '-'
   if (end != null && end !== start) return `${start}–${end}`
   return String(start)
+}
+
+/** Detects financial summary / footer rows saved in older imports (now filtered at parse time). */
+function isFooterLikeItem(p: DocumentItem): boolean {
+  const combined = [p.marks ?? '', p.description ?? '', p.item_code ?? '', p.shop ?? '']
+    .join(' ').toUpperCase()
+  // Standard totals
+  if (/\bTOTAL\s+(WEIGHT|CBM|CARTON|COST|BALANCE)\b/.test(combined)) return true
+  // Balance line items
+  if (/\b(GOODS\s+BALANCE|CREDIT\s+SUPPORT|PIVOC|EXCHANGE\s+RATE)\b/.test(combined)) return true
+  // Freight
+  if (/YIWU.{0,10}MOMBASA.{0,10}FREIGHT/i.test(combined)) return true
+  // Payment rows (date + PAYMENT keyword)
+  if (/\bPAYMENT\b/.test(combined) && /\d{1,2}\/\d{1,2}\/\d{4}/.test(combined)) return true
+  // Payment with USD but no pcs/ctn
+  if (/\bPAYMENT\b/.test(combined) && /USD/.test(combined) && !/\bPCS\/CTN\b/.test(combined)) return true
+  // Payment terms body text
+  if (/IF\s+OUTSTANDING\s+BALANCE\s+IS\s+NOT\s+PAID/i.test(combined)) return true
+  if (/PAYMENT\s+DELAY\s+SURCHARGE/i.test(combined)) return true
+  if (/VESSEL\s+ARRIVAL\s+MOMBASA/i.test(combined)) return true
+  if (/BALANCE\s+PAYMENT\s+TERMS/i.test(combined)) return true
+  // Reduce notes after TOTAL CARTON
+  if (/REDUCE\s+DETAILS/i.test(combined)) return true
+  if (/REDUCE\s+\d+\s*CTN/i.test(combined)) return true
+  return false
+}
+
+const SECTION_RENDER_ORDER: DocumentItem['section'][] = ['shipped', 'left_in_warehouse', 'repacked']
+
+const SECTION_LABELS: Record<DocumentItem['section'], string> = {
+  shipped: 'Shipped',
+  left_in_warehouse: 'Left in Warehouse',
+  repacked: 'Repacked',
+}
+
+const SECTION_SUBTOTAL_STYLE: Record<DocumentItem['section'], string> = {
+  shipped: 'bg-yellow-200 border-t-2 border-yellow-500 font-semibold',
+  left_in_warehouse: 'bg-sky-200 border-t-2 border-sky-500 font-semibold',
+  repacked: 'bg-violet-200 border-t-2 border-violet-500 font-semibold',
 }
 
 function sectionClass(section: DocumentItem['section']): string {
@@ -143,12 +183,44 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
   }), [filtered])
 
+  const footerItems = useMemo(() => filtered.filter(isFooterLikeItem), [filtered])
+
+  const groupedSections = useMemo(() =>
+    SECTION_RENDER_ORDER.flatMap(sectionKey => {
+      const rows = filtered.filter(p => p.section === sectionKey && !isFooterLikeItem(p))
+      if (rows.length === 0) return []
+      return [{
+        sectionKey,
+        rows,
+        st: {
+          cartons: rows.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
+          qty: rows.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
+          cbm: rows.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
+          weight: rows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
+          amount: rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+        },
+      }]
+    })
+  , [filtered])
+
   function handleDeleteItem(id: string) {
     if (!confirm('Delete this row?')) return
     startTransition(async () => {
       try {
         await deleteDocumentItem(id)
         toast.success('Row deleted')
+      } catch (e: any) { toast.error(e.message) }
+    })
+  }
+
+  function handleDeleteFooterItems() {
+    if (footerItems.length === 0) return
+    const scopeLabel = selectedDocumentId !== 'all' ? ' from this document' : ''
+    if (!confirm(`Delete ${footerItems.length} document footer rows${scopeLabel}? This cannot be undone.`)) return
+    startTransition(async () => {
+      try {
+        await deleteDocumentFooterItems(selectedDocumentId !== 'all' ? selectedDocumentId : null)
+        toast.success(`Deleted ${footerItems.length} footer rows`)
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -395,6 +467,21 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
             </button>
           )}
         </span>
+        {footerItems.length > 0 && (
+          <span className="flex items-center gap-2">
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-3 h-3 rounded-sm bg-slate-200 border border-slate-400" />
+              document footer ({footerItems.length})
+            </span>
+            <button
+              onClick={handleDeleteFooterItems}
+              disabled={isPending}
+              className="text-[10px] text-red-400 hover:text-red-600 underline disabled:opacity-40"
+            >
+              delete section
+            </button>
+          </span>
+        )}
       </div>
 
       {/* Main table */}
@@ -432,43 +519,107 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                 </td>
               </tr>
             ) : (
-              filtered.map(p => (
-                <tr key={p.id} className={`border-b border-slate-100 ${sectionClass(p.section)}`}>
-                  <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
-                  <td className="p-2 font-mono text-slate-800 whitespace-nowrap">{p.marks ?? '-'}</td>
-                  <td className="p-2 text-slate-600 max-w-[100px] truncate">{p.shop ?? '-'}</td>
-                  <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
-                  <td className="p-2 text-slate-700 max-w-[200px]">{p.description ?? '-'}</td>
-                  <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_cartons, 0)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_quantity, 0)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.dim_l_cm, 1)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.dim_w_cm, 1)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.dim_h_cm, 1)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.unit_cbm, 4)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_cbm, 4)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.unit_weight_kg, 3)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtN(p.total_weight_kg, 3)}</td>
-                  <td className="p-2 text-right tabular-nums">{fmtMoney(p.unit_price_rmb)}</td>
-                  <td className="p-2 text-right tabular-nums font-medium">{fmtMoney(p.total_amount_rmb)}</td>
-                  <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
-                  <td className="p-2"><SectionBadge section={p.section} /></td>
-                  <td className="p-1">
-                    <Button
-                      type="button" variant="ghost" size="icon"
-                      className="h-7 w-7 text-slate-300 hover:text-red-600"
-                      disabled={isPending}
-                      onClick={() => handleDeleteItem(p.id)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </td>
-                </tr>
+              groupedSections.map(({ sectionKey, rows, st }) => (
+                <React.Fragment key={sectionKey}>
+                  {rows.map(p => (
+                    <tr key={p.id} className={`border-b border-slate-100 ${sectionClass(p.section)}`}>
+                      <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
+                      <td className="p-2 font-mono text-slate-800 whitespace-nowrap">{p.marks ?? '-'}</td>
+                      <td className="p-2 text-slate-600 max-w-[100px] truncate">{p.shop ?? '-'}</td>
+                      <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+                      <td className="p-2 text-slate-700 max-w-[200px]">{p.description ?? '-'}</td>
+                      <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.total_cartons, 0)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.total_quantity, 0)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.dim_l_cm, 1)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.dim_w_cm, 1)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.dim_h_cm, 1)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.unit_cbm, 4)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.total_cbm, 4)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.unit_weight_kg, 3)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtN(p.total_weight_kg, 3)}</td>
+                      <td className="p-2 text-right tabular-nums">{fmtMoney(p.unit_price_rmb)}</td>
+                      <td className="p-2 text-right tabular-nums font-medium">{fmtMoney(p.total_amount_rmb)}</td>
+                      <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
+                      <td className="p-2"><SectionBadge section={p.section} /></td>
+                      <td className="p-1">
+                        <Button
+                          type="button" variant="ghost" size="icon"
+                          className="h-7 w-7 text-slate-300 hover:text-red-600"
+                          disabled={isPending}
+                          onClick={() => handleDeleteItem(p.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                  {/* Section subtotal row */}
+                  <tr className={`text-xs ${SECTION_SUBTOTAL_STYLE[sectionKey]}`}>
+                    <td className="p-2" colSpan={6}>
+                      {SECTION_LABELS[sectionKey]} — {rows.length} rows
+                    </td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.cartons, 0)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.qty, 0)}</td>
+                    <td colSpan={3} />
+                    <td />
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.cbm, 4)}</td>
+                    <td />
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.weight, 3)}</td>
+                    <td />
+                    <td className="p-2 text-right tabular-nums">¥{fmtN(st.amount, 0)}</td>
+                    <td colSpan={3} />
+                  </tr>
+                </React.Fragment>
               ))
             )}
-            {filtered.length > 0 && (
-              <tr className="bg-yellow-300 font-bold border-t-2 border-yellow-500 text-xs">
-                <td className="p-2" colSpan={6}>TOTALS</td>
+            {/* Document footer rows — financial summary data saved in old imports */}
+            {footerItems.length > 0 && (
+              <React.Fragment key="document_footer">
+                {footerItems.map(p => (
+                  <tr key={p.id} className="border-b border-slate-200 bg-slate-100 text-slate-500 italic">
+                    <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
+                    <td className="p-2 font-mono whitespace-nowrap">{p.marks ?? '-'}</td>
+                    <td className="p-2 max-w-[100px] truncate">{p.shop ?? '-'}</td>
+                    <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+                    <td className="p-2 max-w-[200px]">{p.description ?? '-'}</td>
+                    <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.total_cartons, 0)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.total_quantity, 0)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.dim_l_cm, 1)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.dim_w_cm, 1)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.dim_h_cm, 1)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.unit_cbm, 4)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.total_cbm, 4)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.unit_weight_kg, 3)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(p.total_weight_kg, 3)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtMoney(p.unit_price_rmb)}</td>
+                    <td className="p-2 text-right tabular-nums font-medium">{fmtMoney(p.total_amount_rmb)}</td>
+                    <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
+                    <td className="p-2">
+                      <span className="text-[10px] text-slate-400 border border-slate-300 rounded px-1">footer</span>
+                    </td>
+                    <td className="p-1">
+                      <Button
+                        type="button" variant="ghost" size="icon"
+                        className="h-7 w-7 text-slate-300 hover:text-red-600"
+                        disabled={isPending}
+                        onClick={() => handleDeleteItem(p.id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                <tr className="text-xs bg-slate-300 border-t-2 border-slate-500 font-semibold text-slate-700">
+                  <td className="p-2" colSpan={6}>Document Footer — {footerItems.length} rows (financial summary)</td>
+                  <td colSpan={14} />
+                </tr>
+              </React.Fragment>
+            )}
+            {filtered.length > 0 && groupedSections.length > 1 && (
+              <tr className="bg-slate-800 text-white font-bold border-t-2 border-slate-900 text-xs">
+                <td className="p-2" colSpan={6}>GRAND TOTAL — {filtered.length} rows</td>
                 <td className="p-2 text-right tabular-nums">{fmtN(totals.cartons, 0)}</td>
                 <td className="p-2 text-right tabular-nums">{fmtN(totals.qty, 0)}</td>
                 <td colSpan={3} />

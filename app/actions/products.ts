@@ -1376,6 +1376,32 @@ export async function deleteAllDocumentItems(): Promise<void> {
   revalidatePath('/products')
 }
 
+/** Deletes document_items rows that match financial summary / footer patterns. */
+export async function deleteDocumentFooterItems(documentId?: string | null): Promise<void> {
+  const footerPatterns = [
+    'TOTAL WEIGHT', 'TOTAL CBM', 'TOTAL CARTON', 'TOTAL COST', 'TOTAL BALANCE',
+    'GOODS BALANCE', 'CREDIT SUPPORT', 'PIVOC', 'FREIGHT', 'EXCHANGE RATE',
+    'BALANCE PAYMENT',
+    'outstanding balance is not paid',
+    'payment delay surcharge',
+    'vessel arrival mombasa',
+    'REDUCE DETAILS',
+  ]
+  const orFilter = footerPatterns
+    .flatMap(p => [
+      `marks.ilike.%${p}%`,
+      `description.ilike.%${p}%`,
+      `shop.ilike.%${p}%`,
+    ])
+    .join(',')
+
+  let query = supabase.from('document_items').delete().or(orFilter)
+  if (documentId) query = (query as any).eq('document_id', documentId)
+  const { error } = await withSupabaseRetry(() => query, 'deleteDocumentFooterItems')
+  if (error) throw new Error(error.message)
+  revalidatePath('/products')
+}
+
 /** Deletes all document_items rows for a given section, optionally scoped to one document. */
 export async function deleteDocumentItemsBySection(
   section: 'shipped' | 'left_in_warehouse' | 'repacked',

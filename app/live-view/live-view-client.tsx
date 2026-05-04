@@ -4,7 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { MonitorPlay, Loader2, Save, FileUp, ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import type { ExtractedDocument, ExtractedProduct } from '@/lib/claude-extractor'
-import { isFullExtractBanner, isSubtotalBanner } from '@/lib/full-extract'
+import { isFullExtractBanner, isSubtotalBanner, isFooterBanner } from '@/lib/full-extract'
 import { extractPdfText } from '@/lib/pdf-text-extractor'
 import { saveLiveViewExtraction } from '@/app/actions/live-view'
 import { Button } from '@/components/ui/button'
@@ -91,7 +91,7 @@ export function LiveViewClient() {
   }, [])
 
   const realRows = useMemo(
-    () => products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p)),
+    () => products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p) && !isFooterBanner(p)),
     [products]
   )
   const grandTotals = useMemo(() => sumGroup(realRows), [realRows])
@@ -146,7 +146,7 @@ export function LiveViewClient() {
   }
 
   async function handleSave() {
-    const persistable = products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p))
+    const persistable = products.filter(p => !isFullExtractBanner(p) && !isSubtotalBanner(p) && !isFooterBanner(p))
     if (!documentState || !fileName) {
       toast.error('Nothing to save — extract a PDF first')
       return
@@ -318,6 +318,8 @@ export function LiveViewClient() {
                     className={
                       isSubtotalBanner(row)
                         ? 'border-b border-yellow-400 bg-yellow-200 hover:bg-yellow-300 font-semibold'
+                        : isFooterBanner(row)
+                        ? 'border-b border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-500 italic'
                         : isFullExtractBanner(row)
                         ? 'border-b border-amber-200 bg-amber-50/90 hover:bg-amber-50'
                         : 'border-b border-slate-100 hover:bg-slate-50/80'
