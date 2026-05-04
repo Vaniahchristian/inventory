@@ -67,7 +67,6 @@ export const SALES_ORDER_COLUMNS: Record<string, ProductField | 'skip'> = {
   'CUS NO': 'skip', 'CUS NO.': 'skip', '客户货号': 'skip', 'CUS NO. 客户货号': 'skip',
   'ITEM NO': 'item_code', 'ITEM NO.': 'item_code', 'ITEM NO. 产品货号': 'item_code',
   '产品货号': 'item_code', 'ITEM CODE': 'item_code', 'SKU': 'item_code',
-  '客户货号': 'skip',
   'DES': 'description', 'DES.': 'description', 'DESCRIPTION': 'description', 'DES. 描述': 'description', '描述': 'description',
   'PHOTO': 'skip', 'PHOTO2': 'skip', '图片1': 'skip',
   'CTN': 'total_cartons', '总箱数': 'total_cartons', 'TOTAL CARTONS': 'total_cartons', 'CTNS': 'total_cartons',
