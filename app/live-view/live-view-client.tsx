@@ -33,6 +33,10 @@ type ExtractSuccess = {
   full_extract?: boolean
 }
 
+const EXTRACT_REQUEST_TIMEOUT_MS = Number(
+  process.env.NEXT_PUBLIC_EXTRACT_REQUEST_TIMEOUT_MS ?? 15 * 60 * 1000
+)
+
 function parseOptionalNum(s: string): number | null {
   const t = s.trim().replace(/,/g, '')
   if (!t) return null
@@ -61,6 +65,7 @@ export function LiveViewClient() {
   const [extractMs, setExtractMs] = useState<number | null>(null)
   const [validationFlags, setValidationFlags] = useState<string[]>([])
   const [extracting, setExtracting] = useState(false)
+  const [extractStatus, setExtractStatus] = useState('')
   const [saving, setSaving] = useState(false)
   const [showRaw, setShowRaw] = useState(false)
   const [lastRaw, setLastRaw] = useState<string | null>(null)
@@ -99,6 +104,7 @@ export function LiveViewClient() {
 
   async function handleExtract(file: File) {
     setExtracting(true)
+    setExtractStatus('Preparing PDF text…')
     setLastRaw(null)
     try {
       const { text: fallbackText } = await extractPdfText(file)
@@ -109,7 +115,11 @@ export function LiveViewClient() {
       formData.append('skip_db_insert', 'true')
       formData.append('full_extract', 'true')
 
-      const res = await fetch('/api/extract', { method: 'POST', body: formData })
+      setExtractStatus('Uploading and extracting (this can take several minutes for large PDFs)…')
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), EXTRACT_REQUEST_TIMEOUT_MS)
+      const res = await fetch('/api/extract', { method: 'POST', body: formData, signal: controller.signal })
+      clearTimeout(timer)
       const data = await res.json().catch(() => ({}))
 
       if (!res.ok) {
@@ -133,7 +143,11 @@ export function LiveViewClient() {
       setLastRaw(JSON.stringify(data, null, 2))
       toast.success(`Extracted ${ok.products.length} row(s) — review and save when ready`)
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
+      let msg = e instanceof Error ? e.message : String(e)
+      if (e instanceof Error && e.name === 'AbortError') {
+        msg =
+          'Extraction timed out while waiting for server response. The parser likely switched to schema extraction, which can run long. Please retry once; if it repeats, we can lower parse timeout or skip html phase for this file.'
+      }
       toast.error(msg)
       setFileName(null)
       setDocumentState(null)
@@ -142,6 +156,7 @@ export function LiveViewClient() {
       setFullExtractMode(false)
     } finally {
       setExtracting(false)
+      setExtractStatus('')
     }
   }
 
@@ -219,6 +234,12 @@ export function LiveViewClient() {
           </Button>
         </div>
       </div>
+
+      {extracting && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+          {extractStatus || 'Extracting…'}
+        </div>
+      )}
 
       {fileName && (
         <div className="rounded-lg border bg-slate-50/80 px-4 py-3 text-sm flex flex-wrap gap-x-6 gap-y-1">
