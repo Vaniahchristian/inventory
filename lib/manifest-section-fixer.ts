@@ -29,6 +29,10 @@ function isNearZeroVolume(n: number | null | undefined): boolean {
 
 /** Consecutive rows that are fully identical (OCR printed the same line twice). */
 function rowsAreOcrDuplicate(a: ExtractedProduct, b: ExtractedProduct): boolean {
+  // Do not dedupe anonymous rows (no marks + no item code). In some manifests,
+  // different "parts" rows can share a generic description but are distinct SKUs.
+  if (normStr(a.marks) === '' && normStr(a.item_code) === '') return false
+  if (normStr(b.marks) === '' && normStr(b.item_code) === '') return false
   if (normStr(a.marks) !== normStr(b.marks)) return false
   if (normStr(a.item_code) !== normStr(b.item_code)) return false
   if (normStr(a.description) !== normStr(b.description)) return false

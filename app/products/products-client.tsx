@@ -109,6 +109,10 @@ function isStuffedBannerItem(p: DocumentItem): boolean {
   return hasNoNumericPayload
 }
 
+function isCarryoverBeforeGoodsItem(p: DocumentItem): boolean {
+  return (p.remarks ?? '').toLowerCase().includes('carryover:before_goods')
+}
+
 const SECTION_RENDER_ORDER: DocumentItem['section'][] = ['shipped', 'left_in_warehouse', 'repacked']
 
 const SECTION_LABELS: Record<DocumentItem['section'], string> = {
@@ -219,15 +223,16 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
         p => p.section === sectionKey && !isFooterLikeItem(p)
       )
       if (rows.length === 0) return []
+      const subtotalRows = rows.filter(p => !isCarryoverBeforeGoodsItem(p))
       return [{
         sectionKey,
         rows,
         st: {
-          cartons: rows.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
-          qty: rows.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
-          cbm: rows.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
-          weight: rows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
-          amount: rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+          cartons: subtotalRows.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
+          qty: subtotalRows.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
+          cbm: subtotalRows.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
+          weight: subtotalRows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
+          amount: subtotalRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
         },
       }]
     })

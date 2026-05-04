@@ -42,9 +42,15 @@ export function isSectionDividerProduct(product: Pick<Product, 'sku'>): boolean 
 /** Repacked / stuffed-container banner, e.g. "37-T-1 18 CTN GOODS STUFFED INTO THIS CONTAINER(REPACKED GOODS)". */
 export function isRepackagedSectionHeader(raw: string): boolean {
   const u = raw.toUpperCase()
+  const normalized = u.replace(/\s+/g, ' ').trim()
+  const compact = normalized.replace(/[^A-Z0-9]/g, '')
   return (
     u.includes('GOODS STUFFED INTO THIS CONTAINER') ||
     u.includes('GOODS STUFFED INTO THIS CO') ||
+    u.includes('STUFFED INTO THIS CONTAINER') ||
+    u.includes('STUFFED INTO THIS CO') ||
+    compact.includes('GOODSHASBEENSTUFFEDINTOTHISCO') ||
+    compact.includes('GOODSHASBEENSTUFFEDINTOTHISCONTAINER') ||
     u.includes('REPACKAGED GOODS') ||
     u.includes('REPACKED GOODS') ||
     (u.includes('STUFFED INTO THIS CONTAINER') && /\bREPACK/.test(u))
