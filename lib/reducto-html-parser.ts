@@ -126,7 +126,7 @@ export function parseReductoChunks(
       if (!plainText) continue
 
       // Update section state from text headers between tables
-      if (isNewOrderSectionHeader(plainText)) {
+      if (isNewOrderSectionHeader(plainText) && currentSection === 'shipped') {
         currentSection = 'shipped'
       } else if (isGoodsLeftHeader(plainText)) {
         currentSection = 'left_in_warehouse'
@@ -168,24 +168,22 @@ function parseTableHtml(
   inheritedMarks: string | null,
   parseMode: ParseMode
 ): TableHtmlResult {
-  const nonTableText = html
-    .replace(/<table[\s\S]*?<\/table>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  let entrySection: Section = defaultSection
-  if (nonTableText) {
-    // Critical: some chunks are "GOODS LEFT IN SANCARGO" + table in one HTML block.
-    // We must switch section before parsing the first table.
-    if (isNewOrderSectionHeader(nonTableText)) entrySection = 'shipped'
-    else if (isGoodsLeftHeader(nonTableText)) entrySection = 'left_in_warehouse'
-    else if (isRepackagedSectionHeader(nonTableText)) entrySection = 'repacked'
+  const normalizeHtmlText = (fragment: string): string =>
+    fragment.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+
+  const applySectionHint = (section: Section, text: string): Section => {
+    if (!text) return section
+    if (isNewOrderSectionHeader(text) && section === 'shipped') return 'shipped'
+    if (isGoodsLeftHeader(text)) return 'left_in_warehouse'
+    if (isRepackagedSectionHeader(text)) return 'repacked'
+    return section
   }
 
-  // A chunk may contain multiple <table> elements (e.g. header table + product table)
   const tableMatches = [...html.matchAll(/<table[\s\S]*?<\/table>/gi)]
+  let entrySection: Section = defaultSection
 
   if (tableMatches.length === 0) {
+    entrySection = applySectionHint(entrySection, normalizeHtmlText(html))
     return parseGridToProducts(
       expandHtmlTable(html),
       entrySection,
@@ -200,10 +198,26 @@ function parseTableHtml(
   let lineNo = startLineNo
   let lastMarks = inheritedMarks
   let exitSection = entrySection
+  let cursor = 0
+  let lastHeaderRow: string[] | null = null
 
   for (const tableMatch of tableMatches) {
+    const tableStart = tableMatch.index ?? cursor
+    const interTableText = normalizeHtmlText(html.slice(cursor, tableStart))
+    exitSection = applySectionHint(exitSection, interTableText)
+
+    const rawGrid = expandHtmlTable(tableMatch[0])
+    const headerInfo = detectBestHeaderRow(rawGrid, docType)
+    if (headerInfo.index >= 0 && headerInfo.score >= 3) {
+      lastHeaderRow = [...rawGrid[headerInfo.index]]
+    }
+    const grid =
+      headerInfo.score >= 3 || !lastHeaderRow || !looksLikeHeaderlessDataTable(rawGrid)
+        ? rawGrid
+        : [lastHeaderRow, ...rawGrid]
+
     const result = parseGridToProducts(
-      expandHtmlTable(tableMatch[0]),
+      grid,
       exitSection,
       docType,
       lineNo,
@@ -214,14 +228,11 @@ function parseTableHtml(
     lineNo += result.products.length
     if (result.lastMarks !== null) lastMarks = result.lastMarks
     exitSection = result.exitSection
+    cursor = tableStart + tableMatch[0].length
   }
 
-  // Keep exit section consistent for subsequent chunks as well.
-  if (nonTableText) {
-    if (isNewOrderSectionHeader(nonTableText)) exitSection = 'shipped'
-    else if (isGoodsLeftHeader(nonTableText)) exitSection = 'left_in_warehouse'
-    else if (isRepackagedSectionHeader(nonTableText)) exitSection = 'repacked'
-  }
+  const trailingText = normalizeHtmlText(html.slice(cursor))
+  exitSection = applySectionHint(exitSection, trailingText)
 
   return { products, lastMarks, exitSection }
 }
@@ -230,6 +241,33 @@ interface GridParseResult {
   products: ExtractedProduct[]
   lastMarks: string | null
   exitSection: Section
+}
+
+function detectBestHeaderRow(grid: string[][], docType: DocType): { index: number; score: number } {
+  const headerScanRows = Math.min(grid.length, 8)
+  let headerRowIdx = -1
+  let bestScore = 0
+
+  for (let r = 0; r < headerScanRows; r++) {
+    let score = 0
+    for (const cell of grid[r]) {
+      if (cell && resolveColumn(cell, docType) !== null) score++
+    }
+    if (score > bestScore) {
+      bestScore = score
+      headerRowIdx = r
+    }
+  }
+
+  return { index: headerRowIdx, score: bestScore }
+}
+
+function looksLikeHeaderlessDataTable(grid: string[][]): boolean {
+  if (grid.length === 0) return false
+  const row = grid[0] ?? []
+  const nonEmpty = row.filter(c => c.trim() !== '').length
+  if (nonEmpty < 8) return false
+  return row.some(c => /\bSANCARGO\b|\bRGO\b|\bMS-[A-Z0-9-]+\b|\b\d+-T-[A-Z0-9-]+\b/i.test(c))
 }
 
 /** When a header cell has colspan, expandHtmlTable duplicates the label across spanned columns. */
@@ -497,22 +535,7 @@ function parseGridToProducts(
 ): GridParseResult {
   if (grid.length < 2) return { products: [], lastMarks: inheritedMarks, exitSection: defaultSection }
 
-  const headerScanRows = Math.min(grid.length, 8)
-
-  // Find header row: the row (within first 8) with the most recognised column names
-  let headerRowIdx = -1
-  let bestScore = 0
-
-  for (let r = 0; r < headerScanRows; r++) {
-    let score = 0
-    for (const cell of grid[r]) {
-      if (cell && resolveColumn(cell, docType) !== null) score++
-    }
-    if (score > bestScore) {
-      bestScore = score
-      headerRowIdx = r
-    }
-  }
+  const { index: headerRowIdx, score: bestScore } = detectBestHeaderRow(grid, docType)
 
   // Require at least 3 known columns — otherwise this table is not a product table
   if (bestScore < 3 || headerRowIdx === -1) {
@@ -542,6 +565,16 @@ function parseGridToProducts(
     // Section banners: NEW ORDER, GOODS LEFT IN SANCARGO, stuffed/repacked container
     const rowText = row.filter(Boolean).join(' ')
     if (isNewOrderSectionHeader(rowText)) {
+      // "NEW ORDER" can reappear in repeated page headers. Once we've transitioned to
+      // GOODS LEFT or REPACKED, do not reset the section back to shipped.
+      if (currentSection !== 'shipped') {
+        if (parseMode === 'full') {
+          products.push(
+            syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:new_order_ignored')
+          )
+        }
+        continue
+      }
       currentSection = 'shipped'
       prevMarks = null
       if (parseMode === 'full') {
