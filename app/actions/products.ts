@@ -1728,6 +1728,115 @@ function parseWeight(w: string | null | undefined): number {
   return parseFloat((w ?? '0').replace(/[^\d.]/g, '')) || 0
 }
 
+function parsePackingCartons(packing: string | null | undefined): number | null {
+  const s = str(packing)
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*CTNS?$/i)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) ? n : null
+}
+
+function parseTrailingPackingFromDescription(description: string | null | undefined): { description: string | null; packing: string | null; qtyPerCarton: number | null } {
+  const s = str(description)
+  const m = s.match(/^(.*?)(\d+(?:\.\d+)?\s*pcs\/ctn)\s*$/i)
+  if (!m) return { description: s || null, packing: null, qtyPerCarton: null }
+  const qty = Number((m[2].match(/(\d+(?:\.\d+)?)/)?.[1] ?? ''))
+  return {
+    description: str(m[1]) || null,
+    packing: m[2],
+    qtyPerCarton: Number.isFinite(qty) ? qty : null,
+  }
+}
+
+function repairShiftedPackingListRow(row: MappedRow): MappedRow {
+  const packing = str(row.packing)
+  const hasCartonPacking = /^(\d+(?:\.\d+)?)\s*CTNS?$/i.test(packing)
+  const hasTrailingPcs = /\d+(?:\.\d+)?\s*pcs\/ctn\s*$/i.test(str(row.description))
+  const cartons = row.cartons ?? 0
+  const qty = row.quantity ?? 0
+  const dimL = row.dim_l_cm ?? 0
+  const unitPrice = row.cost_price ?? 0
+  const amount = row.total_amount_rmb ?? 0
+  const totalCbm = row.cbm ?? 0
+
+  const looksLikeClassicShift =
+    hasCartonPacking &&
+    hasTrailingPcs &&
+    cartons > 0 &&
+    qty > 0 &&
+    (cartons >= 100 || cartons > qty * 2) &&
+    qty >= 20 &&
+    qty <= 200 &&
+    dimL > 0 &&
+    dimL < 2 &&
+    unitPrice >= 500 &&
+    amount >= 0 &&
+    amount < 1000
+
+  const looksLikePartsShift =
+    hasCartonPacking &&
+    hasTrailingPcs &&
+    cartons > 0 &&
+    qty > 0 &&
+    (totalCbm >= 5 || (row.unit_weight != null && parseWeight(row.unit_weight) >= 200)) &&
+    amount > 0 &&
+    amount < 1000
+
+  if (!looksLikeClassicShift && !looksLikePartsShift) return row
+
+  const extracted = parseTrailingPackingFromDescription(row.description)
+  const fixedCartons = parsePackingCartons(row.packing) ?? row.cartons
+  const oldCost = row.cost_price
+  const oldAmount = row.total_amount_rmb
+
+  const repaired: MappedRow = {
+    ...row,
+    description: extracted.description,
+    packing: extracted.packing ?? row.packing,
+    cartons: fixedCartons,
+    quantity: row.cartons ?? row.quantity,
+    dim_h_cm: row.quantity,
+    dim_w_cm: row.dim_h_cm ?? null,
+    dim_l_cm: row.dim_w_cm ?? null,
+    unit_cbm: row.dim_l_cm ?? null,
+    cbm: row.unit_cbm ?? null,
+    unit_weight: row.cbm != null ? `${row.cbm}KGS` : null,
+    total_weight: row.unit_weight ?? null,
+    cost_price: (numOrNull(row.total_weight) ?? 0),
+    total_amount_rmb: oldCost ?? null,
+    remarks: row.remarks ? `${row.remarks};repair:shifted_manifest_columns` : 'repair:shifted_manifest_columns',
+  }
+
+  // Rows like "Food warmer parts ..." have no price/amount in the PDF.
+  if ((row.sku == null || row.sku === '') && /FOOD\s+WARMER\s+PARTS/i.test(str(row.description))) {
+    repaired.cost_price = 0
+    repaired.total_amount_rmb = null
+  } else if ((numOrNull(row.total_weight) ?? 0) <= 0 && (oldAmount ?? 0) > 0 && (oldAmount ?? 0) < 1000) {
+    repaired.total_amount_rmb = null
+  }
+
+  return repaired
+}
+
+function repairNoPackingAmountRow(row: MappedRow): MappedRow {
+  const isNoPacking = !str(row.packing)
+  const hasQtyInCartons = (row.cartons ?? 0) > 0 && row.quantity <= 0
+  const priceStoredInWeight = (numOrNull(row.total_weight) ?? 0) >= 50 && (numOrNull(row.total_weight) ?? 0) <= 1000
+  const amountStoredInCost = row.cost_price >= 1000
+  const amountLooksLikeBoxNo = (row.total_amount_rmb ?? 0) >= 100 && (row.total_amount_rmb ?? 0) <= 500
+  if (!isNoPacking || !hasQtyInCartons || !priceStoredInWeight || !amountStoredInCost || !amountLooksLikeBoxNo) return row
+
+  return {
+    ...row,
+    cartons: null,
+    quantity: row.cartons ?? 0,
+    cost_price: numOrNull(row.total_weight) ?? 0,
+    total_amount_rmb: row.cost_price > 0 ? row.cost_price : null,
+    total_weight: row.total_weight,
+    remarks: row.remarks ? `${row.remarks};repair:no_packing_amount_row` : 'repair:no_packing_amount_row',
+  }
+}
+
 /** True if col 0 of a data row looks like a valid product MARKS value */
 function isValidMarks(raw: string): boolean {
   const first = raw.split('\n')[0].trim()
@@ -1866,7 +1975,13 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       // If PACKING has no slash, the Chinese product name ended up there and
       // the real packing/qty/cbm/price columns are each shifted one to the right.
       const packingField = str(r['PACKING'] ?? '')
-      const isShifted = !!packingField && !/\//.test(packingField)
+      const packingLooksStandard = /\d+\s*[a-zA-Z]+\s*\/\s*ctn/i.test(packingField)
+      const packingLooksCartonCount = /^\d+(?:\.\d+)?\s*CTNS?$/i.test(packingField)
+      const packingLooksLikeName =
+        /[A-Za-z\u4E00-\u9FFF]/.test(packingField) && !/\d+(?:\.\d+)?\s*CTNS?/i.test(packingField)
+      // Shifted only when "PACKING" clearly contains name-like text, not carton counts like "10CTNS".
+      const isShifted =
+        !!packingField && !packingLooksStandard && !packingLooksCartonCount && packingLooksLikeName
 
       let name: string | null
       let packing: string | null
@@ -1935,6 +2050,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         selling_price: 0,
         reorder_level: 0,
       }
+      mappedRow = repairShiftedPackingListRow(mappedRow)
+      mappedRow = repairNoPackingAmountRow(mappedRow)
 
       const fromClaudeCore = str(r['__source']) === 'claude_core'
       const shouldUseLlm = !fromClaudeCore && (aiMode === 'full' || shouldUseLlmAlignment(r, mappedRow))

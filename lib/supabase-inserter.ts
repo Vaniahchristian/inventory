@@ -69,8 +69,13 @@ export async function insertToSupabase(
   const computedQty = physicalProducts.reduce((s, p) => s + (p.total_qty ?? 0), 0)
   const computedCBM = physicalProducts.reduce((s, p) => s + (p.total_cbm ?? 0), 0)
   const computedWeight = physicalProducts.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
-  // Amount: footer covers all sections including goods-left
-  const computedAmount = fullProducts.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+  // Amount: footer covers all sections including goods-left,
+  // but excludes carryover rows from "BEFORE GOODS ...".
+  const computedAmount = fullProducts.reduce((s, p) => {
+    const remarks = (p.remarks ?? '').toLowerCase()
+    if (remarks.includes('carryover:before_goods')) return s
+    return s + (p.total_amount_rmb ?? 0)
+  }, 0)
 
   const { error: totalsError } = await supabase.from('document_totals').insert({
     document_id,

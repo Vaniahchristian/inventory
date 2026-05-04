@@ -92,6 +92,23 @@ function isFooterLikeItem(p: DocumentItem): boolean {
   return false
 }
 
+function isStuffedBannerItem(p: DocumentItem): boolean {
+  const text = [p.marks ?? '', p.item_code ?? '', p.description ?? '', p.shop ?? '', p.packaging ?? '']
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase()
+  if (!text) return false
+  if (!text.includes('STUFFED INTO THIS CO') && !text.includes('STUFFED INTO THIS CONTAINER')) return false
+  const hasNoNumericPayload =
+    (p.total_cartons ?? 0) <= 0 &&
+    (p.total_quantity ?? 0) <= 0 &&
+    (p.total_cbm ?? 0) <= 0 &&
+    (p.total_weight_kg ?? 0) <= 0 &&
+    (p.total_amount_rmb ?? 0) <= 0
+  return hasNoNumericPayload
+}
+
 const SECTION_RENDER_ORDER: DocumentItem['section'][] = ['shipped', 'left_in_warehouse', 'repacked']
 
 const SECTION_LABELS: Record<DocumentItem['section'], string> = {
@@ -183,11 +200,24 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
   }), [filtered])
 
+  const footerGrandTotals = useMemo(() => {
+    if (selectedDocumentId === 'all' || !footerMeta) return null
+    return {
+      cartons: footerMeta.total_carton ?? null,
+      qty: null as number | null,
+      cbm: footerMeta.total_cbm ?? null,
+      weight: footerMeta.total_weight_kgs ?? null,
+      amount: footerMeta.total_cost_rmb ?? null,
+    }
+  }, [selectedDocumentId, footerMeta])
+
   const footerItems = useMemo(() => filtered.filter(isFooterLikeItem), [filtered])
 
   const groupedSections = useMemo(() =>
     SECTION_RENDER_ORDER.flatMap(sectionKey => {
-      const rows = filtered.filter(p => p.section === sectionKey && !isFooterLikeItem(p))
+      const rows = filtered.filter(
+        p => p.section === sectionKey && !isFooterLikeItem(p)
+      )
       if (rows.length === 0) return []
       return [{
         sectionKey,
@@ -522,6 +552,24 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
               groupedSections.map(({ sectionKey, rows, st }) => (
                 <React.Fragment key={sectionKey}>
                   {rows.map(p => (
+                    isStuffedBannerItem(p) ? (
+                      <tr key={p.id} className="border-b border-yellow-300 bg-yellow-200 font-semibold">
+                        <td className="p-2 text-slate-500 tabular-nums">{p.line_no ?? '-'}</td>
+                        <td className="p-2" colSpan={18}>
+                          {(p.description ?? p.marks ?? p.item_code ?? 'GOODS STUFFED INTO THIS CO').replace(/\s+/g, ' ').trim()}
+                        </td>
+                        <td className="p-1">
+                          <Button
+                            type="button" variant="ghost" size="icon"
+                            className="h-7 w-7 text-slate-300 hover:text-red-600"
+                            disabled={isPending}
+                            onClick={() => handleDeleteItem(p.id)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </td>
+                      </tr>
+                    ) : (
                     <tr key={p.id} className={`border-b border-slate-100 ${sectionClass(p.section)}`}>
                       <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
                       <td className="p-2 font-mono text-slate-800 whitespace-nowrap">{p.marks ?? '-'}</td>
@@ -553,21 +601,22 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                         </Button>
                       </td>
                     </tr>
+                    )
                   ))}
                   {/* Section subtotal row */}
                   <tr className={`text-xs ${SECTION_SUBTOTAL_STYLE[sectionKey]}`}>
                     <td className="p-2" colSpan={6}>
                       {SECTION_LABELS[sectionKey]} — {rows.length} rows
                     </td>
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.cartons, 0)}</td>
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.qty, 0)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.cartons, 0)} CTN</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.qty, 0)} pcs</td>
                     <td colSpan={3} />
                     <td />
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.cbm, 4)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.cbm, 4)} CBM</td>
                     <td />
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.weight, 3)}</td>
+                    <td className="p-2 text-right tabular-nums">{fmtN(st.weight, 3)} KGS</td>
                     <td />
-                    <td className="p-2 text-right tabular-nums">¥{fmtN(st.amount, 0)}</td>
+                    <td className="p-2 text-right tabular-nums">¥{fmtN(st.amount, 0)} RMB</td>
                     <td colSpan={3} />
                   </tr>
                 </React.Fragment>
@@ -619,16 +668,18 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
             )}
             {filtered.length > 0 && groupedSections.length > 1 && (
               <tr className="bg-slate-800 text-white font-bold border-t-2 border-slate-900 text-xs">
-                <td className="p-2" colSpan={6}>GRAND TOTAL — {filtered.length} rows</td>
-                <td className="p-2 text-right tabular-nums">{fmtN(totals.cartons, 0)}</td>
-                <td className="p-2 text-right tabular-nums">{fmtN(totals.qty, 0)}</td>
+                <td className="p-2" colSpan={6}>
+                  {footerGrandTotals ? 'PDF FOOTER TOTAL' : `GRAND TOTAL — ${filtered.length} rows`}
+                </td>
+                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.cartons ?? totals.cartons, 0)} CTN</td>
+                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.qty ?? totals.qty, 0)} pcs</td>
                 <td colSpan={3} />
                 <td />
-                <td className="p-2 text-right tabular-nums">{fmtN(totals.cbm, 4)}</td>
+                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.cbm ?? totals.cbm, 4)} CBM</td>
                 <td />
-                <td className="p-2 text-right tabular-nums">{fmtN(totals.weight, 3)}</td>
+                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.weight ?? totals.weight, 3)} KGS</td>
                 <td />
-                <td className="p-2 text-right tabular-nums">¥{fmtN(totals.amount, 0)}</td>
+                <td className="p-2 text-right tabular-nums">¥{fmtN(footerGrandTotals?.amount ?? totals.amount, 0)} RMB</td>
                 <td colSpan={3} />
               </tr>
             )}

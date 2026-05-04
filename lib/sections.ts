@@ -44,6 +44,7 @@ export function isRepackagedSectionHeader(raw: string): boolean {
   const u = raw.toUpperCase()
   return (
     u.includes('GOODS STUFFED INTO THIS CONTAINER') ||
+    u.includes('GOODS STUFFED INTO THIS CO') ||
     u.includes('REPACKAGED GOODS') ||
     u.includes('REPACKED GOODS') ||
     (u.includes('STUFFED INTO THIS CONTAINER') && /\bREPACK/.test(u))
@@ -53,9 +54,17 @@ export function isRepackagedSectionHeader(raw: string): boolean {
 /** Banner row "NEW ORDER" (possibly repeated across merged cells) — labels the main table block, not a product. */
 export function isNewOrderSectionHeader(raw: string): boolean {
   const joined = raw.replace(/\s+/g, ' ').trim()
-  if (!joined || !/\bNEW\s+ORDER\b/i.test(joined)) return false
-  const remainder = joined.replace(/\bNEW\s+ORDER\b/gi, '').replace(/[\s.:—\-_]/g, '').trim()
+  if (!joined || !/\bNEW\s+ORDERS?\b/i.test(joined)) return false
+  const remainder = joined.replace(/\bNEW\s+ORDERS?\b/gi, '').replace(/[\s.:—\-_]/g, '').trim()
   return remainder.length === 0
+}
+
+/** Historical carry-over section before current order block (e.g. "BEFORE GOODS MAG-4"). */
+export function isBeforeGoodsHeader(raw: string): boolean {
+  const u = raw.toUpperCase().replace(/\s+/g, ' ').trim()
+  if (!u) return false
+  if (/\bBEFORE\s+GOODS\b/.test(u)) return true
+  return false
 }
 
 export function extractStageSectionHeader(raw: string): string | null {

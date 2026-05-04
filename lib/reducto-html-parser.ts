@@ -14,10 +14,16 @@ import type { DocType } from './prompts'
 import { expandHtmlTable } from './html-table-parser'
 import { resolveColumn, type ProductField } from './column-map'
 import { FULL_EXTRACT_ITEM_CODE, SECTION_SUBTOTAL_ITEM_CODE, FOOTER_ITEM_CODE } from './full-extract'
-import { isGoodsLeftHeader, isNewOrderSectionHeader, isRepackagedSectionHeader } from './sections'
+import {
+  isBeforeGoodsHeader,
+  isGoodsLeftHeader,
+  isNewOrderSectionHeader,
+  isRepackagedSectionHeader,
+} from './sections'
 import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from './manifest-section-fixer'
 
 type Section = ExtractedProduct['section']
+const BEFORE_GOODS_REMARK = 'carryover:before_goods'
 
 /** `inventory` skips banners/subtotals (default). `full` emits every table row + non-table text as editable lines. */
 export type ParseMode = 'inventory' | 'full'
@@ -126,8 +132,10 @@ export function parseReductoChunks(
       if (!plainText) continue
 
       // Update section state from text headers between tables
-      if (isNewOrderSectionHeader(plainText) && currentSection === 'shipped') {
+      if (isNewOrderSectionHeader(plainText)) {
         currentSection = 'shipped'
+      } else if (isBeforeGoodsHeader(plainText)) {
+        currentSection = 'left_in_warehouse'
       } else if (isGoodsLeftHeader(plainText)) {
         currentSection = 'left_in_warehouse'
       } else if (isRepackagedSectionHeader(plainText)) {
@@ -173,7 +181,8 @@ function parseTableHtml(
 
   const applySectionHint = (section: Section, text: string): Section => {
     if (!text) return section
-    if (isNewOrderSectionHeader(text) && section === 'shipped') return 'shipped'
+    if (isNewOrderSectionHeader(text)) return 'shipped'
+    if (isBeforeGoodsHeader(text)) return 'left_in_warehouse'
     if (isGoodsLeftHeader(text)) return 'left_in_warehouse'
     if (isRepackagedSectionHeader(text)) return 'repacked'
     return section
@@ -632,6 +641,7 @@ function parseGridToProducts(
   if (includeNextAsHeader) dataStartRow = headerRowIdx + 2
 
   let currentSection: Section = defaultSection
+  let inBeforeGoodsBlock = false
   const products: ExtractedProduct[] = []
   let lineNo = startLineNo
   let prevMarks = inheritedMarks
@@ -645,17 +655,9 @@ function parseGridToProducts(
     // Section banners: NEW ORDER, GOODS LEFT IN SANCARGO, stuffed/repacked container
     const rowText = row.filter(Boolean).join(' ')
     if (isNewOrderSectionHeader(rowText)) {
-      // "NEW ORDER" can reappear in repeated page headers. Once we've transitioned to
-      // GOODS LEFT or REPACKED, do not reset the section back to shipped.
-      if (currentSection !== 'shipped') {
-        if (parseMode === 'full') {
-          products.push(
-            syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:new_order_ignored')
-          )
-        }
-        continue
-      }
+      // Explicit NEW ORDER/NEW ORDERS header starts the shipped block.
       currentSection = 'shipped'
+      inBeforeGoodsBlock = false
       prevMarks = null
       if (parseMode === 'full') {
         products.push(
@@ -664,8 +666,18 @@ function parseGridToProducts(
       }
       continue
     }
+    if (isBeforeGoodsHeader(rowText)) {
+      currentSection = 'left_in_warehouse'
+      inBeforeGoodsBlock = true
+      prevMarks = null
+      if (parseMode === 'full') {
+        products.push(syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:before_goods'))
+      }
+      continue
+    }
     if (isGoodsLeftHeader(rowText)) {
       currentSection = 'left_in_warehouse'
+      inBeforeGoodsBlock = false
       prevMarks = null
       if (parseMode === 'full') {
         products.push(syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:goods_left'))
@@ -674,6 +686,7 @@ function parseGridToProducts(
     }
     if (isRepackagedSectionHeader(rowText)) {
       currentSection = 'repacked'
+      inBeforeGoodsBlock = false
       prevMarks = null
       if (parseMode === 'full') {
         products.push(syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:repacked'))
@@ -740,7 +753,16 @@ function parseGridToProducts(
       continue
     }
 
-    const product = rawToProduct(raw, currentSection, lineNo, prevMarks)
+    let product = rawToProduct(raw, currentSection, lineNo, prevMarks)
+    if (docType === 'container_manifest' || docType === 'unknown') {
+      product = fixShiftedManifestRowColumns(product)
+    }
+    if (inBeforeGoodsBlock) {
+      product.section = 'left_in_warehouse'
+      product.remarks = product.remarks
+        ? `${product.remarks};${BEFORE_GOODS_REMARK}`
+        : BEFORE_GOODS_REMARK
+    }
     if (product.marks) prevMarks = product.marks
 
     products.push(product)
@@ -748,6 +770,66 @@ function parseGridToProducts(
   }
 
   return { products, lastMarks: prevMarks, exitSection: currentSection }
+}
+
+function looksLikeShiftedManifestRow(p: ExtractedProduct): boolean {
+  const pack = (p.packaging ?? '').trim()
+  const desc = (p.description ?? '').trim()
+  if (!/^\d+(?:\.\d+)?\s*CTNS?$/i.test(pack)) return false
+  if (!/\d+(?:\.\d+)?\s*pcs\/ctn/i.test(desc)) return false
+  const cartons = p.total_cartons ?? 0
+  const qty = p.total_qty ?? 0
+  const unitPrice = p.unit_price_rmb ?? 0
+  const dimL = p.dim_l_cm ?? 0
+  const totalAmount = p.total_amount_rmb ?? 0
+  if (cartons <= 0 || qty <= 0) return false
+  // Shift signature:
+  // - cartons contains quantity-scale values (e.g. 6000, 240, 156)
+  // - qty contains dimension-scale values (e.g. 47, 63, 145)
+  // - unit_price carries total amount value (large), amount may carry box-no prefix
+  const cartonsLooksLikeQty = cartons >= 100 || cartons > qty * 2
+  const qtyLooksLikeDim = qty >= 20 && qty <= 200
+  const unitPriceLooksLikeAmount = unitPrice >= 500
+  const dimLLooksLikeUnitCbm = dimL > 0 && dimL < 2
+  const amountLooksLikeBoxNoLeak = totalAmount > 0 && totalAmount < 1000
+  if (!cartonsLooksLikeQty) return false
+  if (!qtyLooksLikeDim) return false
+  if (!unitPriceLooksLikeAmount) return false
+  if (!dimLLooksLikeUnitCbm) return false
+  if (!amountLooksLikeBoxNoLeak && totalAmount > 0 && totalAmount < unitPrice * 0.1) return false
+  return true
+}
+
+function fixShiftedManifestRowColumns(p: ExtractedProduct): ExtractedProduct {
+  if (!looksLikeShiftedManifestRow(p)) return p
+  const out: ExtractedProduct = { ...p }
+
+  const desc = out.description ?? ''
+  const pcsMatch = desc.match(/(\d+(?:\.\d+)?\s*pcs\/ctn)\s*$/i)
+  if (pcsMatch) {
+    out.packaging = pcsMatch[1]
+    out.description = desc.slice(0, pcsMatch.index).trim() || null
+    const q = pcsMatch[1].match(/(\d+(?:\.\d+)?)/)
+    out.qty_per_carton = q ? parseFloat(q[1]) : out.qty_per_carton
+  }
+
+  const ctnFromPack = (p.packaging ?? '').match(/(\d+(?:\.\d+)?)/)
+  const fixedCartons = ctnFromPack ? parseFloat(ctnFromPack[1]) : p.total_cartons
+
+  out.total_amount_rmb = p.unit_price_rmb
+  out.unit_price_rmb = p.total_weight_kg
+  out.total_weight_kg = p.unit_weight_kg
+  out.unit_weight_kg = p.total_cbm
+  out.total_cbm = p.unit_cbm
+  out.unit_cbm = p.dim_l_cm
+  out.dim_l_cm = p.dim_w_cm
+  out.dim_w_cm = p.dim_h_cm
+  out.dim_h_cm = p.total_qty
+  out.total_qty = p.total_cartons
+  out.total_cartons = fixedCartons
+
+  out.remarks = out.remarks ? `${out.remarks};repair:shifted_manifest_columns` : 'repair:shifted_manifest_columns'
+  return out
 }
 
 function rawToProduct(
