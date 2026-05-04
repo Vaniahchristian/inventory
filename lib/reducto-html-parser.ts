@@ -525,6 +525,63 @@ function isDocumentFooterRow(raw: Record<string, string>, rowText: string): bool
   return false
 }
 
+/**
+ * Some sales-order pages arrive as flattened text rows (single-cell tables).
+ * Recover key identity fields so rows are editable/savable instead of `__FU`.
+ */
+function recoverSalesOrderFlatRow(
+  text: string,
+  section: Section,
+  lineNo: number,
+  inheritedMarks: string | null
+): ExtractedProduct | null {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  if (!flat) return null
+  const m = flat.match(
+    /^(\d{1,4})\s+([A-Z0-9]+(?:\s*-\s*[A-Z0-9]+)+)\s+([A-Z0-9]{2,}[-/A-Z0-9]*)\s+(.+)$/i
+  )
+  if (!m) return null
+
+  const marks = m[2].replace(/\s*-\s*/g, '-').trim()
+  const item = m[3].trim()
+  let desc = m[4].trim()
+  if (!item || !desc) return null
+
+  // Drop trailing numeric bundle/barcode tail but keep human-readable description.
+  desc = desc
+    .replace(/\s+\d{8,}\s*[\u4e00-\u9fffA-Za-z]{0,12}\s*$/, '')
+    .replace(/\s+(?:\d+(?:\.\d+)?\s*){7,}$/, '')
+    .trim()
+  if (!desc) return null
+
+  return {
+    line_no: lineNo,
+    marks: marks || inheritedMarks,
+    shop: null,
+    item_code: item,
+    description: desc,
+    packaging: null,
+    qty_per_carton: null,
+    total_cartons: null,
+    total_qty: null,
+    unit_price_rmb: null,
+    total_amount_rmb: null,
+    dim_l_cm: null,
+    dim_w_cm: null,
+    dim_h_cm: null,
+    unit_cbm: null,
+    total_cbm: null,
+    unit_weight_kg: null,
+    total_weight_kg: null,
+    barcode: null,
+    warehouse: null,
+    box_no_start: null,
+    box_no_end: null,
+    section,
+    remarks: 'full_extract:flattened_sales_order_row',
+  }
+}
+
 function parseGridToProducts(
   grid: string[][],
   defaultSection: Section,
@@ -539,6 +596,29 @@ function parseGridToProducts(
 
   // Require at least 3 known columns — otherwise this table is not a product table
   if (bestScore < 3 || headerRowIdx === -1) {
+    if (parseMode === 'full') {
+      const rows = grid
+        .map(row => row.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+      const products = rows.map((text, idx) => {
+        if (docType === 'sales_order') {
+          const recovered = recoverSalesOrderFlatRow(
+            text,
+            defaultSection,
+            startLineNo + idx,
+            inheritedMarks
+          )
+          if (recovered) return recovered
+        }
+        return syntheticFullExtractRow(
+          startLineNo + idx,
+          text,
+          defaultSection,
+          'full_extract:unmapped_table_row'
+        )
+      })
+      return { products, lastMarks: inheritedMarks, exitSection: defaultSection }
+    }
     return { products: [], lastMarks: inheritedMarks, exitSection: defaultSection }
   }
 

@@ -27,7 +27,10 @@ export async function insertToSupabase(
     throw new Error('No rows to save — extraction returned no product rows.')
   }
   const docType = doc.document_type
-  const fullProducts = dedupeShippedCartonCounts(fixManifestSectionContinuity(filtered, docType), docType)
+  const fullProducts = normalizeSalesOrderProducts(
+    dedupeShippedCartonCounts(fixManifestSectionContinuity(filtered, docType), docType),
+    doc
+  )
   // Validation uses shipped-only rows (totals cross-check); insertion stores all sections.
   const shippedProducts = filterToInventoryProducts(fullProducts)
   const products = fullProducts
@@ -200,4 +203,171 @@ function computeOverallConfidence(validation: ValidationResult): number {
 
 function round(n: number): number {
   return Math.round(n * 100) / 100
+}
+
+function normalizeSalesOrderProducts(
+  products: ExtractedProduct[],
+  doc: ExtractedDocument
+): ExtractedProduct[] {
+  if (doc.document_type !== 'sales_order') return products
+
+  const out = products.map(p => ({ ...p }))
+  const normCode = (code: string | null | undefined): string => (code ?? '').toUpperCase().replace(/[^A-Z0-9-]/g, '')
+  const codeStem = (code: string | null | undefined): string => {
+    const c = normCode(code)
+    if (!c) return ''
+    return c.replace(/-[A-Z0-9]+$/, '').slice(0, 5) || c.slice(0, 5)
+  }
+  const descTokens = (desc: string | null | undefined): string[] =>
+    (desc ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9.\s"]/g, ' ')
+      .split(/\s+/)
+      .filter(t => t.length >= 3)
+
+  const donorRows = out.filter(p => (p.unit_price_rmb ?? 0) > 0 && (p.total_qty ?? 0) > 0)
+  const isQtyPlausible = (p: ExtractedProduct): boolean => {
+    const qty = p.total_qty ?? 0
+    if (qty <= 0) return false
+    const cartons = p.total_cartons ?? 0
+    const ppc = p.qty_per_carton ?? 0
+    if (cartons > 0 && ppc > 0) {
+      const expected = cartons * ppc
+      if (expected <= 0) return false
+      const ratio = qty / expected
+      // Accept near-exact qty; reject known OCR explosions like 60->660.
+      return ratio >= 0.8 && ratio <= 1.25
+    }
+    return true
+  }
+  const inferQtyFromAmount = (p: ExtractedProduct): number | null => {
+    const amount = p.total_amount_rmb ?? 0
+    const price = p.unit_price_rmb ?? 0
+    if (amount <= 0 || price <= 0) return null
+    const q = amount / price
+    const rq = Math.round(q)
+    if (!Number.isFinite(q) || rq <= 0) return null
+    if (Math.abs(q - rq) > 0.02) return null
+    return rq
+  }
+  const looksLikeBorrowedPhysical = (p: ExtractedProduct): boolean => {
+    const amount = p.total_amount_rmb ?? 0
+    if (amount <= 0) return false
+    const weight = p.total_weight_kg ?? null
+    const cbm = p.total_cbm ?? null
+    if (weight !== null && Math.abs(amount - weight) <= 0.2) return true
+    if (cbm !== null && Math.abs(amount - cbm) <= 0.02) return true
+    return false
+  }
+
+  // If qty appears noisy but amount+price are coherent, restore qty from amount.
+  for (const p of out) {
+    const inferredQty = inferQtyFromAmount(p)
+    if (inferredQty === null) continue
+    const qty = p.total_qty ?? 0
+    if (qty <= 0 || qty === inferredQty) {
+      p.total_qty = inferredQty
+      continue
+    }
+    if (qty > inferredQty * 2) {
+      p.total_qty = inferredQty
+    }
+  }
+
+  // Fill missing row amount when qty and unit price exist and qty is plausible.
+  for (const p of out) {
+    const qty = p.total_qty ?? 0
+    const price = p.unit_price_rmb ?? 0
+    const amount = p.total_amount_rmb ?? 0
+    if (qty > 0 && price > 0 && amount <= 0 && isQtyPlausible(p)) {
+      p.total_amount_rmb = round(qty * price)
+    }
+  }
+
+  // If unit price is missing (or amount looks copied from physical columns),
+  // infer from similar rows and derive amount.
+  for (const p of out) {
+    const qty = p.total_qty ?? 0
+    const amount = p.total_amount_rmb ?? 0
+    const needsRepair = amount <= 0 || looksLikeBorrowedPhysical(p)
+    if (qty <= 0 || !needsRepair || (p.unit_price_rmb ?? 0) > 0) continue
+
+    const pStem = codeStem(p.item_code)
+    const pTokens = new Set(descTokens(p.description))
+    const ppc = p.qty_per_carton ?? 0
+
+    const scored = donorRows
+      .map(d => {
+        const dStem = codeStem(d.item_code)
+        const dTokens = descTokens(d.description)
+        const overlap = dTokens.filter(t => pTokens.has(t)).length
+        let score = 0
+        if (pStem && dStem && pStem === dStem) score += 4
+        if (overlap >= 2) score += 3
+        if (ppc > 0 && (d.qty_per_carton ?? 0) > 0 && Math.abs((d.qty_per_carton ?? 0) - ppc) <= 2)
+          score += 1
+        return { score, price: d.unit_price_rmb ?? 0 }
+      })
+      .filter(s => s.score >= 3 && s.price > 0)
+      .sort((a, b) => b.score - a.score)
+
+    if (scored.length === 0) continue
+    const inferredPrice = scored[0].price
+    p.unit_price_rmb = inferredPrice
+    p.total_amount_rmb = round(qty * inferredPrice)
+  }
+
+  // Final guard: correct clearly borrowed physical values (amount ~= kg/cbm)
+  // only when qty is plausible for the carton/packing structure.
+  for (const p of out) {
+    const qty = p.total_qty ?? 0
+    const price = p.unit_price_rmb ?? 0
+    const amount = p.total_amount_rmb ?? 0
+    if (qty <= 0 || price <= 0) continue
+    const expected = round(qty * price)
+    const drift = Math.abs(amount - expected)
+    const severeDrift = drift > Math.max(5, expected * 0.25)
+    if (
+      amount <= 0 ||
+      (severeDrift && looksLikeBorrowedPhysical(p) && isQtyPlausible(p))
+    ) {
+      p.total_amount_rmb = expected
+    }
+  }
+
+  const footerCartons = doc.footer_totals.total_cartons ?? null
+  if (footerCartons === null || footerCartons <= 0) return out
+
+  let computedCartons = out.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
+  let overflow = computedCartons - footerCartons
+  if (overflow <= 0) return out
+
+  // Reconcile known OCR artifact: carton count inflated compared to qty/ctn.
+  // Limit to higher qty-per-carton rows where this pattern appears frequently.
+  const candidates = out
+    .map((p, idx) => {
+      const ctn = p.total_cartons ?? 0
+      const qty = p.total_qty ?? 0
+      const ppc = p.qty_per_carton ?? 0
+      if (ctn <= 0 || qty <= 0 || ppc < 24) return null
+      const inferred = qty / ppc
+      const rounded = Math.round(inferred)
+      if (!Number.isFinite(inferred) || rounded <= 0) return null
+      if (Math.abs(inferred - rounded) > 0.02) return null
+      if (rounded >= ctn) return null
+      const reduction = ctn - rounded
+      if (reduction < 4) return null
+      return { idx, rounded, reduction, lineNo: p.line_no ?? idx + 1 }
+    })
+    .filter((v): v is { idx: number; rounded: number; reduction: number; lineNo: number } => v !== null)
+    .sort((a, b) => (b.reduction - a.reduction) || (b.lineNo - a.lineNo))
+
+  for (const c of candidates) {
+    if (overflow <= 0) break
+    if (c.reduction > overflow) continue
+    out[c.idx].total_cartons = c.rounded
+    overflow -= c.reduction
+  }
+
+  return out
 }
