@@ -193,12 +193,17 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
       let rowNo = rowNoStart
 
       for (const p of rows) {
-        if (!p.name || !p.packing) {
+        if (!p.name) {
           singles.push({ ...p, _variants: 1, _rowNo: 0 })
           continue
         }
         const baseName = extractBaseName(p.name)
-        const key = `${baseName.toLowerCase()}||${p.packing.trim().toLowerCase()}`
+        const packingTrimmed = (p.packing ?? '').trim()
+        // Keep both merge conditions:
+        // 1) same base name + packing + quantity
+        // 2) same base name + quantity ONLY when packing is missing
+        const packingKey = packingTrimmed ? packingTrimmed.toLowerCase() : '__no_packing__'
+        const key = `${baseName.toLowerCase()}||${p.quantity}||${packingKey}`
         const existing = map.get(key)
         if (!existing) {
           map.set(key, { ...p, name: baseName, _variants: 1, _rowNo: rowNo++ })
