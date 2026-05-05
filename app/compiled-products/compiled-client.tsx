@@ -434,7 +434,7 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
                     </TableRow>
                   )
                 }
-                const isZeroStock = (p.cartons ?? 0) === 0 || p.quantity === 0
+                const isZeroStock = (p.cartons ?? 0) === 0 && p.quantity === 0
                 const isMarkedOutOfStock = !isZeroStock && outOfStockIds.has(p.id)
                 const rowClass = isZeroStock
                   ? 'bg-red-100 hover:bg-red-100'

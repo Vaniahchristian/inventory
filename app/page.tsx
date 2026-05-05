@@ -22,7 +22,7 @@ export default async function DashboardPage() {
   ])
 
   const outOfStockProducts = products
-    .filter(p => (p.cartons ?? 0) === 0 || p.quantity === 0)
+    .filter(p => (p.cartons ?? 0) === 0 && p.quantity === 0)
     .slice(0, 20)
 
   const lowStockProducts = products
@@ -32,7 +32,7 @@ export default async function DashboardPage() {
     })
     .slice(0, 10)
 
-  const outOfStockCount = products.filter(p => (p.cartons ?? 0) === 0 || p.quantity === 0).length
+  const outOfStockCount = products.filter(p => (p.cartons ?? 0) === 0 && p.quantity === 0).length
 
   return (
     <div className="p-6 space-y-6">
@@ -68,12 +68,12 @@ export default async function DashboardPage() {
         />
       </div>
 
-      {/* Out of Stock & Zero CTN */}
+      {/* Both CTN and qty zero */}
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold text-slate-700 flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-red-500" />
-            Out of Stock &amp; Missing Cartons
+            Out of Stock
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
@@ -92,10 +92,7 @@ export default async function DashboardPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {outOfStockProducts.map(p => {
-                  const zeroCtns = (p.cartons ?? 0) === 0
-                  const zeroQty = p.quantity === 0
-                  return (
+                {outOfStockProducts.map(p => (
                     <TableRow key={p.id} className="text-xs bg-red-50">
                       <TableCell className="font-mono">{p.sku ?? '-'}</TableCell>
                       <TableCell className="font-medium">{p.name ?? '-'}</TableCell>
@@ -103,17 +100,10 @@ export default async function DashboardPage() {
                       <TableCell className="text-right font-bold text-red-700">{p.cartons ?? 0}</TableCell>
                       <TableCell className="text-right">{p.quantity}</TableCell>
                       <TableCell>
-                        {zeroCtns && zeroQty ? (
-                          <Badge variant="destructive" className="text-[10px]">Out of Stock</Badge>
-                        ) : zeroCtns ? (
-                          <Badge variant="outline" className="border-red-400 text-red-700 bg-red-50 text-[10px]">Zero CTN</Badge>
-                        ) : (
-                          <Badge variant="outline" className="border-amber-400 text-amber-700 bg-amber-50 text-[10px]">Zero Qty</Badge>
-                        )}
+                        <Badge variant="destructive" className="text-[10px]">Out of Stock</Badge>
                       </TableCell>
                     </TableRow>
-                  )
-                })}
+                  ))}
               </TableBody>
             </Table>
           )}
