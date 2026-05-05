@@ -1,10 +1,3 @@
-export type Category = {
-  id: string
-  name: string
-  description: string | null
-  created_at: string
-}
-
 export type Supplier = {
   id: string
   name: string
@@ -21,7 +14,6 @@ export type Product = {
   sku: string | null
   source_item_no?: string | null
   description: string | null
-  category_id: string | null
   supplier_id: string | null
   unit: string
   cost_price: number
@@ -54,7 +46,6 @@ export type Product = {
   document_date?: string | null
   created_at: string
   updated_at: string
-  categories?: Category | null
   suppliers?: Supplier | null
 }
 
@@ -152,7 +143,6 @@ export type DocumentItem = {
   section: 'shipped' | 'left_in_warehouse' | 'repacked'
   remarks: string | null
   validation_flags: string[]
-  review_status: string
   created_at: string
   documents?: {
     source_file_name: string | null

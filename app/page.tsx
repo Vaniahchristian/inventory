@@ -134,7 +134,6 @@ export default async function DashboardPage() {
                 <TableRow className="text-xs">
                   <TableHead>SKU</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Category</TableHead>
                   <TableHead className="text-right">Qty</TableHead>
                   <TableHead className="text-right">Reorder At</TableHead>
                   <TableHead>Status</TableHead>
@@ -145,7 +144,6 @@ export default async function DashboardPage() {
                   <TableRow key={p.id} className="text-xs">
                     <TableCell className="font-mono">{p.sku}</TableCell>
                     <TableCell className="font-medium">{p.name}</TableCell>
-                    <TableCell>{p.categories?.name ?? '-'}</TableCell>
                     <TableCell className="text-right">{p.quantity}</TableCell>
                     <TableCell className="text-right">{p.reorder_level}</TableCell>
                     <TableCell>

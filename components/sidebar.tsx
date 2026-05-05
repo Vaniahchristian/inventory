@@ -7,12 +7,10 @@ import {
   Package,
   ArrowLeftRight,
   Truck,
-  Tag,
   Menu,
   X,
   Boxes,
   FileSpreadsheet,
-  ShieldAlert,
   MonitorPlay,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -25,9 +23,7 @@ const navItems = [
   { href: '/products', label: 'Products', icon: Package },
   { href: '/stock', label: 'Stock Movements', icon: ArrowLeftRight },
   { href: '/suppliers', label: 'Suppliers', icon: Truck },
-  { href: '/categories', label: 'Categories', icon: Tag },
   { href: '/compiled-products', label: 'Compiled Products', icon: FileSpreadsheet },
-  { href: '/review-queue', label: 'Review Queue', icon: ShieldAlert },
   { href: '/live-view', label: 'Live View', icon: MonitorPlay },
 ]
 

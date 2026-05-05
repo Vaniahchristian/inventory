@@ -4,7 +4,6 @@ import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 import type { ImportMeta, ProductDocumentRef } from '@/lib/types'
 import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle, makeStageTotalSku } from '@/lib/sections'
-import { GATE_TOLERANCE, BLOCKING_FLAGS } from '@/lib/validation-gate'
 import Anthropic from '@anthropic-ai/sdk'
 import { callLlm } from '@/lib/llm-client'
 
@@ -351,7 +350,7 @@ export async function getProducts() {
       () =>
         supabase
           .from('products')
-          .select('*, categories(id,name), suppliers(id,name)')
+          .select('*, suppliers(id,name)')
           .is('source_document_id', null),
       'getProducts.manual'
     ),
@@ -359,7 +358,7 @@ export async function getProducts() {
       () =>
         supabase
           .from('products')
-          .select('*, categories(id,name), suppliers(id,name)')
+          .select('*, suppliers(id,name)')
           .not('source_document_id', 'is', null),
       'getProducts.docLinked'
     ),
@@ -524,411 +523,6 @@ export async function getDocumentImportMeta(documentId: string): Promise<Documen
   return { meta, paymentRows }
 }
 
-export async function getReviewDocuments() {
-  const { data, error } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('documents')
-        .select('id, document_type, source_file_name, client_name, container_no, extraction_status, extraction_confidence, validation_flags, publish_state, created_at')
-        .eq('publish_state', 'staged')
-        .in('extraction_status', ['review_needed', 'failed', 'approved'])
-        .order('created_at', { ascending: false })
-        .limit(200),
-    'getReviewDocuments'
-  )
-  if (error) throw new Error(error.message)
-  return data ?? []
-}
-
-type ReviewRowStatus = 'pending' | 'accepted' | 'rejected'
-
-type ReviewRow = {
-  id: string
-  line_no: number
-  item_code: string | null
-  description: string | null
-  packaging: string | null
-  total_cartons: number | null
-  total_quantity: number | null
-  unit_price_rmb: number | null
-  total_amount_rmb: number | null
-  total_cbm: number | null
-  total_weight_kg: number | null
-  validation_flags: string[]
-  review_status: ReviewRowStatus
-  model_source: string | null
-  rerun_count: number
-}
-
-function parseJsonArray(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map(v => String(v))
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value)
-      return Array.isArray(parsed) ? parsed.map(v => String(v)) : []
-    } catch {
-      return []
-    }
-  }
-  return []
-}
-
-async function recomputeDocumentReviewStatus(documentId: string) {
-  const { data: currentDoc, error: currentDocErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('documents')
-        .select('publish_state, extraction_status, published_at, published_by')
-        .eq('id', documentId)
-        .maybeSingle(),
-    'recomputeDocumentReviewStatus.currentDoc'
-  )
-  if (currentDocErr) throw new Error(currentDocErr.message)
-
-  const { data: items, error: itemsErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .select('id, line_no, total_cartons, total_quantity, total_cbm, total_weight_kg, total_amount_rmb, validation_flags, review_status')
-        .eq('document_id', documentId)
-        .order('line_no', { ascending: true }),
-    'recomputeDocumentReviewStatus.items'
-  )
-  if (itemsErr) throw new Error(itemsErr.message)
-  const rows = (items ?? []) as Array<Record<string, unknown>>
-  const accepted = rows.filter(r => String(r.review_status ?? 'pending') === 'accepted')
-  const acceptedCount = accepted.length
-  const totalCount = rows.length
-  const rowParityMatch = acceptedCount === totalCount && totalCount > 0
-
-  const computed = {
-    cartons: accepted.reduce((s, r) => s + (numOrNull(r.total_cartons) ?? 0), 0),
-    qty: accepted.reduce((s, r) => s + (numOrNull(r.total_quantity) ?? 0), 0),
-    cbm: accepted.reduce((s, r) => s + (numOrNull(r.total_cbm) ?? 0), 0),
-    weight: accepted.reduce((s, r) => s + (numOrNull(r.total_weight_kg) ?? 0), 0),
-    amount: accepted.reduce((s, r) => s + (numOrNull(r.total_amount_rmb) ?? 0), 0),
-  }
-
-  const { data: totalsRow, error: totalsErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_totals')
-        .select('total_cartons, total_quantity, total_cbm, total_weight_kg, total_amount_rmb')
-        .eq('document_id', documentId)
-        .maybeSingle(),
-    'recomputeDocumentReviewStatus.totals'
-  )
-  if (totalsErr) throw new Error(totalsErr.message)
-
-  const expected = {
-    cartons: numOrNull(totalsRow?.total_cartons),
-    qty: numOrNull(totalsRow?.total_quantity),
-    cbm: numOrNull(totalsRow?.total_cbm),
-    weight: numOrNull(totalsRow?.total_weight_kg),
-    amount: numOrNull(totalsRow?.total_amount_rmb),
-  }
-
-  const hasExpectedTotals = expected.cartons != null && expected.cbm != null && expected.weight != null && expected.amount != null
-  const totalsMatch = hasExpectedTotals && (
-    Math.abs(computed.cartons - (expected.cartons ?? 0)) <= GATE_TOLERANCE.cartons &&
-    (expected.qty == null || Math.abs(computed.qty - expected.qty) <= GATE_TOLERANCE.qty) &&
-    Math.abs(computed.cbm - (expected.cbm ?? 0)) <= GATE_TOLERANCE.cbm &&
-    Math.abs(computed.weight - (expected.weight ?? 0)) <= GATE_TOLERANCE.weight_kg &&
-    Math.abs(computed.amount - (expected.amount ?? 0)) <= GATE_TOLERANCE.amount_rmb
-  )
-
-  const hasBlockingFlags = accepted.some(r => parseJsonArray(r.validation_flags).some(f => BLOCKING_FLAGS.has(f)))
-  const status = rowParityMatch && totalsMatch && !hasBlockingFlags ? 'approved' : 'review_needed'
-  const keepPublished = String(currentDoc?.publish_state ?? '') === 'published'
-  if (keepPublished && status !== 'approved') {
-    logImport('recomputeDocumentReviewStatus preserving published state despite gate mismatch', {
-      documentId,
-      computedStatus: status,
-    })
-  }
-
-  await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_totals')
-        .upsert({
-          document_id: documentId,
-          computed_cartons: computed.cartons,
-          computed_quantity: computed.qty,
-          computed_cbm: computed.cbm,
-          computed_weight_kg: computed.weight,
-          computed_amount_rmb: computed.amount,
-          totals_match: !!totalsMatch,
-          totals_diff: {
-            cartons: expected.cartons == null ? null : +(computed.cartons - expected.cartons).toFixed(2),
-            quantity: expected.qty == null ? null : +(computed.qty - expected.qty).toFixed(2),
-            cbm: expected.cbm == null ? null : +(computed.cbm - expected.cbm).toFixed(4),
-            weight: expected.weight == null ? null : +(computed.weight - expected.weight).toFixed(2),
-            amountRmb: expected.amount == null ? null : +(computed.amount - expected.amount).toFixed(2),
-          },
-        }, { onConflict: 'document_id' }),
-    'recomputeDocumentReviewStatus.upsertTotals'
-  )
-
-  await withSupabaseRetry(
-    () =>
-      supabase
-        .from('documents')
-        .update({
-          extraction_status: keepPublished ? 'approved' : status,
-          publish_state: keepPublished ? 'published' : 'staged',
-          ...(keepPublished
-            ? {}
-            : (status !== 'approved'
-                ? { published_at: null, published_by: null }
-                : {})),
-        })
-        .eq('id', documentId),
-    'recomputeDocumentReviewStatus.updateDocument'
-  )
-
-  return {
-    rowParityMatch,
-    totalsMatch: !!totalsMatch,
-    hasBlockingFlags,
-    status,
-    counts: { accepted: acceptedCount, total: totalCount },
-  }
-}
-
-export async function getReviewDocumentItems(documentId: string) {
-  const { data: doc, error: docErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('documents')
-        .select('id, source_file_name, extraction_status, validation_flags')
-        .eq('id', documentId)
-        .single(),
-    'getReviewDocumentItems.document'
-  )
-  if (docErr) throw new Error(docErr.message)
-
-  const { data: items, error: itemsErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .select('id, line_no, item_code, description, packaging, total_cartons, total_quantity, unit_price_rmb, total_amount_rmb, total_cbm, total_weight_kg, validation_flags, review_status, model_source, rerun_count')
-        .eq('document_id', documentId)
-        .order('line_no', { ascending: true }),
-    'getReviewDocumentItems.items'
-  )
-  if (itemsErr) throw new Error(itemsErr.message)
-
-  const gate = await recomputeDocumentReviewStatus(documentId)
-
-  return {
-    document: doc,
-    gate,
-    items: ((items ?? []) as Array<Record<string, unknown>>).map((r) => ({
-      id: String(r.id),
-      line_no: intOrNull(r.line_no) ?? 0,
-      item_code: str(r.item_code) || null,
-      description: str(r.description) || null,
-      packaging: str(r.packaging) || null,
-      total_cartons: numOrNull(r.total_cartons),
-      total_quantity: numOrNull(r.total_quantity),
-      unit_price_rmb: numOrNull(r.unit_price_rmb),
-      total_amount_rmb: numOrNull(r.total_amount_rmb),
-      total_cbm: numOrNull(r.total_cbm),
-      total_weight_kg: numOrNull(r.total_weight_kg),
-      validation_flags: parseJsonArray(r.validation_flags),
-      review_status: (str(r.review_status) || 'pending') as ReviewRowStatus,
-      model_source: str(r.model_source) || null,
-      rerun_count: intOrNull(r.rerun_count) ?? 0,
-    } satisfies ReviewRow)),
-  }
-}
-
-export async function deleteReviewDocument(documentId: string) {
-  const { data: currentDoc, error: currentDocErr } = await withSupabaseRetry(
-    () => supabase.from('documents').select('id, source_file_name').eq('id', documentId).single(),
-    'deleteReviewDocument.getDocument'
-  )
-  if (currentDocErr) throw new Error(currentDocErr.message)
-  const sourceFileName = str((currentDoc as Record<string, unknown>)?.source_file_name) || null
-
-  await withSupabaseRetry(
-    () => supabase.from('products').delete().eq('source_document_id', documentId),
-    'deleteReviewDocument.products'
-  )
-  await withSupabaseRetry(
-    () => supabase.from('import_jobs').delete().eq('document_id', documentId),
-    'deleteReviewDocument.importJobs'
-  )
-  if (sourceFileName) {
-    await withSupabaseRetry(
-      () => supabase.from('product_import_audit').delete().eq('source_file_name', sourceFileName),
-      'deleteReviewDocument.importAudit'
-    )
-  }
-  const { error } = await withSupabaseRetry(
-    () => supabase.from('documents').delete().eq('id', documentId),
-    'deleteReviewDocument.document'
-  )
-  if (error) throw new Error(error.message)
-  revalidatePath('/review-queue')
-  revalidatePath('/products')
-  revalidatePath('/compiled-products')
-  revalidatePath('/')
-}
-
-export async function setReviewItemStatus(itemId: string, status: ReviewRowStatus, note?: string) {
-  const { data: item, error: itemErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .select('id, document_id, review_status')
-        .eq('id', itemId)
-        .single(),
-    'setReviewItemStatus.getItem'
-  )
-  if (itemErr) throw new Error(itemErr.message)
-
-  const { error } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .update({
-          review_status: status,
-          review_note: note ?? null,
-          reviewed_at: new Date().toISOString(),
-        })
-        .eq('id', itemId),
-    'setReviewItemStatus.updateItem'
-  )
-  if (error) throw new Error(error.message)
-
-  await recomputeDocumentReviewStatus(String(item.document_id))
-  revalidatePath('/review-queue')
-}
-
-export async function rerunReviewItemWithDeepseek(itemId: string) {
-  const { data: item, error: itemErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .select('id, document_id, line_no, item_code, description, packaging, total_cartons, total_quantity, unit_price_rmb, total_amount_rmb, total_cbm, total_weight_kg, validation_flags, rerun_count')
-        .eq('id', itemId)
-        .single(),
-    'rerunReviewItemWithDeepseek.getItem'
-  )
-  if (itemErr) throw new Error(itemErr.message)
-
-  const prompt = [
-    'Fix this one extracted shipping row and return ONLY JSON.',
-    'Keys: name, description, shop_name, packing, cartons, quantity, unit_cbm, cbm, unit_weight, total_weight, cost_price, total_amount_rmb',
-    'Use null where unknown. Keep all numbers numeric.',
-    `Row: ${JSON.stringify(item)}`,
-  ].join('\n')
-
-  const llm = await callLlm(
-    [
-      { role: 'system', content: 'You are a strict JSON extraction engine.' },
-      { role: 'user', content: prompt },
-    ],
-    { timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 12000), retries: 1 }
-  )
-  if (!llm?.content) throw new Error('DeepSeek/Groq rerun returned no content')
-  const parsed = parseLlmJson(llm.content)
-  if (!parsed) throw new Error('DeepSeek/Groq rerun returned invalid JSON')
-
-  const before = {
-    description: str(item.description) || null,
-    packaging: str(item.packaging) || null,
-    total_cartons: numOrNull(item.total_cartons),
-    total_quantity: numOrNull(item.total_quantity),
-    unit_price_rmb: numOrNull(item.unit_price_rmb),
-    total_amount_rmb: numOrNull(item.total_amount_rmb),
-    total_cbm: numOrNull(item.total_cbm),
-    total_weight_kg: numOrNull(item.total_weight_kg),
-  }
-  const after = {
-    description: parsed.description ?? before.description,
-    packaging: parsed.packing ?? before.packaging,
-    total_cartons: parsed.cartons ?? before.total_cartons,
-    total_quantity: parsed.quantity ?? before.total_quantity,
-    unit_price_rmb: parsed.cost_price ?? before.unit_price_rmb,
-    total_amount_rmb: parsed.total_amount_rmb ?? before.total_amount_rmb,
-    total_cbm: parsed.cbm ?? before.total_cbm,
-    total_weight_kg: numOrNull(parsed.total_weight) ?? before.total_weight_kg,
-  }
-
-  const changed: Array<{ field: string; oldValue: unknown; newValue: unknown }> = []
-  ;(Object.keys(after) as Array<keyof typeof after>).forEach((k) => {
-    if (String(before[k]) !== String(after[k])) changed.push({ field: k, oldValue: before[k], newValue: after[k] })
-  })
-
-  const reviewFlags = computeValidationFlags({
-    sku: str(item.item_code) || null,
-    name: parsed.name ?? (str(item.item_code) || null),
-    description: after.description,
-    shop_name: parsed.shop_name ?? null,
-    unit: 'pcs',
-    packing: after.packaging,
-    cartons: intOrNull(after.total_cartons),
-    quantity: intOrNull(after.total_quantity) ?? 0,
-    unit_cbm: parsed.unit_cbm ?? null,
-    cbm: after.total_cbm,
-    unit_weight: parsed.unit_weight ?? null,
-    total_weight: parsed.total_weight ?? null,
-    cost_price: numOrNull(after.unit_price_rmb) ?? 0,
-    total_amount_rmb: after.total_amount_rmb,
-    selling_price: 0,
-    reorder_level: 0,
-  }, { requirePacking: true })
-
-  const { error: updateErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .update({
-          description: after.description,
-          packaging: after.packaging,
-          total_cartons: after.total_cartons,
-          total_quantity: after.total_quantity,
-          unit_price_rmb: after.unit_price_rmb,
-          total_amount_rmb: after.total_amount_rmb,
-          total_cbm: after.total_cbm,
-          total_weight_kg: after.total_weight_kg,
-          validation_flags: reviewFlags,
-          model_source: llm.provider,
-          rerun_count: (intOrNull(item.rerun_count) ?? 0) + 1,
-          review_status: 'pending',
-          reviewed_at: new Date().toISOString(),
-        })
-        .eq('id', itemId),
-    'rerunReviewItemWithDeepseek.updateItem'
-  )
-  if (updateErr) throw new Error(updateErr.message)
-
-  if (changed.length > 0) {
-    await withSupabaseRetry(
-      () =>
-        supabase
-          .from('extraction_field_reviews')
-          .insert(
-            changed.map((c) => ({
-              document_item_id: itemId,
-              field_name: c.field,
-              old_value: c.oldValue == null ? null : String(c.oldValue),
-              new_value: c.newValue == null ? null : String(c.newValue),
-              reason: 'row_rerun_deepseek',
-              reviewed_by: 'system',
-            }))
-          ),
-      'rerunReviewItemWithDeepseek.audit'
-    )
-  }
-
-  await recomputeDocumentReviewStatus(String(item.document_id))
-  revalidatePath('/review-queue')
-}
-
 export async function getProductDocuments(): Promise<ProductDocumentRef[]> {
   const { data: productRows, error: prodErr } = await withSupabaseRetry(
     () =>
@@ -970,172 +564,6 @@ export async function getProductDocuments(): Promise<ProductDocumentRef[]> {
   return merged.slice(0, 300)
 }
 
-export async function approveDocumentReview(id: string) {
-  const gate = await recomputeDocumentReviewStatus(id)
-  if (!gate.rowParityMatch || !gate.totalsMatch || gate.hasBlockingFlags) {
-    logImport('approveDocumentReview override: allowing manual approval despite gate failure', {
-      documentId: id,
-      gate,
-    })
-  }
-  const { error } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('documents')
-        .update({
-          extraction_status: 'approved',
-          extraction_confidence: 95,
-          publish_state: 'staged',
-          published_at: null,
-          published_by: null,
-        })
-        .eq('id', id),
-    'approveDocumentReview'
-  )
-  if (error) throw new Error(error.message)
-  revalidatePath('/review-queue')
-}
-
-async function publishDocumentProducts(documentId: string, publishedBy: string) {
-  const baseSelect =
-    'id, item_code, source_item_no, description, packaging, total_cartons, total_quantity, unit_cbm, total_cbm, unit_weight_kg, total_weight_kg, unit_price_rmb, total_amount_rmb, warehouse, section, remarks, barcode, code, photo, photo2, dim_l_cm, dim_w_cm, dim_h_cm'
-  const { data: rows, error: rowsErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .select(baseSelect)
-        .eq('document_id', documentId)
-        .eq('review_status', 'accepted')
-        .order('line_no', { ascending: true }),
-    'finalizeDocumentPublish.rows'
-  )
-  if (rowsErr) throw new Error(rowsErr.message)
-  let publishSourceRows = rows ?? []
-  if (publishSourceRows.length === 0) {
-    logImport('publishDocumentProducts fallback: no accepted rows, publishing all document rows', {
-      documentId,
-    })
-    const { data: allRows, error: allRowsErr } = await withSupabaseRetry(
-      () =>
-        supabase
-          .from('document_items')
-          .select(baseSelect)
-          .eq('document_id', documentId)
-          .order('line_no', { ascending: true }),
-      'finalizeDocumentPublish.rows.fallbackAll'
-    )
-    if (allRowsErr) throw new Error(allRowsErr.message)
-    publishSourceRows = allRows ?? []
-  }
-  if (publishSourceRows.length === 0) {
-    throw new Error(
-      'Cannot finalize: no line items exist for this document in the database. ' +
-        'Extraction may not have saved rows, or they were removed. Re-import the source file or remove this document from the queue.'
-    )
-  }
-
-  // Fix 5: use dedicated section column; fall back to remarks encoding for pre-migration rows
-  function rowSection(row: { section?: string | null; remarks?: string | null }): 'shipped' | 'repacked' | 'left_in_warehouse' {
-    const col = row.section
-    if (col === 'repacked' || col === 'left_in_warehouse') return col
-    if (col === 'shipped') return 'shipped'
-    // Legacy fallback: pre-migration rows encoded section in remarks
-    const m = (row.remarks ?? '').match(/\bsection:(repacked|left_in_warehouse)\b/)
-    return (m?.[1] as 'repacked' | 'left_in_warehouse' | undefined) ?? 'shipped'
-  }
-
-  function toProductRow(row: any) {
-    return {
-      name: str(row.description) || str(row.item_code) || null,
-      sku: str(row.item_code) || null,
-      source_item_no: str(row.source_item_no) || null,
-      description: str(row.description) || null,
-      unit: parseUnit(str(row.packaging) || 'pcs/ctn'),
-      packing: str(row.packaging) || null,
-      cartons: intOrNull(row.total_cartons),
-      quantity: intOrNull(row.total_quantity) ?? 0,
-      unit_cbm: numOrNull(row.unit_cbm),
-      cbm: numOrNull(row.total_cbm),
-      unit_weight: numOrNull(row.unit_weight_kg) == null ? null : `${numOrNull(row.unit_weight_kg)}KGS`,
-      total_weight: numOrNull(row.total_weight_kg) == null ? null : `${numOrNull(row.total_weight_kg)}KGS`,
-      cost_price: numOrNull(row.unit_price_rmb) ?? 0,
-      selling_price: 0,
-      total_amount_rmb: numOrNull(row.total_amount_rmb),
-      reorder_level: 0,
-      warehouse: str(row.warehouse) || null,
-      remarks: str(row.remarks) || null,
-      barcode: str(row.barcode) || null,
-      code: str(row.code) || null,
-      photo: str(row.photo) || null,
-      photo2: str(row.photo2) || null,
-      dim_l_cm: numOrNull(row.dim_l_cm),
-      dim_w_cm: numOrNull(row.dim_w_cm),
-      dim_h_cm: numOrNull(row.dim_h_cm),
-      source_document_id: documentId,
-      source_document_item_id: str(row.id) || null,
-      extraction_confidence: 95,
-      extraction_flags: [],
-    }
-  }
-
-  // Only main shipment rows go to inventory — same as extract pipeline (exclude left_in_warehouse + repacked).
-  const shippedSourceRows = publishSourceRows.filter(r => rowSection(r) === 'shipped')
-
-  const publishRows: ReturnType<typeof toProductRow>[] = shippedSourceRows.map(toProductRow)
-
-  await withSupabaseRetry(
-    () => supabase.from('products').delete().eq('source_document_id', documentId),
-    'finalizeDocumentPublish.clearOldProducts'
-  )
-  const CHUNK = 100
-  for (let i = 0; i < publishRows.length; i += CHUNK) {
-    const chunk = publishRows.slice(i, i + CHUNK)
-    const { error } = await withSupabaseRetry(
-      () => supabase.from('products').insert(chunk),
-      `finalizeDocumentPublish.insert.${Math.floor(i / CHUNK) + 1}`
-    )
-    if (error) throw new Error(error.message)
-  }
-
-  const { error: docErr } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('documents')
-        .update({
-          extraction_status: 'approved',
-          publish_state: 'published',
-          published_at: new Date().toISOString(),
-          published_by: publishedBy,
-        })
-        .eq('id', documentId),
-    'finalizeDocumentPublish.updateDoc'
-  )
-  if (docErr) throw new Error(docErr.message)
-  return publishRows.length
-}
-
-export async function finalizeDocumentPublish(documentId: string) {
-  const gate = await recomputeDocumentReviewStatus(documentId)
-  if (gate.counts.total === 0) {
-    throw new Error(
-      'Cannot finalize: this document has no line items to publish. ' +
-        'If you expected rows here, extraction may have failed to insert them—re-run import/extract. Otherwise delete this staging document.'
-    )
-  }
-  if (!gate.rowParityMatch || !gate.totalsMatch || gate.hasBlockingFlags) {
-    logImport('finalizeDocumentPublish override: allowing manual finalize despite gate failure', {
-      documentId,
-      gate,
-    })
-  }
-  const publishedCount = await publishDocumentProducts(documentId, 'review-queue')
-  revalidatePath('/review-queue')
-  revalidatePath('/products')
-  revalidatePath('/compiled-products')
-  revalidatePath('/')
-  return { publishedCount }
-}
-
 export async function createProduct(formData: FormData) {
   const imageFile = formData.get('image') as File | null
   let image_url: string | null = null
@@ -1156,7 +584,6 @@ export async function createProduct(formData: FormData) {
     name: (formData.get('name') as string) || null,
     sku: (formData.get('sku') as string) || null,
     description: (formData.get('description') as string) || null,
-    category_id: (formData.get('category_id') as string) || null,
     supplier_id: (formData.get('supplier_id') as string) || null,
     unit: (formData.get('unit') as string) || 'pcs',
     shop_name: (formData.get('shop_name') as string) || null,
@@ -1198,7 +625,6 @@ export async function updateProduct(id: string, formData: FormData) {
     name: (formData.get('name') as string) || null,
     sku: (formData.get('sku') as string) || null,
     description: (formData.get('description') as string) || null,
-    category_id: (formData.get('category_id') as string) || null,
     supplier_id: (formData.get('supplier_id') as string) || null,
     unit: (formData.get('unit') as string) || 'pcs',
     shop_name: (formData.get('shop_name') as string) || null,
@@ -1728,6 +1154,19 @@ function parseWeight(w: string | null | undefined): number {
   return parseFloat((w ?? '0').replace(/[^\d.]/g, '')) || 0
 }
 
+function firstNumeric(
+  row: Record<string, unknown>,
+  keys: string[],
+  parser: (value: unknown) => number | null
+): number | null {
+  for (const key of keys) {
+    if (!(key in row)) continue
+    const parsed = parser(row[key])
+    if (parsed != null) return parsed
+  }
+  return null
+}
+
 function parsePackingCartons(packing: string | null | undefined): number | null {
   const s = str(packing)
   const m = s.match(/^(\d+(?:\.\d+)?)\s*CTNS?$/i)
@@ -1835,6 +1274,42 @@ function repairNoPackingAmountRow(row: MappedRow): MappedRow {
     total_weight: row.total_weight,
     remarks: row.remarks ? `${row.remarks};repair:no_packing_amount_row` : 'repair:no_packing_amount_row',
   }
+}
+
+function repairSalesOrderRow(row: MappedRow): MappedRow {
+  let next: MappedRow = { ...row }
+  const cartons = next.cartons ?? 0
+  const qty = next.quantity ?? 0
+  const amount = next.total_amount_rmb ?? 0
+  const packing = str(next.packing)
+
+  if (packing && !/\d/.test(packing) && cartons > 0 && qty > 0) {
+    const inferredPpc = qty / cartons
+    const rounded = Math.round(inferredPpc)
+    if (Number.isFinite(inferredPpc) && rounded > 0 && Math.abs(inferredPpc - rounded) <= 0.02) {
+      next.packing = `${rounded}pcs/ctn`
+      next.unit = 'pcs'
+      next.remarks = next.remarks ? `${next.remarks};repair:packing_from_qty_cartons` : 'repair:packing_from_qty_cartons'
+    } else {
+      next.packing = null
+      next.remarks = next.remarks ? `${next.remarks};repair:drop_non_numeric_packing` : 'repair:drop_non_numeric_packing'
+    }
+  }
+
+  if ((next.cost_price ?? 0) <= 0 && amount > 0 && qty > 0) {
+    const inferred = Math.round((amount / qty) * 10000) / 10000
+    if (inferred > 0) {
+      next.cost_price = inferred
+      next.remarks = next.remarks ? `${next.remarks};repair:price_from_amount` : 'repair:price_from_amount'
+    }
+  }
+
+  if ((next.total_amount_rmb ?? 0) <= 0 && qty > 0 && (next.cost_price ?? 0) > 0) {
+    next.total_amount_rmb = Math.round(qty * (next.cost_price ?? 0) * 100) / 100
+    next.remarks = next.remarks ? `${next.remarks};repair:amount_from_qty_price` : 'repair:amount_from_qty_price'
+  }
+
+  return next
 }
 
 /** True if col 0 of a data row looks like a valid product MARKS value */
@@ -2089,7 +1564,31 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         null
       const documentDateRaw = str(r['DATE'] ?? r['date'] ?? '')
       const documentDate = normalizeDate(documentDateRaw)
-      mapped.push({
+      const costPrice =
+        firstNumeric(
+          r,
+          [
+            'U.PRICE (RMB)',
+            'U.PRICE(RMB)',
+            'U.PRICE',
+            'U/P',
+            'UNIT PRICE',
+            'UNIT_PRICE',
+            'PRICE',
+            'unit_price_rmb',
+            'cost_price',
+            '__col14',
+            '__col13',
+          ],
+          numOrNull
+        ) ?? 0
+      const totalAmount = firstNumeric(
+        r,
+        ['T.AMOUNT', 'T.AMOUNT(RMB)', 'AMOUNT', 'total_amount_rmb', '__col15', '__col16', '__col14'],
+        numOrNull
+      )
+
+      let salesMapped: MappedRow = {
         sku,
         source_item_no: sourceItemNo,
         name,
@@ -2106,8 +1605,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         dim_l_cm: numOrNull(r['L'] ?? r['l'] ?? r['dim_l_cm']),
         dim_w_cm: numOrNull(r['W'] ?? r['w'] ?? r['dim_w_cm']),
         dim_h_cm: numOrNull(r['H'] ?? r['h'] ?? r['dim_h_cm']),
-        cost_price: num(r['U.PRICE (RMB)'] ?? r['U/P'] ?? r['unit_price_rmb'] ?? r['cost_price']),
-        total_amount_rmb: numOrNull(r['T.AMOUNT'] ?? r['AMOUNT'] ?? r['total_amount_rmb']),
+        cost_price: costPrice,
+        total_amount_rmb: totalAmount,
         warehouse: str(r['W.H.'] ?? r['warehouse'] ?? '') || null,
         remarks: str(r['REK'] ?? r['remarks'] ?? '') || null,
         barcode: str(r['CODE'] ?? r['barcode'] ?? '') || null,
@@ -2120,7 +1619,9 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         document_date: documentDate,
         selling_price: num(r['selling_price'] ?? r['Selling Price']),
         reorder_level: intOrNull(r['reorder_level'] ?? r['Reorder Level']) ?? 0,
-      })
+      }
+      salesMapped = repairSalesOrderRow(salesMapped)
+      mapped.push(salesMapped)
     } else {
       // Standard exported format (column names from our own Excel export)
       const name = str(r['name'] ?? r['Name']) || null
@@ -2391,22 +1892,11 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
     if (!hasRequiredPdfTotalsForGate) reasons.push('missing required PDF footer totals for strict match')
     if (!totalsMatch) reasons.push('totals mismatch')
     logImport(
-      `Import gate failed but continuing in review flow: ${reasons.join('; ')}.`
+      `Import gate failed but continuing (document staged): ${reasons.join('; ')}.`
     )
   }
 
-  if (normalizedDoc.documentId) {
-    await withSupabaseRetry(
-      () =>
-        supabase
-          .from('document_items')
-          .update({ review_status: 'accepted', reviewed_at: new Date().toISOString() })
-          .eq('document_id', normalizedDoc.documentId as string)
-          .eq('review_status', 'pending'),
-      'importProducts.autoAcceptRows'
-    )
-    await recomputeDocumentReviewStatus(normalizedDoc.documentId)
-  } else {
+  if (!normalizedDoc.documentId) {
     // Legacy fallback path only when normalized staging fails unexpectedly.
     const CHUNK = 50
     for (let i = 0; i < mapped.length; i += CHUNK) {

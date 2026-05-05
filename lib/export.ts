@@ -183,7 +183,6 @@ export function exportProductsToExcel(products: Product[]) {
     Name: p.name ?? '',
     'SHOP#': p.shop_name ?? '',
     Description: p.description ?? '',
-    Category: p.categories?.name ?? '',
     Supplier: p.suppliers?.name ?? '',
     Packing: p.packing ?? '',
     'T.CTN': p.cartons ?? '',
@@ -200,7 +199,7 @@ export function exportProductsToExcel(products: Product[]) {
   const ws = XLSX.utils.json_to_sheet(rows)
   // Column widths
   ws['!cols'] = [
-    { wch: 16 }, { wch: 28 }, { wch: 14 }, { wch: 30 }, { wch: 16 }, { wch: 16 },
+    { wch: 16 }, { wch: 28 }, { wch: 14 }, { wch: 30 }, { wch: 16 },
     { wch: 14 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 12 },
     { wch: 12 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 12 },
   ]

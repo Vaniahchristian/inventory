@@ -23,14 +23,13 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { updateProduct, deleteProduct, adjustProductCartons } from '@/app/actions/products'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
-import type { Product, ImportMeta, Category, Supplier, ProductDocumentRef } from '@/lib/types'
+import type { Product, ImportMeta, Supplier, ProductDocumentRef } from '@/lib/types'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
 
 type Props = {
   products: Product[]
   importMeta: ImportMeta | null
-  categories: Category[]
   suppliers: Supplier[]
   productDocuments: ProductDocumentRef[]
 }
@@ -172,7 +171,7 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-export function CompiledProductsClient({ products, importMeta, categories, suppliers, productDocuments }: Props) {
+export function CompiledProductsClient({ products, importMeta, suppliers, productDocuments }: Props) {
   const [query, setQuery] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
   const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
@@ -652,7 +651,6 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
       <ProductDialog
         open={!!editing}
         product={editing}
-        categories={categories}
         suppliers={suppliers}
         onClose={() => setEditing(null)}
         isPending={isPending}
@@ -673,11 +671,10 @@ export function CompiledProductsClient({ products, importMeta, categories, suppl
 }
 
 function ProductDialog({
-  open, product, categories, suppliers, onClose, onSubmit, isPending,
+  open, product, suppliers, onClose, onSubmit, isPending,
 }: {
   open: boolean
   product: Product | null
-  categories: Category[]
   suppliers: Supplier[]
   onClose: () => void
   onSubmit: (formData: FormData) => void
@@ -697,8 +694,6 @@ function ProductDialog({
             <CField label="SKU / MARKS" name="sku" defaultValue={product?.sku ?? ''} />
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <CSelectField label="Category" name="category_id" defaultValue={product?.category_id ?? ''}
-              options={categories.map(c => ({ value: c.id, label: c.name }))} placeholder="None" />
             <CSelectField label="Supplier" name="supplier_id" defaultValue={product?.supplier_id ?? ''}
               options={suppliers.map(s => ({ value: s.id, label: s.name ?? '' }))} placeholder="None" />
           </div>
