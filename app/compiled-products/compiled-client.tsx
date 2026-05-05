@@ -34,17 +34,15 @@ type DividerRow = { _isDivider: true; id: string; title: string }
 type CompiledDisplayRow = CompiledRow | DividerRow
 
 /**
- * Strip trailing model-number codes from a product name to get the base name.
- * A word is treated as a model code (and stops the base) if it:
- *   - contains any digit (e.g. "KD63-218A", "TE-R100FG-1", "SCT-150")
- *   - is all-uppercase / pure code with no lowercase (e.g. "SCT", "KD")
- * Examples:
- *   "Vacuum Flask TE-R100FG-1"  → "Vacuum Flask"
- *   "Cup Stand KD63-218A"       → "Cup Stand"
- *   "Ceramic Canister Set SCT-" → "Ceramic Canister Set"
+ * Build a merge base name.
+ * Primary rule: if the first three words exist, use them as the grouping base.
+ * Fallback: stop at model-code-ish tokens or CJK suffixes.
  */
 function extractBaseName(name: string): string {
   const words = name.trim().split(/\s+/)
+  if (words.length >= 3) {
+    return `${words[0]} ${words[1]} ${words[2]}`
+  }
   const base: string[] = []
   for (const w of words) {
     // Stop at CJK/Unicode suffix tokens after we've captured an English base name.
@@ -223,7 +221,15 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
 
       const numbered = [...map.values()]
       singles.forEach(s => { s._rowNo = rowNo++ })
-      const data = [...numbered, ...singles].filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
+      const data = [...numbered, ...singles]
+        .filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
+        .sort((a, b) => {
+          const nameCmp = (a.name ?? '').localeCompare(b.name ?? '', undefined, { sensitivity: 'base' })
+          if (nameCmp !== 0) return nameCmp
+          const packingCmp = (a.packing ?? '').localeCompare(b.packing ?? '', undefined, { sensitivity: 'base' })
+          if (packingCmp !== 0) return packingCmp
+          return (a.sku ?? '').localeCompare(b.sku ?? '', undefined, { sensitivity: 'base' })
+        })
       return { data, nextRowNo: rowNo }
     }
 
