@@ -47,6 +47,8 @@ function extractBaseName(name: string): string {
   const words = name.trim().split(/\s+/)
   const base: string[] = []
   for (const w of words) {
+    // Stop at CJK/Unicode suffix tokens after we've captured an English base name.
+    if (/[\u2e80-\u9fff]/.test(w) && base.length > 0) break
     if (/\d/.test(w)) break                          // word contains a digit → model code
     if (/^[A-Z]{2,}/.test(w) && !/^[A-Z][a-z]/.test(w)) break  // all-caps code (e.g. "SCT")
     base.push(w)
@@ -200,10 +202,11 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
         const baseName = extractBaseName(p.name)
         const packingTrimmed = (p.packing ?? '').trim()
         // Keep both merge conditions:
-        // 1) same base name + packing + quantity
+        // 1) same base name + packing (when packing exists)
         // 2) same base name + quantity ONLY when packing is missing
-        const packingKey = packingTrimmed ? packingTrimmed.toLowerCase() : '__no_packing__'
-        const key = `${baseName.toLowerCase()}||${p.quantity}||${packingKey}`
+        const key = packingTrimmed
+          ? `${baseName.toLowerCase()}||pack||${packingTrimmed.toLowerCase()}`
+          : `${baseName.toLowerCase()}||no_pack_qty||${p.quantity}`
         const existing = map.get(key)
         if (!existing) {
           map.set(key, { ...p, name: baseName, _variants: 1, _rowNo: rowNo++ })
