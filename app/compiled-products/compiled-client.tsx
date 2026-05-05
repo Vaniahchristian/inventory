@@ -9,28 +9,23 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Label } from '@/components/ui/label'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
-import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal, AlertTriangle, Pencil, Trash2, Plus, Minus } from 'lucide-react'
+import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal, AlertTriangle, Trash2, Plus, Minus } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { updateProduct, deleteProduct, adjustProductCartons } from '@/app/actions/products'
+import { deleteDocumentItem, adjustDocumentItemCartons } from '@/app/actions/products'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
-import type { Product, ImportMeta, Supplier, ProductDocumentRef } from '@/lib/types'
-
-const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'box', 'bag', 'roll', 'pair', 'set', 'ctn']
+import type { Product, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
 type Props = {
   products: Product[]
   importMeta: ImportMeta | null
-  suppliers: Supplier[]
   productDocuments: ProductDocumentRef[]
 }
 
@@ -171,11 +166,10 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-export function CompiledProductsClient({ products, importMeta, suppliers, productDocuments }: Props) {
+export function CompiledProductsClient({ products, importMeta, productDocuments }: Props) {
   const [query, setQuery] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
   const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
-  const [editing, setEditing] = useState<Product | null>(null)
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
   const [exportOpen, setExportOpen] = useState(false)
@@ -297,7 +291,7 @@ export function CompiledProductsClient({ products, importMeta, suppliers, produc
     if (!confirm(`Delete "${name ?? 'this product'}"? This cannot be undone.`)) return
     startTransition(async () => {
       try {
-        await deleteProduct(id)
+        await deleteDocumentItem(id)
         toast.success('Product deleted')
       } catch (e: any) {
         toast.error(e.message)
@@ -309,7 +303,7 @@ export function CompiledProductsClient({ products, importMeta, suppliers, produc
     if (adjustingId) return
     setAdjustingId(id)
     try {
-      await adjustProductCartons(id, delta)
+      await adjustDocumentItemCartons(id, delta)
     } catch (e: any) {
       toast.error(e.message)
     } finally {
@@ -516,9 +510,6 @@ export function CompiledProductsClient({ products, importMeta, suppliers, produc
                           <MoreHorizontal className="h-3.5 w-3.5" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => setEditing(p)}>
-                            <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
-                          </DropdownMenuItem>
                           <DropdownMenuItem
                             className={outOfStockIds.has(p.id) ? 'text-slate-600' : 'text-amber-600'}
                             onClick={() => toggleOutOfStock(p.id)}
@@ -647,124 +638,6 @@ export function CompiledProductsClient({ products, importMeta, suppliers, produc
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {/* Edit product dialog */}
-      <ProductDialog
-        open={!!editing}
-        product={editing}
-        suppliers={suppliers}
-        onClose={() => setEditing(null)}
-        isPending={isPending}
-        onSubmit={(formData) => {
-          startTransition(async () => {
-            try {
-              await updateProduct(editing!.id, formData)
-              toast.success('Product updated')
-              setEditing(null)
-            } catch (e: any) {
-              toast.error(e.message)
-            }
-          })
-        }}
-      />
-    </div>
-  )
-}
-
-function ProductDialog({
-  open, product, suppliers, onClose, onSubmit, isPending,
-}: {
-  open: boolean
-  product: Product | null
-  suppliers: Supplier[]
-  onClose: () => void
-  onSubmit: (formData: FormData) => void
-  isPending: boolean
-}) {
-  const [preview, setPreview] = useState<string | null>(product?.image_url ?? null)
-
-  return (
-    <Dialog open={open} onOpenChange={v => !v && onClose()}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Edit Product</DialogTitle>
-        </DialogHeader>
-        <form action={onSubmit} className="space-y-3" encType="multipart/form-data">
-          <div className="grid grid-cols-2 gap-3">
-            <CField label="Name" name="name" defaultValue={product?.name ?? ''} />
-            <CField label="SKU / MARKS" name="sku" defaultValue={product?.sku ?? ''} />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <CSelectField label="Supplier" name="supplier_id" defaultValue={product?.supplier_id ?? ''}
-              options={suppliers.map(s => ({ value: s.id, label: s.name ?? '' }))} placeholder="None" />
-          </div>
-          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide pt-1">Packing List Data</p>
-          <div className="grid grid-cols-3 gap-3">
-            <CField label="Shop / SHOP#" name="shop_name" defaultValue={product?.shop_name ?? ''} />
-            <CField label="Packing" name="packing" defaultValue={product?.packing ?? ''} placeholder="e.g. 15pcs/ctn" />
-            <CField label="Cartons (T.CTN)" name="cartons" type="number" defaultValue={String(product?.cartons ?? '')} />
-          </div>
-          <div className="grid grid-cols-5 gap-3">
-            <CSelectField label="Unit" name="unit" defaultValue={product?.unit ?? 'pcs'}
-              options={UNITS.map(u => ({ value: u, label: u }))} placeholder="pcs" />
-            <CField label="Qty (T.QTY)" name="quantity" type="number" defaultValue={String(product?.quantity ?? 0)} />
-            <CField label="U.CBM" name="unit_cbm" type="number" step="0.0001" defaultValue={String(product?.unit_cbm ?? '')} />
-            <CField label="T.CBM" name="cbm" type="number" step="0.0001" defaultValue={String(product?.cbm ?? '')} />
-            <CField label="Reorder Level" name="reorder_level" type="number" defaultValue={String(product?.reorder_level ?? 0)} />
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <CField label="Unit Weight" name="unit_weight" defaultValue={product?.unit_weight ?? ''} placeholder="e.g. 15.8KGS" />
-            <CField label="Total Weight (T.WEIGHT)" name="total_weight" defaultValue={product?.total_weight ?? ''} placeholder="e.g. 142.2KGS" />
-            <CField label="Unit Price ¥ (RMB)" name="cost_price" type="number" step="0.01" defaultValue={String(product?.cost_price ?? '')} />
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <CField label="Total Amount ¥ (T.AMOUNT)" name="total_amount_rmb" type="number" step="0.01" defaultValue={String(product?.total_amount_rmb ?? '')} />
-            <CField label="Selling Price" name="selling_price" type="number" step="0.01" defaultValue={String(product?.selling_price ?? '')} />
-          </div>
-          <div>
-            <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
-            <Textarea name="description" defaultValue={product?.description ?? ''} rows={2} className="text-sm resize-none" />
-          </div>
-          <div>
-            <Label className="text-xs text-slate-600 mb-1 block">Product Image (optional)</Label>
-            {preview && <img src={preview} alt="preview" className="h-20 w-20 object-cover rounded border border-slate-200 mb-2" />}
-            <Input name="image" type="file" accept="image/*" className="h-8 text-sm"
-              onChange={e => { const f = e.target.files?.[0]; if (f) setPreview(URL.createObjectURL(f)) }} />
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-            <Button type="submit" size="sm" disabled={isPending} className="bg-slate-900 hover:bg-slate-700">
-              {isPending ? 'Saving…' : 'Save Changes'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function CField({ label, name, type = 'text', defaultValue, step, placeholder }: {
-  label: string; name: string; type?: string; defaultValue?: string; step?: string; placeholder?: string
-}) {
-  return (
-    <div>
-      <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
-      <Input name={name} type={type} defaultValue={defaultValue} step={step} placeholder={placeholder} className="h-8 text-sm" />
-    </div>
-  )
-}
-
-function CSelectField({ label, name, defaultValue, options, placeholder }: {
-  label: string; name: string; defaultValue: string; options: { value: string; label: string }[]; placeholder: string
-}) {
-  return (
-    <div>
-      <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
-      <Select name={name} defaultValue={defaultValue || undefined}>
-        <SelectTrigger className="h-8 text-sm"><SelectValue placeholder={placeholder} /></SelectTrigger>
-        <SelectContent>
-          {options.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-        </SelectContent>
-      </Select>
     </div>
   )
 }

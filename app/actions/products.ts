@@ -665,6 +665,22 @@ export async function adjustProductCartons(id: string, delta: number) {
   revalidatePath('/')
 }
 
+export async function adjustDocumentItemCartons(id: string, delta: number) {
+  const { data } = await withSupabaseRetry(
+    () => supabase.from('document_items').select('total_cartons').eq('id', id).single(),
+    'adjustDocumentItemCartons.select'
+  )
+  const current = data?.total_cartons ?? 0
+  const next = Math.max(0, current + delta)
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('document_items').update({ total_cartons: next }).eq('id', id),
+    'adjustDocumentItemCartons.update'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/compiled-products')
+  revalidatePath('/products')
+}
+
 export async function deleteProduct(id: string) {
   const { error } = await supabase.from('products').delete().eq('id', id)
   if (error) throw new Error(error.message)
