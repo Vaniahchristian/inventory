@@ -51,7 +51,10 @@
       "Bash(Get-ChildItem -Recurse -Directory)",
       "Bash(Select-Object -ExpandProperty FullName)",
       "PowerShell(head *)",
-      "Bash(npx supabase *)"
+      "Bash(npx supabase *)",
+      "Bash(Remove-Item -Recurse -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\review-queue\")",
+      "Bash(Remove-Item -Recurse -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\categories\")",
+      "Bash(Remove-Item -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\actions\\\\categories.ts\")"
     ]
   },
   "enableAllProjectMcpServers": true,
