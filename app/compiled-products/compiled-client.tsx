@@ -199,12 +199,16 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
         }
         const baseName = extractBaseName(p.name)
         const packingTrimmed = (p.packing ?? '').trim()
-        // Keep both merge conditions:
+        // Merge conditions:
         // 1) same base name + packing (when packing exists)
-        // 2) same base name + quantity ONLY when packing is missing
+        // 2) same base name + quantity (when packing is missing but quantity exists)
+        // 3) same base name only (when both packing and quantity are missing/zero; carton-only lines)
+        const hasQuantity = Number.isFinite(p.quantity) && p.quantity > 0
         const key = packingTrimmed
           ? `${baseName.toLowerCase()}||pack||${packingTrimmed.toLowerCase()}`
-          : `${baseName.toLowerCase()}||no_pack_qty||${p.quantity}`
+          : hasQuantity
+            ? `${baseName.toLowerCase()}||no_pack_qty||${p.quantity}`
+            : `${baseName.toLowerCase()}||no_pack_no_qty`
         const existing = map.get(key)
         if (!existing) {
           map.set(key, { ...p, name: baseName, _variants: 1, _rowNo: rowNo++ })
