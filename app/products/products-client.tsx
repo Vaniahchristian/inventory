@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -144,6 +145,7 @@ function SectionBadge({ section }: { section: DocumentItem['section'] }) {
 export function ProductsClient({ items, importMeta, productDocuments }: Props) {
   const [query, setQuery] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set())
   const [footerMeta, setFooterMeta] = useState<ImportMeta | null>(importMeta)
   const [footerPaymentRows, setFooterPaymentRows] = useState<DocumentFooterPaymentRow[] | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -203,6 +205,35 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     weight: filtered.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
     amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
   }), [filtered])
+
+  const selectableRows = useMemo(
+    () => filtered.filter(p => !isFooterLikeItem(p) && !isStuffedBannerItem(p)),
+    [filtered]
+  )
+
+  const selectedRows = useMemo(
+    () => selectableRows.filter(p => selectedRowIds.has(p.id)),
+    [selectableRows, selectedRowIds]
+  )
+
+  const selectedTotals = useMemo(() => ({
+    cartons: selectedRows.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
+    qty: selectedRows.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
+    cbm: selectedRows.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
+    weight: selectedRows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
+    amount: selectedRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+  }), [selectedRows])
+
+  useEffect(() => {
+    const visibleIds = new Set(selectableRows.map(p => p.id))
+    setSelectedRowIds(prev => {
+      const next = new Set([...prev].filter(id => visibleIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [selectableRows])
+
+  const allVisibleSelected = selectableRows.length > 0 && selectableRows.every(p => selectedRowIds.has(p.id))
+  const someVisibleSelected = selectableRows.some(p => selectedRowIds.has(p.id))
 
   const footerGrandTotals = useMemo(() => {
     if (selectedDocumentId === 'all' || !footerMeta) return null
@@ -294,6 +325,25 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     })
   }
 
+  function toggleRowSelection(id: string) {
+    setSelectedRowIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAllVisible(checked: boolean | 'indeterminate') {
+    const shouldSelectAll = checked === true || (checked === 'indeterminate' && !allVisibleSelected)
+    setSelectedRowIds(prev => {
+      const next = new Set(prev)
+      if (shouldSelectAll) selectableRows.forEach(p => next.add(p.id))
+      else selectableRows.forEach(p => next.delete(p.id))
+      return next
+    })
+  }
+
   async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
     const startedAt = Date.now()
     const file = e.target.files?.[0]
@@ -380,6 +430,9 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
               ? `${items.length} rows total · filter shows latest import per file name`
               : `${filtered.length} rows · latest import for this file`}
           </p>
+          {selectedRows.length > 0 && (
+            <p className="text-xs text-emerald-700 mt-1">{selectedRows.length} selected</p>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
@@ -525,6 +578,13 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
           <thead>
             <tr className="bg-slate-50 border-b text-left">
               <th className="p-2 font-medium w-8 text-slate-500">#</th>
+              <th className="p-2 font-medium w-8 text-center">
+                <Checkbox
+                  checked={allVisibleSelected}
+                  onCheckedChange={toggleSelectAllVisible}
+                  aria-label="Select all visible products"
+                />
+              </th>
               <th className="p-2 font-medium min-w-[120px]">Marks</th>
               <th className="p-2 font-medium min-w-[80px]">Shop</th>
               <th className="p-2 font-medium w-14">Item</th>
@@ -549,7 +609,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={20} className="text-center text-slate-400 py-10">
+                <td colSpan={21} className="text-center text-slate-400 py-10">
                   {importStage ? 'Import in progress…' : 'No rows found. Save a PDF via Live View.'}
                 </td>
               </tr>
@@ -560,6 +620,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                     isStuffedBannerItem(p) ? (
                       <tr key={p.id} className="border-b border-yellow-300 bg-yellow-200 font-semibold">
                         <td className="p-2 text-slate-500 tabular-nums">{p.line_no ?? '-'}</td>
+                        <td className="p-2 text-center">—</td>
                         <td className="p-2" colSpan={18}>
                           {(p.description ?? p.marks ?? p.item_code ?? 'GOODS STUFFED INTO THIS CO').replace(/\s+/g, ' ').trim()}
                         </td>
@@ -577,6 +638,13 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                     ) : (
                     <tr key={p.id} className={`border-b border-slate-100 ${sectionClass(p.section)}`}>
                       <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
+                      <td className="p-2 text-center">
+                        <Checkbox
+                          checked={selectedRowIds.has(p.id)}
+                          onCheckedChange={() => toggleRowSelection(p.id)}
+                          aria-label={`Select ${p.description ?? p.marks ?? 'row'}`}
+                        />
+                      </td>
                       <td className="p-2 font-mono text-slate-800 whitespace-nowrap">{p.marks ?? '-'}</td>
                       <td className="p-2 text-slate-600 max-w-[100px] truncate">{p.shop ?? '-'}</td>
                       <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
@@ -610,7 +678,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                   ))}
                   {/* Section subtotal row */}
                   <tr className={`text-xs ${SECTION_SUBTOTAL_STYLE[sectionKey]}`}>
-                    <td className="p-2" colSpan={6}>
+                    <td className="p-2" colSpan={7}>
                       {SECTION_LABELS[sectionKey]} — {rows.length} rows
                     </td>
                     <td className="p-2 text-right tabular-nums">{fmtN(st.cartons, 0)} CTN</td>
@@ -633,6 +701,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                 {footerItems.map(p => (
                   <tr key={p.id} className="border-b border-slate-200 bg-slate-100 text-slate-500 italic">
                     <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
+                    <td className="p-2 text-center">—</td>
                     <td className="p-2 font-mono whitespace-nowrap">{p.marks ?? '-'}</td>
                     <td className="p-2 max-w-[100px] truncate">{p.shop ?? '-'}</td>
                     <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
@@ -666,14 +735,29 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                   </tr>
                 ))}
                 <tr className="text-xs bg-slate-300 border-t-2 border-slate-500 font-semibold text-slate-700">
-                  <td className="p-2" colSpan={6}>Document Footer — {footerItems.length} rows (financial summary)</td>
+                  <td className="p-2" colSpan={7}>Document Footer — {footerItems.length} rows (financial summary)</td>
                   <td colSpan={14} />
                 </tr>
               </React.Fragment>
             )}
+            {selectedRows.length > 0 && (
+              <tr className="bg-emerald-100 border-t-2 border-emerald-500 font-bold text-emerald-900">
+                <td className="p-2" colSpan={7}>SELECTED TOTALS — {selectedRows.length} rows</td>
+                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.cartons, 0)} CTN</td>
+                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.qty, 0)} pcs</td>
+                <td colSpan={3} />
+                <td />
+                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.cbm, 4)} CBM</td>
+                <td />
+                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.weight, 3)} KGS</td>
+                <td />
+                <td className="p-2 text-right tabular-nums">¥{fmtN(selectedTotals.amount, 0)} RMB</td>
+                <td colSpan={3} />
+              </tr>
+            )}
             {filtered.length > 0 && groupedSections.length > 1 && (
               <tr className="bg-slate-800 text-white font-bold border-t-2 border-slate-900 text-xs">
-                <td className="p-2" colSpan={6}>
+                <td className="p-2" colSpan={7}>
                   {footerGrandTotals ? 'PDF FOOTER TOTAL' : `GRAND TOTAL — ${filtered.length} rows`}
                 </td>
                 <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.cartons ?? totals.cartons, 0)} CTN</td>

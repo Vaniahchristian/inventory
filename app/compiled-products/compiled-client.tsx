@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useMemo, useState, useTransition } from 'react'
+import React, { useEffect, useMemo, useState, useTransition } from 'react'
 import { toast } from 'sonner'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -169,6 +169,7 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
 export function CompiledProductsClient({ products, importMeta, productDocuments }: Props) {
   const [query, setQuery] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set())
   const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -289,6 +290,29 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
     amount: filteredDataRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
   }), [filteredDataRows])
 
+  const selectedDataRows = useMemo(
+    () => filteredDataRows.filter(p => selectedRowIds.has(p.id)),
+    [filteredDataRows, selectedRowIds]
+  )
+
+  const selectedTotals = useMemo(() => ({
+    cartons: selectedDataRows.reduce((s, p) => s + (p.cartons ?? 0), 0),
+    cbm: selectedDataRows.reduce((s, p) => s + (p.cbm ?? 0), 0),
+    weight: selectedDataRows.reduce((s, p) => s + parseWeight(p.total_weight), 0),
+    amount: selectedDataRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+  }), [selectedDataRows])
+
+  useEffect(() => {
+    const visibleIds = new Set(filteredDataRows.map(p => p.id))
+    setSelectedRowIds(prev => {
+      const next = new Set([...prev].filter(id => visibleIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [filteredDataRows])
+
+  const allVisibleSelected = filteredDataRows.length > 0 && filteredDataRows.every(p => selectedRowIds.has(p.id))
+  const someVisibleSelected = filteredDataRows.some(p => selectedRowIds.has(p.id))
+
   function toggleField(key: FieldKey) {
     setSelectedFields(prev => {
       const next = new Set(prev)
@@ -301,6 +325,25 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
     setOutOfStockIds(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function toggleRowSelection(id: string) {
+    setSelectedRowIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAllVisible(checked: boolean | 'indeterminate') {
+    const shouldSelectAll = checked === true || (checked === 'indeterminate' && !allVisibleSelected)
+    setSelectedRowIds(prev => {
+      const next = new Set(prev)
+      if (shouldSelectAll) filteredDataRows.forEach(p => next.add(p.id))
+      else filteredDataRows.forEach(p => next.delete(p.id))
       return next
     })
   }
@@ -352,6 +395,11 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
           <p className="text-sm text-slate-500 mt-0.5">
             {compiledRows.length} unique items (from {visibleProducts.filter(p => !isSectionDividerProduct(p)).length} total)
           </p>
+          {selectedDataRows.length > 0 && (
+            <p className="text-xs text-emerald-700 mt-1">
+              {selectedDataRows.length} selected
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
@@ -411,6 +459,13 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
           <TableHeader>
             <TableRow className="bg-slate-50">
               <TableHead className="w-10 text-center">#</TableHead>
+              <TableHead className="w-10 text-center">
+                <Checkbox
+                  checked={allVisibleSelected}
+                  onCheckedChange={toggleSelectAllVisible}
+                  aria-label="Select all visible compiled products"
+                />
+              </TableHead>
               <TableHead className="w-10 px-2" />
               <TableHead>Name</TableHead>
               <TableHead>Description</TableHead>
@@ -437,7 +492,7 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={22} className="text-center text-slate-400 py-10">
+                <TableCell colSpan={23} className="text-center text-slate-400 py-10">
                   No products found.
                 </TableCell>
               </TableRow>
@@ -446,7 +501,7 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
                 if ('_isDivider' in p) {
                   return (
                     <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
-                      <TableCell colSpan={22} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
+                      <TableCell colSpan={23} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
                         {p.title}
                       </TableCell>
                     </TableRow>
@@ -462,6 +517,13 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
                 return (
                   <TableRow key={`${p.id}-${i}`} className={rowClass}>
                     <TableCell className="text-center text-slate-400 font-mono text-[10px]">{i + 1}</TableCell>
+                    <TableCell className="text-center p-1">
+                      <Checkbox
+                        checked={selectedRowIds.has(p.id)}
+                        onCheckedChange={() => toggleRowSelection(p.id)}
+                        aria-label={`Select ${p.name ?? 'row'}`}
+                      />
+                    </TableCell>
                     <TableCell className="p-1">
                       {p.image_url ? (
                         <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
@@ -546,9 +608,16 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
               })
             )}
 
+            {selectedDataRows.length > 0 && (
+              <TableRow className="bg-emerald-100 font-bold border-t-2 border-emerald-400">
+                <TableCell colSpan={23} className="text-right text-emerald-900">
+                  {`SELECTED TOTALS: ${fmt(selectedTotals.cartons, 0)} CTNS | ${fmt(selectedTotals.cbm, 4)} CBM | ${fmt(selectedTotals.weight, 1)} KGS | ¥${fmt(selectedTotals.amount, 0)}`}
+                </TableCell>
+              </TableRow>
+            )}
             {filteredDataRows.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
-                <TableCell colSpan={22} className="text-right text-slate-900">
+                <TableCell colSpan={23} className="text-right text-slate-900">
                   {`TOTALS: ${fmt(totals.cartons, 0)} CTNS | ${fmt(totals.cbm, 4)} CBM | ${fmt(totals.weight, 1)} KGS | ¥${fmt(totals.amount, 0)}`}
                 </TableCell>
               </TableRow>
