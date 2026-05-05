@@ -226,9 +226,13 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
         }
       }
 
-      const numbered = [...map.values()]
-      singles.forEach(s => { s._rowNo = rowNo++ })
-      const data = [...numbered, ...singles].filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
+      const numbered = [...map.values()].sort((a, b) =>
+        (a.name ?? '').localeCompare(b.name ?? '', undefined, { sensitivity: 'base' })
+      )
+      const sortedSingles = singles
+        .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '', undefined, { sensitivity: 'base' }))
+      sortedSingles.forEach(s => { s._rowNo = rowNo++ })
+      const data = [...numbered, ...sortedSingles].filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
       return { data, nextRowNo: rowNo }
     }
 

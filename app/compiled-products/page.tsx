@@ -58,14 +58,7 @@ export default async function CompiledProductsPage() {
   if (itemsResult.status === 'rejected') throw itemsResult.reason
 
   const items = itemsResult.value
-  const shipped = items
-    .filter(item => item.section === 'shipped')
-    .sort((a, b) => {
-      const dateA = a.created_at ?? ''
-      const dateB = b.created_at ?? ''
-      if (dateA !== dateB) return dateA.localeCompare(dateB)
-      return (a.line_no ?? 0) - (b.line_no ?? 0)
-    })
+  const shipped = items.filter(item => item.section === 'shipped')
   const products = shipped.map(mapToProduct)
   const importMeta = importMetaResult.status === 'fulfilled' ? importMetaResult.value : null
   const productDocuments = productDocumentsResult.status === 'fulfilled' ? productDocumentsResult.value : []
