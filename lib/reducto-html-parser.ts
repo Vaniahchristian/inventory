@@ -279,6 +279,187 @@ function looksLikeHeaderlessDataTable(grid: string[][]): boolean {
   return row.some(c => /\bSANCARGO\b|\bRGO\b|\bMS-[A-Z0-9-]+\b|\b\d+-T-[A-Z0-9-]+\b/i.test(c))
 }
 
+/**
+ * Sales order pages 2+ arrive as headerless <tbody>-only tables.
+ * Detected by: first cell = row number, second-to-last or third-to-last = 13-digit barcode.
+ */
+function looksLikeHeaderlessSalesOrderTable(grid: string[][]): boolean {
+  if (grid.length === 0) return false
+  const row = grid[0] ?? []
+  if (row.length < 10) return false
+  if (!/^\d{1,4}$/.test(row[0]?.trim() ?? '')) return false
+  const n = row.length
+  return (
+    /^\d{12,15}$/.test(row[n - 2]?.trim() ?? '') ||
+    /^\d{12,15}$/.test(row[n - 3]?.trim() ?? '')
+  )
+}
+
+/**
+ * Right-anchored positional parser for a single headerless sales order row.
+ * Works across all page variants (19–22 columns) because it anchors from the
+ * right (W.H. last, barcode second-to-last) and works inward.
+ * Returns null for TOTAL/label/blank rows.
+ */
+function parseSalesOrderRowPositional(
+  row: string[],
+  section: Section,
+  lineNo: number,
+  inheritedMarks: string | null,
+): ExtractedProduct | null {
+  const n = row.length
+  if (n < 7) return null
+
+  // Row must start with an integer row number
+  if (!/^\d{1,4}$/.test(row[0]?.trim() ?? '')) return null
+
+  // Detect REK vs CODE at second-to-last position
+  let codeIdx: number
+  let rekValue: string | null = null
+  const penultimate = row[n - 2]?.trim() ?? ''
+  if (/^\d{12,15}$/.test(penultimate)) {
+    codeIdx = n - 2
+  } else {
+    codeIdx = n - 3
+    rekValue = penultimate || null
+  }
+  if (codeIdx < 5) return null
+
+  // Verify barcode is a real 13-15 digit code
+  const barcodeVal = row[codeIdx]?.trim() ?? ''
+  if (!/^\d{12,15}$/.test(barcodeVal)) return null
+
+  // Right-anchored numeric fields
+  const ttKgsIdx = codeIdx - 1
+  const ttCbmIdx = codeIdx - 2
+  const gwIdx    = codeIdx - 3
+  const cbmIdx   = codeIdx - 4
+
+  // Detect W+H merge: cell at codeIdx-5 contains "NUM NUM" (two numbers separated by space)
+  const cellMinus5 = row[codeIdx - 5]?.trim() ?? ''
+  const whMerge = cellMinus5.match(/^(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$/)
+
+  let dim_l_cm: number | null
+  let dim_w_cm: number | null
+  let dim_h_cm: number | null
+  let lIdx: number
+
+  if (whMerge) {
+    dim_w_cm = parseFloat(whMerge[1])
+    dim_h_cm = parseFloat(whMerge[2])
+    lIdx = codeIdx - 6
+    dim_l_cm = parseNum(row[lIdx])
+  } else {
+    dim_h_cm = parseNum(row[codeIdx - 5])
+    dim_w_cm = parseNum(row[codeIdx - 6])
+    lIdx = codeIdx - 7
+    dim_l_cm = parseNum(row[lIdx])
+  }
+
+  const amountIdx = lIdx - 1
+  const upIdx     = amountIdx - 1
+  const tqtyIdx   = upIdx - 1
+  const qtyIdx    = tqtyIdx - 1
+  const ctnIdx    = qtyIdx - 1
+  const desIdx    = ctnIdx - 1
+
+  if (desIdx < 1) return null
+
+  // Find ITEM_NO by scanning left side (after row number, skipping dates and ORD NO)
+  let itemCode: string | null = null
+  for (let i = 1; i < desIdx; i++) {
+    const c = row[i]?.trim() ?? ''
+    if (!c) continue
+    if (/^\d{4}-\d{2}-\d{2}$/.test(c)) continue   // full date YYYY-MM-DD
+    if (/^20\d{2}[-\/]\d{2}/.test(c)) continue     // modern year partial date 20XX-MM
+    if (/^\d{2}-\d{2}-?$/.test(c)) continue        // 2-digit year partial YY-MM or YY-MM-
+    if (/^[A-Z]\d{2}-\d{4}$/.test(c)) continue     // ORD NO like C25-6083
+    itemCode = c
+    break
+  }
+
+  const desc = row[desIdx]?.trim() ?? ''
+  if (!desc && !itemCode) return null
+
+  const total_qty_parsed    = parseNum(row[tqtyIdx])
+  const total_amount_parsed = parseNum(row[amountIdx])
+  let unit_price_rmb        = parseNum(row[upIdx])
+  if (
+    (unit_price_rmb === null || unit_price_rmb <= 0) &&
+    total_amount_parsed !== null && total_qty_parsed !== null && total_qty_parsed > 0
+  ) {
+    const inferred = Math.round((total_amount_parsed / total_qty_parsed) * 100) / 100
+    if (isFinite(inferred) && inferred > 0) unit_price_rmb = inferred
+  }
+
+  const qty_per_carton = parseNum(row[qtyIdx])
+
+  return {
+    line_no: lineNo,
+    marks: inheritedMarks,
+    shop: null,
+    item_code: itemCode,
+    description: desc || null,
+    packaging: qty_per_carton !== null ? `${qty_per_carton}pcs` : null,
+    qty_per_carton,
+    total_cartons: parseNum(row[ctnIdx]),
+    total_qty: total_qty_parsed,
+    unit_price_rmb,
+    total_amount_rmb: total_amount_parsed,
+    dim_l_cm,
+    dim_w_cm,
+    dim_h_cm,
+    unit_cbm: parseNum(row[cbmIdx]),
+    total_cbm: parseNum(row[ttCbmIdx]),
+    unit_weight_kg: parseNum(row[gwIdx]),
+    total_weight_kg: parseNum(row[ttKgsIdx]),
+    barcode: barcodeVal || null,
+    warehouse: row[n - 1]?.trim() || null,
+    box_no_start: null,
+    box_no_end: null,
+    section,
+    remarks: rekValue,
+  }
+}
+
+/** Parse an entire headerless sales order grid using right-anchored positional mapping. */
+function parseSalesOrderGridPositional(
+  grid: string[][],
+  defaultSection: Section,
+  startLineNo: number,
+  inheritedMarks: string | null,
+  parseMode: ParseMode
+): GridParseResult {
+  const products: ExtractedProduct[] = []
+  let lineNo = startLineNo
+
+  for (const row of grid) {
+    if (row.every(c => !c.trim())) continue
+
+    // TOTAL / label rows (first cell is not an integer)
+    const firstCell = row[0]?.trim() ?? ''
+    if (!/^\d{1,4}$/.test(firstCell)) {
+      if (parseMode === 'full') {
+        const rowText = row.filter(Boolean).join(' ')
+        if (rowText.trim()) {
+          const synth = syntheticFullExtractRow(lineNo++, rowText, defaultSection, 'full_extract:sales_order_total')
+          synth.item_code = FOOTER_ITEM_CODE
+          products.push(synth)
+        }
+      }
+      continue
+    }
+
+    const product = parseSalesOrderRowPositional(row, defaultSection, lineNo, inheritedMarks)
+    if (product) {
+      products.push(product)
+      lineNo++
+    }
+  }
+
+  return { products, lastMarks: inheritedMarks, exitSection: defaultSection }
+}
+
 /** When a header cell has colspan, expandHtmlTable duplicates the label across spanned columns. */
 function mergeFieldParts(a: string, b: string): string {
   const t1 = a.trim()
@@ -605,6 +786,10 @@ function parseGridToProducts(
 
   // Require at least 3 known columns — otherwise this table is not a product table
   if (bestScore < 3 || headerRowIdx === -1) {
+    // Sales order pages 2+ arrive as headerless <tbody>-only tables — use positional parser
+    if (docType === 'sales_order' && looksLikeHeaderlessSalesOrderTable(grid)) {
+      return parseSalesOrderGridPositional(grid, defaultSection, startLineNo, inheritedMarks, parseMode)
+    }
     if (parseMode === 'full') {
       const rows = grid
         .map(row => row.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim())
@@ -926,14 +1111,20 @@ function buildDocument(
   const client_id =
     flat.match(/CLIENT\s+DETAILS\s*[:\s]+([^\n\r]{2,80}?)(?:\s+CONTAINER|\s{2,}|$)/i)?.[1]?.trim() ??
     flat.match(/CLIENT\s*(?:DETAILS|ID|NAME|NO)?\.?\s*[:\s]+([^\n\r,]{2,80})/i)?.[1]?.trim() ??
+    // Sales order: "客户：C707-CG"
+    flat.match(/客户[：:]\s*([^\s\n,，]{2,40})/)?.[1]?.trim() ??
     null
 
   const doc_number =
     flat.match(/(?:ORDER\s*NO|MANIFEST\s*NO|REF\s*NO|DOC\s*NO)\.?\s*[:\s]+([A-Z0-9-]+)/i)?.[1]?.trim() ??
+    // Sales order header: "NO: C25-6083" — \bNO followed by colon/space, then an order-number pattern
+    flat.match(/\bNO[:\s]+([A-Z][A-Z0-9]*\d+-\d+)\b/)?.[1]?.trim() ??
     null
 
   const document_date =
     headerText.match(/DATE\s*[:\s]+(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})/i)?.[1]?.replace(/\//g, '-') ??
+    // Sales order: "销售日期：2026-03-15"
+    flat.match(/销售日期[：:]\s*(\d{4}-\d{2}-\d{2})/)?.[1] ??
     flat.match(/(\d{4}[-\/]\d{2}[-\/]\d{2})/)?.[1]?.replace(/\//g, '-') ??
     null
 
@@ -942,20 +1133,32 @@ function buildDocument(
     footerTexts.find(t => /CTN|CBM|KGS/i.test(t)) ??
     ''
 
+  // Sales order TOTAL row flat text: "TOTAL: 1587 36839 372377.1 87.57 21772.49 CTN PCS Amount CBM KGS"
+  // Five consecutive numbers: CTN, PCS, Amount(RMB), CBM, KGS
+  const flatClean = flat.replace(/,/g, '')
+  const soTotalsMatch = flatClean.match(
+    /TOTAL[:\s]+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/i
+  )
+
   const footer_totals: ExtractedDocument['footer_totals'] = {
     total_cartons:
       extractUnit(flat, /TOTAL\s+CARTONS?\s*[:\s]*([\d,]+)/i) ??
       extractUnit(flat, /TOTAL\s+CARTON\s*[:\s]*([\d,]+)/i) ??
-      extractUnit(totalLine, /(\d+(?:\.\d+)?)\s*CTNS?/i),
+      extractUnit(totalLine, /(\d+(?:\.\d+)?)\s*CTNS?/i) ??
+      (soTotalsMatch ? parseFloat(soTotalsMatch[1]) || null : null),
     total_cbm:
-      extractUnit(flat, /TOTAL\s+CBM\s*[:\s]*([\d.]+)/i) ?? extractUnit(totalLine, /(\d+(?:\.\d+)?)\s*CBM/i),
+      extractUnit(flat, /TOTAL\s+CBM\s*[:\s]*([\d.]+)/i) ??
+      extractUnit(totalLine, /(\d+(?:\.\d+)?)\s*CBM/i) ??
+      (soTotalsMatch ? parseFloat(soTotalsMatch[4]) || null : null),
     total_weight_kg:
       extractUnit(flat, /TOTAL\s+WEIGHT\s*[:\s]*([\d,]+)/i) ??
-      extractUnit(totalLine, /(\d+(?:\.\d+)?)\s*KGS?/i),
+      extractUnit(totalLine, /(\d+(?:\.\d+)?)\s*KGS?/i) ??
+      (soTotalsMatch ? parseFloat(soTotalsMatch[5]) || null : null),
     total_amount_rmb:
-      extractUnit(flat.replace(/,/g, ''), /TOTAL\s+COST\s*[:\s]*RMB\s*([\d,]+)/i) ??
-      extractUnit(flat.replace(/,/g, ''), /TOTAL\s+COST[^\d]{0,24}([\d,]{4,})/i) ??
-      extractUnit(totalLine.replace(/,/g, ''), /[¥￥]([\d.]+)/),
+      extractUnit(flatClean, /TOTAL\s+COST\s*[:\s]*RMB\s*([\d,]+)/i) ??
+      extractUnit(flatClean, /TOTAL\s+COST[^\d]{0,24}([\d,]{4,})/i) ??
+      extractUnit(totalLine.replace(/,/g, ''), /[¥￥]([\d.]+)/) ??
+      (soTotalsMatch ? parseFloat(soTotalsMatch[3]) || null : null),
     total_amount_usd:
       extractUnit(flat.replace(/,/g, ''), /TOTAL.*?USD\s+([\d.]+)/i) ??
       extractUnit(flat.replace(/,/g, ''), /USD\s+([\d.]+)/i),
