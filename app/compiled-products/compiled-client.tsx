@@ -88,10 +88,7 @@ const EXPORT_FIELDS: { key: FieldKey; label: string; defaultOn: boolean }[] = [
   { key: 'total_amount_rmb',label: 'T.Amount (¥)',     defaultOn: false },
 ]
 
-// Strip CJK characters — jsPDF's built-in fonts can't render them and produce garbled boxes
-function cjkSafe(text: string): string {
-  return text.replace(/[\u2e80-\u2eff\u3000-\u9fff\uf900-\ufaff\ufe30-\ufe4f]/g, '').replace(/\s+/g, ' ').trim() || '-'
-}
+
 
 function getCellValue(row: CompiledRow, key: FieldKey): string {
   switch (key) {
@@ -133,37 +130,56 @@ async function exportToExcel(rows: CompiledRow[], selectedFields: FieldKey[], im
 
 // ── PDF export ──────────────────────────────────────────────────────────────
 
-async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta: ImportMeta | null) {
-  const { default: jsPDF } = await import('jspdf')
-  const { default: autoTable } = await import('jspdf-autotable')
-
-  const doc = new jsPDF({ orientation: 'landscape', format: 'a3' })
+function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta: ImportMeta | null) {
   const fieldDefs = EXPORT_FIELDS.filter(f => selectedFields.includes(f.key))
 
-  doc.setFontSize(13)
-  doc.text('Compiled Products', 14, 14)
-  if (importMeta) {
-    doc.setFontSize(8)
-    doc.text(
-      `Client: ${importMeta.client_details ?? '-'}   Container: ${importMeta.container_no ?? '-'}   ${rows.length} items`,
-      14, 20,
-    )
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+  const metaLine = importMeta
+    ? `Client: ${esc(importMeta.client_details ?? '-')} &nbsp;|&nbsp; Container: ${esc(importMeta.container_no ?? '-')} &nbsp;|&nbsp; ${rows.length} items`
+    : `${rows.length} items`
+
+  const headerCells = ['No.', ...fieldDefs.map(f => f.label)].map(h => `<th>${esc(h)}</th>`).join('')
+
+  const bodyRows = rows.map((row, i) => {
+    const cells = [String(i + 1), ...fieldDefs.map(f => getCellValue(row, f.key))]
+      .map(c => `<td>${esc(c)}</td>`).join('')
+    return `<tr>${cells}</tr>`
+  }).join('')
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Compiled Products</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 8pt; margin: 0; padding: 8mm; color: #111; }
+  h2 { margin: 0 0 2mm; font-size: 11pt; }
+  p  { margin: 0 0 4mm; font-size: 7.5pt; color: #555; }
+  table { border-collapse: collapse; width: 100%; table-layout: auto; }
+  th { background: #1e293b; color: #fff; padding: 2px 4px; font-size: 7pt; text-align: left; white-space: nowrap; }
+  td { border: 1px solid #d1d5db; padding: 2px 4px; font-size: 7.5pt; vertical-align: top; word-break: break-word; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  @media print { @page { size: A3 landscape; margin: 8mm; } }
+</style>
+</head>
+<body>
+<h2>Compiled Products</h2>
+<p>${metaLine}</p>
+<table>
+  <thead><tr>${headerCells}</tr></thead>
+  <tbody>${bodyRows}</tbody>
+</table>
+<script>window.onload = () => { window.print(); }</script>
+</body>
+</html>`
+
+  const win = window.open('', '_blank', 'width=1200,height=800')
+  if (win) {
+    win.document.write(html)
+    win.document.close()
   }
-
-  autoTable(doc, {
-    startY: 26,
-    head: [['No.', ...fieldDefs.map(f => f.label)]],
-    body: rows.map((row, i) => [i + 1, ...fieldDefs.map(f => cjkSafe(getCellValue(row, f.key)))]),
-    styles: { fontSize: 7, cellPadding: 1.5, overflow: 'linebreak' },
-    headStyles: { fillColor: [30, 41, 59], fontSize: 7, cellPadding: 2 },
-    alternateRowStyles: { fillColor: [248, 250, 252] },
-    columnStyles: {
-      0: { cellWidth: 10 },
-      ...Object.fromEntries(fieldDefs.map((_, i) => [i + 1, { cellWidth: 'auto' as const }])),
-    },
-  })
-
-  doc.save(`compiled_products_${Date.now()}.pdf`)
 }
 
 // ── Component ───────────────────────────────────────────────────────────────

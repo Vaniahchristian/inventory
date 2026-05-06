@@ -225,115 +225,138 @@ export function exportMovementsToExcel(movements: StockMovement[]) {
   XLSX.writeFile(wb, `stock_movements_${Date.now()}.xlsx`)
 }
 
-function cjkSafe(text: string): string {
-  return text.replace(/[\u2e80-\u2eff\u3000-\u9fff\uf900-\ufaff\ufe30-\ufe4f]/g, '').replace(/\s+/g, ' ').trim() || '-'
-}
-
 export function exportProductsToPdf(products: Product[]) {
-  import('jspdf').then(async ({ default: jsPDF }) => {
-    const { default: autoTable } = await import('jspdf-autotable')
-    const doc = new jsPDF({ orientation: 'landscape', format: 'a3' })
-    doc.setFontSize(13)
-    doc.text('Product Inventory Report', 14, 14)
-    doc.setFontSize(8)
-    doc.text(`Generated: ${new Date().toLocaleString()}  |  ${products.length} items`, 14, 20)
+  const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
-    const totalCbm = products.reduce((s, p) => s + (p.cbm ?? 0), 0)
-    const totalWeight = products.reduce((s, p) => s + parseFloat(String(p.total_weight ?? '0').replace(/[^\d.]/g, '') || '0'), 0)
-    const totalCartons = products.reduce((s, p) => s + (p.cartons ?? 0), 0)
-    const totalAmount = products.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+  const totalCbm = products.reduce((s, p) => s + (p.cbm ?? 0), 0)
+  const totalWeight = products.reduce((s, p) => s + parseFloat(String(p.total_weight ?? '0').replace(/[^\d.]/g, '') || '0'), 0)
+  const totalCartons = products.reduce((s, p) => s + (p.cartons ?? 0), 0)
+  const totalAmount = products.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
 
-    autoTable(doc, {
-      startY: 25,
-      head: [[
-        'MARKS / SKU', 'Name', 'Description', 'SHOP#', 'Packing',
-        'CTN', 'Qty', 'CBM', 'U.Wt', 'T.Wt',
-        'Unit Price ¥', 'T.Amount ¥',
-      ]],
-      body: [
-        ...products.map(p => [
-          p.sku ?? '-',
-          cjkSafe(p.name ?? '-'),
-          cjkSafe(p.description ?? '-'),
-          cjkSafe(p.shop_name ?? p.suppliers?.name ?? '-'),
-          p.packing ?? '-',
-          p.cartons ?? '-',
-          `${p.quantity} ${p.unit}`,
-          p.cbm != null ? p.cbm.toFixed(3) : '-',
-          p.unit_weight ?? '-',
-          p.total_weight ?? '-',
-          p.cost_price > 0 ? `¥${p.cost_price.toLocaleString()}` : '-',
-          p.total_amount_rmb != null ? `¥${p.total_amount_rmb.toLocaleString()}` : '-',
-        ]),
-        // Totals row
-        [
-          { content: 'TOTALS', styles: { fontStyle: 'bold' } },
-          '', '', '',
-          '',
-          { content: String(totalCartons || '-'), styles: { fontStyle: 'bold' } },
-          '',
-          { content: totalCbm > 0 ? totalCbm.toFixed(3) : '-', styles: { fontStyle: 'bold' } },
-          '',
-          { content: totalWeight > 0 ? `${totalWeight.toFixed(1)} KGS` : '-', styles: { fontStyle: 'bold' } },
-          '',
-          { content: totalAmount > 0 ? `¥${totalAmount.toLocaleString()}` : '-', styles: { fontStyle: 'bold' } },
-        ],
-      ],
-      styles: { fontSize: 7, cellPadding: 1.5, overflow: 'linebreak' },
-      headStyles: { fillColor: [30, 41, 59], fontSize: 7, cellPadding: 2 },
-      alternateRowStyles: { fillColor: [248, 250, 252] },
-      columnStyles: {
-        0: { cellWidth: 22 },   // SKU
-        1: { cellWidth: 38 },   // Name
-        2: { cellWidth: 38 },   // Description
-        3: { cellWidth: 20 },   // Shop
-        4: { cellWidth: 18 },   // Packing
-        5: { cellWidth: 10 },   // CTN
-        6: { cellWidth: 14 },   // Qty
-        7: { cellWidth: 14 },   // CBM
-        8: { cellWidth: 14 },   // U.Wt
-        9: { cellWidth: 16 },   // T.Wt
-        10: { cellWidth: 18 },  // Unit Price
-        11: { cellWidth: 20 },  // T.Amount
-      },
-      didParseCell: (data) => {
-        // Bold totals row
-        if (data.row.index === products.length) {
-          data.cell.styles.fillColor = [226, 232, 240]
-        }
-      },
-    })
-    doc.save(`products_${Date.now()}.pdf`)
-  })
+  const headers = ['MARKS / SKU', 'Name', 'Description', 'SHOP#', 'Packing', 'CTN', 'Qty', 'CBM', 'U.Wt', 'T.Wt', 'Unit Price ¥', 'T.Amount ¥']
+  const headerRow = headers.map(h => `<th>${esc(h)}</th>`).join('')
+
+  const bodyRows = products.map((p, i) => {
+    const cells = [
+      p.sku ?? '-',
+      p.name ?? '-',
+      p.description ?? '-',
+      p.shop_name ?? p.suppliers?.name ?? '-',
+      p.packing ?? '-',
+      p.cartons ?? '-',
+      `${p.quantity} ${p.unit}`,
+      p.cbm != null ? p.cbm.toFixed(3) : '-',
+      p.unit_weight ?? '-',
+      p.total_weight ?? '-',
+      p.cost_price > 0 ? `¥${p.cost_price.toLocaleString()}` : '-',
+      p.total_amount_rmb != null ? `¥${p.total_amount_rmb.toLocaleString()}` : '-',
+    ].map(c => `<td>${esc(String(c))}</td>`).join('')
+    return `<tr class="${i % 2 === 1 ? 'alt' : ''}">${cells}</tr>`
+  }).join('')
+
+  const totalsRow = [
+    '<td class="bold">TOTALS</td>',
+    '<td></td><td></td><td></td><td></td>',
+    `<td class="bold">${totalCartons || '-'}</td>`,
+    '<td></td>',
+    `<td class="bold">${totalCbm > 0 ? totalCbm.toFixed(3) : '-'}</td>`,
+    '<td></td>',
+    `<td class="bold">${totalWeight > 0 ? `${totalWeight.toFixed(1)} KGS` : '-'}</td>`,
+    '<td></td>',
+    `<td class="bold">${totalAmount > 0 ? `¥${totalAmount.toLocaleString()}` : '-'}</td>`,
+  ].join('')
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Product Inventory Report</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 8pt; margin: 0; padding: 8mm; color: #111; }
+  h2 { margin: 0 0 1mm; font-size: 11pt; }
+  p  { margin: 0 0 4mm; font-size: 7.5pt; color: #555; }
+  table { border-collapse: collapse; width: 100%; table-layout: auto; }
+  th { background: #1e293b; color: #fff; padding: 2px 4px; font-size: 7pt; text-align: left; white-space: nowrap; }
+  td { border: 1px solid #d1d5db; padding: 2px 4px; font-size: 7.5pt; vertical-align: top; word-break: break-word; }
+  tr.alt td { background: #f8fafc; }
+  tr.totals td { background: #e2e8f0; }
+  .bold { font-weight: bold; }
+  @media print { @page { size: A3 landscape; margin: 8mm; } }
+</style>
+</head>
+<body>
+<h2>Product Inventory Report</h2>
+<p>Generated: ${new Date().toLocaleString()} &nbsp;|&nbsp; ${products.length} items</p>
+<table>
+  <thead><tr>${headerRow}</tr></thead>
+  <tbody>
+    ${bodyRows}
+    <tr class="totals">${totalsRow}</tr>
+  </tbody>
+</table>
+<script>window.onload = () => { window.print(); }</script>
+</body>
+</html>`
+
+  const win = window.open('', '_blank', 'width=1400,height=900')
+  if (win) {
+    win.document.write(html)
+    win.document.close()
+  }
 }
 
 export function exportMovementsToPdf(movements: StockMovement[]) {
-  import('jspdf').then(async ({ default: jsPDF }) => {
-    const { default: autoTable } = await import('jspdf-autotable')
-    const doc = new jsPDF({ orientation: 'landscape' })
-    doc.setFontSize(14)
-    doc.text('Stock Movements Report', 14, 15)
-    doc.setFontSize(9)
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 22)
-    autoTable(doc, {
-      startY: 27,
-      head: [['Date', 'Product', 'SKU', 'Type', 'Qty', 'Unit', 'Reference', 'Notes']],
-      body: movements.map(m => [
-        formatDateTime(m.created_at),
-        m.products?.name ?? '-',
-        m.products?.sku ?? '-',
-        m.movement_type,
-        m.quantity,
-        m.products?.unit ?? '-',
-        m.reference ?? '-',
-        m.notes ?? '-',
-      ]),
-      styles: { fontSize: 8, cellPadding: 2 },
-      headStyles: { fillColor: [30, 41, 59] },
-      alternateRowStyles: { fillColor: [248, 250, 252] },
-    })
-    doc.save(`stock_movements_${Date.now()}.pdf`)
-  })
+  const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const headers = ['Date', 'Product', 'SKU', 'Type', 'Qty', 'Unit', 'Reference', 'Notes']
+  const headerRow = headers.map(h => `<th>${esc(h)}</th>`).join('')
+  const bodyRows = movements.map((m, i) => {
+    const cells = [
+      formatDateTime(m.created_at),
+      m.products?.name ?? '-',
+      m.products?.sku ?? '-',
+      m.movement_type,
+      m.quantity,
+      m.products?.unit ?? '-',
+      m.reference ?? '-',
+      m.notes ?? '-',
+    ].map(c => `<td>${esc(String(c))}</td>`).join('')
+    return `<tr class="${i % 2 === 1 ? 'alt' : ''}">${cells}</tr>`
+  }).join('')
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Stock Movements Report</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 8pt; margin: 0; padding: 8mm; color: #111; }
+  h2 { margin: 0 0 1mm; font-size: 11pt; }
+  p  { margin: 0 0 4mm; font-size: 7.5pt; color: #555; }
+  table { border-collapse: collapse; width: 100%; }
+  th { background: #1e293b; color: #fff; padding: 3px 5px; font-size: 7.5pt; text-align: left; white-space: nowrap; }
+  td { border: 1px solid #d1d5db; padding: 3px 5px; font-size: 8pt; vertical-align: top; word-break: break-word; }
+  tr.alt td { background: #f8fafc; }
+  @media print { @page { size: A3 landscape; margin: 8mm; } }
+</style>
+</head>
+<body>
+<h2>Stock Movements Report</h2>
+<p>Generated: ${new Date().toLocaleString()}</p>
+<table>
+  <thead><tr>${headerRow}</tr></thead>
+  <tbody>${bodyRows}</tbody>
+</table>
+<script>window.onload = () => { window.print(); }</script>
+</body>
+</html>`
+
+  const win = window.open('', '_blank', 'width=1200,height=800')
+  if (win) {
+    win.document.write(html)
+    win.document.close()
+  }
 }
 
 function isPdfFile(file: File): boolean {
