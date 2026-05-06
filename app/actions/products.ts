@@ -773,48 +773,24 @@ export async function getDocumentItems() {
  * filter is not flooded by re-imports of the same PDF. “All PDFs” still lists every line from every run.
  */
 export async function getDocumentItemDocuments(): Promise<ProductDocumentRef[]> {
-  const idSet = new Set<string>()
-  const pageSize = 1000
-  let offset = 0
-  for (;;) {
-    const { data: itemRows, error: itemErr } = await withSupabaseRetry(
-      () =>
-        supabase.from('document_items').select('document_id').range(offset, offset + pageSize - 1),
-      'getDocumentItemDocuments.itemIds'
-    )
-    if (itemErr) throw new Error(itemErr.message)
-    const batch = itemRows ?? []
-    for (const r of batch) {
-      const id = (r as { document_id?: string | null }).document_id
-      if (typeof id === 'string' && id.length > 0) idSet.add(id)
-    }
-    if (batch.length < pageSize) break
-    offset += pageSize
-  }
-  const ids = [...idSet]
-  if (ids.length === 0) return []
+  const { data: joinedRows, error } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('documents')
+        .select('id, source_file_name, document_type, extraction_status, publish_state, created_at, document_items!inner(document_id)')
+        .order('created_at', { ascending: false }),
+    'getDocumentItemDocuments.joined'
+  )
+  if (error) throw new Error(error.message)
 
-  const chunkSize = 80
+  // Join can return duplicate document rows (one per line item). Collapse by document id first.
   const byId = new Map<string, ProductDocumentRef & { created_at: string }>()
-  for (let i = 0; i < ids.length; i += chunkSize) {
-    const chunk = ids.slice(i, i + chunkSize)
-    const { data: rows, error } = await withSupabaseRetry(
-      () =>
-        supabase
-          .from('documents')
-          .select('id, source_file_name, document_type, extraction_status, publish_state, created_at')
-          .in('id', chunk),
-      'getDocumentItemDocuments.docs'
-    )
-    if (error) throw new Error(error.message)
-    for (const row of rows ?? []) {
-      const rec = row as ProductDocumentRef & { created_at: string }
-      if (rec.id) byId.set(rec.id, rec)
-    }
+  for (const row of joinedRows ?? []) {
+    const rec = row as ProductDocumentRef & { created_at: string }
+    if (rec.id && !byId.has(rec.id)) byId.set(rec.id, rec)
   }
 
-  // Newest first, then take one document per source file name (re-imports share the same label).
-  // Older runs still appear in the grid when "All PDFs" is selected; this only declutters the filter.
+  // Newest first, then keep one document per source file name for cleaner dropdown labels.
   const sortedNewestFirst = [...byId.values()].sort((a, b) =>
     String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''))
   )
