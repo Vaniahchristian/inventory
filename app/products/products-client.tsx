@@ -199,41 +199,101 @@ async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
     p.total_amount_rmb ?? null,
     p.section,
   ])
-  const ws = XLSX.utils.aoa_to_sheet([header, ...data])
+  const totalCtn    = rows.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
+  const totalQty    = rows.reduce((s, p) => s + (p.total_quantity ?? 0), 0)
+  const totalCbm    = rows.reduce((s, p) => s + (p.total_cbm ?? 0), 0)
+  const totalWkg    = rows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
+  const totalAmount = rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+  const totalsRow = [
+    `TOTALS (${rows.length} rows)`, '', '', '', '', '',
+    totalCtn, totalQty, null, null, null, null, totalCbm, null, totalWkg, null, totalAmount, '',
+  ]
+
+  const ws = XLSX.utils.aoa_to_sheet([header, ...data, totalsRow])
   ws['!cols'] = header.map((_, idx) => ({ wch: idx === 0 ? 5 : 16 }))
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, 'Products')
   XLSX.writeFile(wb, `products_${Date.now()}.xlsx`)
 }
 
-async function exportDocumentItemsToPdf(rows: DocumentItem[]) {
-  const { default: jsPDF } = await import('jspdf')
-  const { default: autoTable } = await import('jspdf-autotable')
-  const doc = new jsPDF({ orientation: 'landscape', format: 'a3' })
-  doc.setFontSize(13)
-  doc.text('Products', 14, 14)
-  autoTable(doc, {
-    startY: 20,
-    head: [['No.', 'Marks', 'Shop', 'Item No', 'Description', 'Packing', 'CTN', 'Qty', 'T.CBM', 'T.Wkg', 'Amount (RMB)', 'Section']],
-    body: rows.map((p, i) => [
+function exportDocumentItemsToPdf(rows: DocumentItem[]) {
+  const esc = (s: unknown) => String(s ?? '-').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+  const totalCtn    = rows.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
+  const totalQty    = rows.reduce((s, p) => s + (p.total_quantity ?? 0), 0)
+  const totalCbm    = rows.reduce((s, p) => s + (p.total_cbm ?? 0), 0)
+  const totalWkg    = rows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
+  const totalAmount = rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+
+  const headers = ['No.', 'Marks', 'Shop', 'Item No', 'Description', 'Packing', 'CTN', 'Qty', 'T.CBM', 'T.Wkg', 'Amount (RMB)', 'Section']
+  const headerRow = headers.map(h => `<th>${esc(h)}</th>`).join('')
+
+  const bodyRows = rows.map((p, i) => {
+    const cells = [
       i + 1,
-      p.marks ?? '-',
-      p.shop ?? '-',
-      p.item_code ?? '-',
-      p.description ?? '-',
-      p.packaging ?? '-',
+      p.marks,
+      p.shop,
+      p.item_code,
+      p.description,
+      p.packaging,
       p.total_cartons ?? 0,
       p.total_quantity ?? 0,
-      p.total_cbm ?? '-',
-      p.total_weight_kg ?? '-',
-      p.total_amount_rmb ?? '-',
+      p.total_cbm != null ? Number(p.total_cbm).toFixed(4) : '-',
+      p.total_weight_kg != null ? Number(p.total_weight_kg).toFixed(2) : '-',
+      p.total_amount_rmb != null ? p.total_amount_rmb.toLocaleString() : '-',
       p.section,
-    ]),
-    styles: { fontSize: 7, cellPadding: 1.5, overflow: 'linebreak' },
-    headStyles: { fillColor: [30, 41, 59], fontSize: 7, cellPadding: 2 },
-    alternateRowStyles: { fillColor: [248, 250, 252] },
-  })
-  doc.save(`products_${Date.now()}.pdf`)
+    ].map(c => `<td>${esc(c)}</td>`).join('')
+    return `<tr class="${i % 2 === 1 ? 'alt' : ''}">${cells}</tr>`
+  }).join('')
+
+  const totalsRow = [
+    `<td class="bold" colspan="6">TOTALS — ${rows.length} rows</td>`,
+    `<td class="bold">${totalCtn.toLocaleString()}</td>`,
+    `<td class="bold">${totalQty.toLocaleString()}</td>`,
+    `<td class="bold">${totalCbm.toFixed(4)}</td>`,
+    `<td class="bold">${totalWkg.toFixed(2)}</td>`,
+    `<td class="bold">${totalAmount.toLocaleString()}</td>`,
+    `<td></td>`,
+  ].join('')
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Products</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 8pt; margin: 0; padding: 8mm; color: #111; }
+  h2 { margin: 0 0 1mm; font-size: 11pt; }
+  p  { margin: 0 0 4mm; font-size: 7.5pt; color: #555; }
+  table { border-collapse: collapse; width: 100%; table-layout: auto; }
+  th { background: #1e293b; color: #fff; padding: 2px 4px; font-size: 7pt; text-align: left; white-space: nowrap; }
+  td { border: 1px solid #d1d5db; padding: 2px 4px; font-size: 7.5pt; vertical-align: top; word-break: break-word; }
+  tr.alt td { background: #f8fafc; }
+  tr.totals td { background: #e2e8f0; }
+  .bold { font-weight: bold; }
+  @media print { @page { size: A3 landscape; margin: 8mm; } }
+</style>
+</head>
+<body>
+<h2>Products</h2>
+<p>Generated: ${new Date().toLocaleString()}</p>
+<table>
+  <thead><tr>${headerRow}</tr></thead>
+  <tbody>
+    ${bodyRows}
+    <tr class="totals">${totalsRow}</tr>
+  </tbody>
+</table>
+<script>window.onload = () => { window.print(); }</script>
+</body>
+</html>`
+
+  const win = window.open('', '_blank', 'width=1400,height=900')
+  if (win) {
+    win.document.write(html)
+    win.document.close()
+  }
 }
 
 export function ProductsClient({

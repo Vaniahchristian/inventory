@@ -120,7 +120,19 @@ async function exportToExcel(rows: CompiledRow[], selectedFields: FieldKey[], im
     ...fieldDefs.map(f => getCellValue(row, f.key)),
   ])
 
-  const ws = XLSX.utils.aoa_to_sheet([header, ...data])
+  const totalsRow: (string | number | null)[] = [`TOTALS (${rows.length} rows)`]
+  for (const f of fieldDefs) {
+    switch (f.key) {
+      case 'cartons':          totalsRow.push(rows.reduce((s, r) => s + (r.cartons ?? 0), 0)); break
+      case 'quantity':         totalsRow.push(rows.reduce((s, r) => s + r.quantity, 0)); break
+      case 'cbm':              totalsRow.push(rows.reduce((s, r) => s + (r.cbm ?? 0), 0)); break
+      case 'total_amount_rmb': totalsRow.push(rows.reduce((s, r) => s + (r.total_amount_rmb ?? 0), 0)); break
+      case 'total_weight':     totalsRow.push(rows.reduce((s, r) => s + parseWeight(r.total_weight), 0)); break
+      default:                 totalsRow.push(null)
+    }
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet([header, ...data, totalsRow])
   ws['!cols'] = [{ wch: 5 }, ...fieldDefs.map(() => ({ wch: 22 }))]
 
   const wb = XLSX.utils.book_new()
@@ -144,8 +156,21 @@ function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta
   const bodyRows = rows.map((row, i) => {
     const cells = [String(i + 1), ...fieldDefs.map(f => getCellValue(row, f.key))]
       .map(c => `<td>${esc(c)}</td>`).join('')
-    return `<tr>${cells}</tr>`
+    return `<tr class="${i % 2 === 1 ? 'alt' : ''}">${cells}</tr>`
   }).join('')
+
+  const totalCells = ['<td class="bold" style="background:#e2e8f0">TOTALS</td>']
+  for (const f of fieldDefs) {
+    let val = ''
+    switch (f.key) {
+      case 'cartons':          val = rows.reduce((s, r) => s + (r.cartons ?? 0), 0).toLocaleString(); break
+      case 'quantity':         val = rows.reduce((s, r) => s + r.quantity, 0).toLocaleString(); break
+      case 'cbm':              val = rows.reduce((s, r) => s + (r.cbm ?? 0), 0).toFixed(4); break
+      case 'total_amount_rmb': val = '¥' + rows.reduce((s, r) => s + (r.total_amount_rmb ?? 0), 0).toLocaleString(); break
+      case 'total_weight':     val = rows.reduce((s, r) => s + parseWeight(r.total_weight), 0).toFixed(1) + ' KGS'; break
+    }
+    totalCells.push(`<td class="bold" style="background:#e2e8f0">${esc(val)}</td>`)
+  }
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -160,7 +185,8 @@ function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta
   table { border-collapse: collapse; width: 100%; table-layout: auto; }
   th { background: #1e293b; color: #fff; padding: 2px 4px; font-size: 7pt; text-align: left; white-space: nowrap; }
   td { border: 1px solid #d1d5db; padding: 2px 4px; font-size: 7.5pt; vertical-align: top; word-break: break-word; }
-  tr:nth-child(even) td { background: #f8fafc; }
+  tr.alt td { background: #f8fafc; }
+  .bold { font-weight: bold; }
   @media print { @page { size: A3 landscape; margin: 8mm; } }
 </style>
 </head>
@@ -169,7 +195,10 @@ function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta
 <p>${metaLine}</p>
 <table>
   <thead><tr>${headerCells}</tr></thead>
-  <tbody>${bodyRows}</tbody>
+  <tbody>
+    ${bodyRows}
+    <tr>${totalCells.join('')}</tr>
+  </tbody>
 </table>
 <script>window.onload = () => { window.print(); }</script>
 </body>
