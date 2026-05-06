@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useTransition, useRef, useMemo, useEffect } from 'react'
+import React, { useState, useTransition, useRef, useMemo, useEffect, useCallback } from 'react'
+import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,6 +20,7 @@ import {
 } from '@/components/ui/select'
 import {
   Search, Trash2, Upload, Loader2, MoreHorizontal, Pencil, AlertTriangle, Plus, Minus, Download, FileSpreadsheet, FileText,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import {
   getDocumentImportMeta,
@@ -33,6 +35,7 @@ import {
   importProducts,
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
+import type { DocumentItemsPageStats } from '@/lib/products-list'
 import { importPdfDirect } from '@/lib/export'
 import { useImportStore } from '@/lib/import-store'
 import { shouldPublishExtractedProduct } from '@/lib/sections'
@@ -42,6 +45,14 @@ type Props = {
   items: DocumentItem[]
   importMeta: ImportMeta | null
   productDocuments: ProductDocumentRef[]
+  listStats: DocumentItemsPageStats
+  globalStats: DocumentItemsPageStats
+  docScopeStats: DocumentItemsPageStats | null
+  footerRows: DocumentItem[]
+  page: number
+  pageSize: number
+  initialQ: string
+  initialDoc: string
 }
 
 function fmtN(n: number | null | undefined, dec = 2): string {
@@ -123,6 +134,21 @@ function isStuffedBannerItem(p: DocumentItem): boolean {
 
 function isCarryoverBeforeGoodsItem(p: DocumentItem): boolean {
   return (p.remarks ?? '').toLowerCase().includes('carryover:before_goods')
+}
+
+function rowMatchesSearch(p: DocumentItem, qLower: string): boolean {
+  if (!qLower) return true
+  const docName =
+    p.documents && typeof p.documents === 'object' && 'source_file_name' in p.documents
+      ? String((p.documents as { source_file_name?: string | null }).source_file_name ?? '')
+      : ''
+  return (
+    p.marks?.toLowerCase().includes(qLower) ||
+    p.item_code?.toLowerCase().includes(qLower) ||
+    p.description?.toLowerCase().includes(qLower) ||
+    p.shop?.toLowerCase().includes(qLower) ||
+    docName.toLowerCase().includes(qLower)
+  )
 }
 
 const SECTION_RENDER_ORDER: DocumentItem['section'][] = ['shipped', 'left_in_warehouse', 'repacked']
@@ -213,9 +239,61 @@ async function exportDocumentItemsToPdf(rows: DocumentItem[]) {
   doc.save(`products_${Date.now()}.pdf`)
 }
 
-export function ProductsClient({ items, importMeta, productDocuments }: Props) {
-  const [query, setQuery] = useState('')
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
+export function ProductsClient({
+  items,
+  importMeta,
+  productDocuments,
+  listStats,
+  globalStats,
+  docScopeStats,
+  footerRows,
+  page,
+  pageSize,
+  initialQ,
+  initialDoc,
+}: Props) {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const selectedDocumentId = initialDoc
+
+  const [queryInput, setQueryInput] = useState(initialQ)
+  useEffect(() => {
+    setQueryInput(initialQ)
+  }, [initialQ])
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      const trimmed = queryInput.trim()
+      const cur = (searchParams.get('q') ?? '').trim()
+      if (trimmed === cur) return
+      const params = new URLSearchParams(searchParams.toString())
+      if (trimmed) params.set('q', trimmed)
+      else params.delete('q')
+      params.set('page', '1')
+      router.replace(`${pathname}?${params.toString()}`)
+    }, 400)
+    return () => clearTimeout(t)
+  }, [queryInput, pathname, router, searchParams])
+
+  const pushListUrl = useCallback((patch: Record<string, string | null | undefined>) => {
+    const params = new URLSearchParams(searchParams.toString())
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null || v === undefined || v === '') params.delete(k)
+      else params.set(k, v)
+    }
+    router.replace(`${pathname}?${params.toString()}`)
+  }, [pathname, router, searchParams])
+
+  const totalPages = Math.max(1, Math.ceil(listStats.totalCount / pageSize))
+  const goPage = useCallback((next: number) => {
+    const safe = Math.max(1, Math.min(totalPages, next))
+    const params = new URLSearchParams(searchParams.toString())
+    if (safe <= 1) params.delete('page')
+    else params.set('page', String(safe))
+    router.replace(`${pathname}?${params.toString()}`)
+  }, [pathname, router, searchParams, totalPages])
+
   const [editingItem, setEditingItem] = useState<DocumentItem | null>(null)
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set())
@@ -250,38 +328,29 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     return () => { cancelled = true }
   }, [selectedDocumentId, importMeta])
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return items.filter(p => {
-      if (selectedDocumentId !== 'all' && p.document_id !== selectedDocumentId) return false
-      if (!q) return true
-      return (
-        p.marks?.toLowerCase().includes(q) ||
-        p.item_code?.toLowerCase().includes(q) ||
-        p.description?.toLowerCase().includes(q) ||
-        p.shop?.toLowerCase().includes(q) ||
-        p.documents?.source_file_name?.toLowerCase().includes(q)
-      )
-    })
-  }, [items, query, selectedDocumentId])
+  const sectionCounts = listStats.sectionCounts
+  const totals = listStats.totals
 
-  const sectionCounts = useMemo(() => ({
-    shipped: filtered.filter(p => p.section === 'shipped').length,
-    left_in_warehouse: filtered.filter(p => p.section === 'left_in_warehouse').length,
-    repacked: filtered.filter(p => p.section === 'repacked').length,
-  }), [filtered])
+  const mainRows = useMemo(
+    () => items.filter(p => !isFooterLikeItem(p)),
+    [items]
+  )
 
-  const totals = useMemo(() => ({
-    cartons: filtered.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
-    qty: filtered.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
-    cbm: filtered.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
-    weight: filtered.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
-    amount: filtered.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
-  }), [filtered])
+  const footerMerged = useMemo(() => {
+    const ids = new Set(footerRows.map(r => r.id))
+    const extra = items.filter(p => isFooterLikeItem(p) && !ids.has(p.id))
+    return [...footerRows, ...extra]
+  }, [footerRows, items])
+
+  const footerItems = useMemo(() => {
+    const qLower = initialQ.trim().toLowerCase()
+    if (!qLower) return footerMerged
+    return footerMerged.filter(p => rowMatchesSearch(p, qLower))
+  }, [footerMerged, initialQ])
 
   const selectableRows = useMemo(
-    () => filtered.filter(p => !isFooterLikeItem(p) && !isStuffedBannerItem(p)),
-    [filtered]
+    () => mainRows.filter(p => !isStuffedBannerItem(p)),
+    [mainRows]
   )
 
   const selectedRows = useMemo(
@@ -306,7 +375,6 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
   }, [selectableRows])
 
   const allVisibleSelected = selectableRows.length > 0 && selectableRows.every(p => selectedRowIds.has(p.id))
-  const someVisibleSelected = selectableRows.some(p => selectedRowIds.has(p.id))
 
   const footerGrandTotals = useMemo(() => {
     if (selectedDocumentId === 'all' || !footerMeta) return null
@@ -319,13 +387,14 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     }
   }, [selectedDocumentId, footerMeta])
 
-  const footerItems = useMemo(() => filtered.filter(isFooterLikeItem), [filtered])
+  const multiSection = useMemo(() => {
+    const c = listStats.sectionCounts
+    return [c.shipped, c.left_in_warehouse, c.repacked].filter(n => n > 0).length > 1
+  }, [listStats.sectionCounts])
 
   const groupedSections = useMemo(() =>
     SECTION_RENDER_ORDER.flatMap(sectionKey => {
-      const rows = filtered.filter(
-        p => p.section === sectionKey && !isFooterLikeItem(p)
-      )
+      const rows = mainRows.filter(p => p.section === sectionKey)
       if (rows.length === 0) return []
       const subtotalRows = rows.filter(p => !isCarryoverBeforeGoodsItem(p))
       return [{
@@ -340,7 +409,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
         },
       }]
     })
-  , [filtered])
+  , [mainRows])
 
   function handleDeleteItem(id: string) {
     if (!confirm('Delete this row?')) return
@@ -348,6 +417,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
       try {
         await deleteDocumentItem(id)
         toast.success('Row deleted')
+        router.refresh()
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -358,6 +428,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
       try {
         await markDocumentItemOutOfStock(item.id)
         toast.success('Marked as out of stock')
+        router.refresh()
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -369,6 +440,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
         await updateDocumentItem(editingItem.id, formData)
         setEditingItem(null)
         toast.success('Row updated')
+        router.refresh()
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -381,6 +453,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
       try {
         await deleteDocumentFooterItems(selectedDocumentId !== 'all' ? selectedDocumentId : null)
         toast.success(`Deleted ${footerItems.length} footer rows`)
+        router.refresh()
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -388,33 +461,39 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
   function handleDeleteSection(section: DocumentItem['section']) {
     const sectionLabel = section === 'left_in_warehouse' ? 'left in warehouse' : section
     const scopeLabel = selectedDocumentId !== 'all' ? ' from this document' : ''
-    const count = filtered.filter(p => p.section === section).length
+    const base =
+      initialDoc === 'all'
+        ? globalStats.sectionCounts
+        : (docScopeStats?.sectionCounts ?? { shipped: 0, left_in_warehouse: 0, repacked: 0 })
+    const count = base[section]
     if (count === 0) return
     if (!confirm(`Delete all ${count} "${sectionLabel}" rows${scopeLabel}? This cannot be undone.`)) return
     startTransition(async () => {
       try {
         await deleteDocumentItemsBySection(section, selectedDocumentId !== 'all' ? selectedDocumentId : null)
         toast.success(`Deleted ${count} "${sectionLabel}" rows`)
+        router.refresh()
       } catch (e: any) { toast.error(e.message) }
     })
   }
 
   function handleDeleteAll() {
-    const count = selectedDocumentId === 'all' ? items.length : filtered.length
+    const count = initialDoc === 'all' ? globalStats.totalCount : (docScopeStats?.totalCount ?? 0)
     if (count === 0) return
-    const msg = selectedDocumentId === 'all'
+    const msg = initialDoc === 'all'
       ? `Delete ALL ${count} rows from all documents? This cannot be undone.`
       : `Delete all ${count} rows from this document? This cannot be undone.`
     if (!confirm(msg)) return
     startTransition(async () => {
       try {
-        if (selectedDocumentId === 'all') {
+        if (initialDoc === 'all') {
           await deleteAllDocumentItems()
         } else {
           await deleteDocumentsByDocument(selectedDocumentId)
-          setSelectedDocumentId('all')
+          pushListUrl({ doc: null, page: null })
         }
         toast.success(`Deleted ${count} rows`)
+        router.refresh()
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -424,6 +503,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     setAdjustingId(id)
     try {
       await adjustDocumentItemCartons(id, delta)
+      router.refresh()
     } catch (e: any) {
       toast.error(e.message)
     } finally {
@@ -461,7 +541,6 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
   }
 
   async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
-    const startedAt = Date.now()
     const file = e.target.files?.[0]
     if (!file) return
 
@@ -516,7 +595,8 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
         startTransition(async () => {
           try {
             await importProducts(rows, meta)
-            toast.success(`Imported ${rows.length} rows — refresh to see them`)
+            toast.success(`Imported ${rows.length} rows`)
+            router.refresh()
           } catch (err: any) {
             toast.error(err?.message ?? 'Save failed')
           } finally { finishImport() }
@@ -533,7 +613,10 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     e.target.value = ''
   }
 
-  const scopedDeleteCount = selectedDocumentId === 'all' ? items.length : filtered.length
+  const scopedDeleteCount =
+    initialDoc === 'all' ? globalStats.totalCount : (docScopeStats?.totalCount ?? 0)
+
+  const tableMainEmpty = groupedSections.length === 0 && footerItems.length === 0
 
   return (
     <div className="p-6 space-y-4">
@@ -543,8 +626,8 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
           <h1 className="text-xl font-semibold text-slate-900">Products</h1>
           <p className="text-sm text-slate-500 mt-0.5">
             {selectedDocumentId === 'all'
-              ? `${items.length} rows total · filter shows latest import per file name`
-              : `${filtered.length} rows · latest import for this file`}
+              ? `${listStats.totalCount} rows match filters · page ${page} of ${totalPages} (${pageSize} per page) · latest import per file name`
+              : `${listStats.totalCount} rows match · page ${page} of ${totalPages} · latest import for this file`}
           </p>
           {selectedRows.length > 0 && (
             <p className="text-xs text-emerald-700 mt-1">{selectedRows.length} selected</p>
@@ -555,12 +638,22 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
             <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
             <Input
               placeholder="Search marks, description, shop…"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
+              value={queryInput}
+              onChange={e => setQueryInput(e.target.value)}
               className="pl-8 h-8 text-sm w-64"
             />
           </div>
-          <Select value={selectedDocumentId} onValueChange={v => setSelectedDocumentId(v ?? 'all')}>
+          <Select
+            value={selectedDocumentId === 'all' ? 'all' : selectedDocumentId}
+            onValueChange={(v) => {
+              const docId = v ?? 'all'
+              const params = new URLSearchParams(searchParams.toString())
+              if (docId === 'all') params.delete('doc')
+              else params.set('doc', docId)
+              params.set('page', '1')
+              router.replace(`${pathname}?${params.toString()}`)
+            }}
+          >
             <SelectTrigger className="h-8 text-xs min-w-[300px] max-w-[420px]">
               <SelectValue placeholder="All PDFs / documents" />
             </SelectTrigger>
@@ -701,6 +794,39 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
         )}
       </div>
 
+      <div className="flex items-center justify-between gap-2 flex-wrap text-sm text-slate-600">
+        <span>
+          Page <span className="tabular-nums">{page}</span> of <span className="tabular-nums">{totalPages}</span>
+          {' · '}
+          <span className="tabular-nums">{listStats.totalCount}</span> rows match
+          {items.length > 0 && (
+            <span className="text-slate-400"> ({items.length} on this page)</span>
+          )}
+        </span>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1"
+            disabled={page <= 1 || isPending}
+            onClick={() => goPage(page - 1)}
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> Previous
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1"
+            disabled={page >= totalPages || isPending}
+            onClick={() => goPage(page + 1)}
+          >
+            Next <ChevronRight className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
+
       {/* Main table */}
       <div className="rounded-md border bg-white overflow-x-auto">
         <table className="w-full text-xs border-collapse min-w-[1900px]">
@@ -736,10 +862,14 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 ? (
+            {tableMainEmpty ? (
               <tr>
                 <td colSpan={21} className="text-center text-slate-400 py-10">
-                  {importStage ? 'Import in progress…' : 'No rows found. Save a PDF via Live View.'}
+                  {importStage
+                    ? 'Import in progress…'
+                    : listStats.totalCount > 0
+                      ? 'No product rows on this page. Try another page or clear filters.'
+                      : 'No rows found. Save a PDF via Live View.'}
                 </td>
               </tr>
             ) : (
@@ -919,10 +1049,10 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                 <td colSpan={3} />
               </tr>
             )}
-            {filtered.length > 0 && groupedSections.length > 1 && (
+            {listStats.totalCount > 0 && multiSection && (
               <tr className="bg-slate-800 text-white font-bold border-t-2 border-slate-900 text-xs">
                 <td className="p-2" colSpan={7}>
-                  {footerGrandTotals ? 'PDF FOOTER TOTAL' : `GRAND TOTAL — ${filtered.length} rows`}
+                  {footerGrandTotals ? 'PDF FOOTER TOTAL' : `GRAND TOTAL — ${listStats.totalCount} rows`}
                 </td>
                 <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.cartons ?? totals.cartons, 0)} CTN</td>
                 <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.qty ?? totals.qty, 0)} pcs</td>

@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 import type { ImportMeta, ProductDocumentRef } from '@/lib/types'
+import type { DocumentItemsListFilters, DocumentItemsPageStats } from '@/lib/products-list'
 import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle, makeStageTotalSku } from '@/lib/sections'
 import Anthropic from '@anthropic-ai/sdk'
 import { callLlm } from '@/lib/llm-client'
@@ -88,6 +89,165 @@ const DOCUMENT_ITEM_SELECT = [
   'created_at',
   'documents(source_file_name, client_id, container_no, document_date, doc_number)',
 ].join(', ')
+
+function escapeIlikePattern(raw: string): string {
+  return raw.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
+}
+
+/** Shared OR clause for financial-summary / footer rows (matches deleteDocumentFooterItems). */
+function buildDocumentFooterOrFilter(): string {
+  const footerPatterns = [
+    'TOTAL WEIGHT', 'TOTAL CBM', 'TOTAL CARTON', 'TOTAL COST', 'TOTAL BALANCE',
+    'GOODS BALANCE', 'CREDIT SUPPORT', 'PIVOC', 'FREIGHT', 'EXCHANGE RATE',
+    'BALANCE PAYMENT',
+    'outstanding balance is not paid',
+    'payment delay surcharge',
+    'vessel arrival mombasa',
+    'REDUCE DETAILS',
+  ]
+  return footerPatterns
+    .flatMap(p => [
+      `marks.ilike.%${p}%`,
+      `description.ilike.%${p}%`,
+      `shop.ilike.%${p}%`,
+    ])
+    .join(',')
+}
+
+function applyDocumentItemsListFilters(qb: any, filters: DocumentItemsListFilters): any {
+  let q = qb
+  if (filters.documentId) q = q.eq('document_id', filters.documentId)
+  const raw = filters.search?.trim()
+  if (raw) {
+    const p = `%${escapeIlikePattern(raw)}%`
+    q = q.or(`marks.ilike.${p},item_code.ilike.${p},description.ilike.${p},shop.ilike.${p}`)
+  }
+  return q
+}
+
+function parseAggregateSum(row: Record<string, unknown> | null, key: string): number {
+  if (!row) return 0
+  const v = row[key]
+  if (typeof v === 'number' && isFinite(v)) return v
+  if (v && typeof v === 'object' && 'sum' in (v as object)) {
+    const n = Number((v as { sum: unknown }).sum)
+    return isFinite(n) ? n : 0
+  }
+  return 0
+}
+
+export async function getDocumentItemsPaged(opts: {
+  page: number
+  pageSize: number
+  filters: DocumentItemsListFilters
+}): Promise<{ items: import('@/lib/types').DocumentItem[] }> {
+  const { page, pageSize, filters } = opts
+  const safePage = Math.max(1, page)
+  const from = (safePage - 1) * pageSize
+  const to = from + pageSize - 1
+
+  let qb = applyDocumentItemsListFilters(
+    supabase
+      .from('document_items')
+      .select(DOCUMENT_ITEM_SELECT)
+      .order('created_at', { ascending: false })
+      .order('line_no', { ascending: true }),
+    filters
+  )
+
+  const res = (await withSupabaseRetry(() => qb.range(from, to), 'getDocumentItemsPaged')) as {
+    data: unknown
+    error: { message: string } | null
+  }
+  if (res.error) throw new Error(`Failed to fetch document items: ${res.error.message}`)
+  return { items: ((res.data ?? []) as unknown) as import('@/lib/types').DocumentItem[] }
+}
+
+export async function getDocumentItemsPageStats(filters: DocumentItemsListFilters): Promise<DocumentItemsPageStats> {
+  const baseHead = () =>
+    applyDocumentItemsListFilters(
+      supabase.from('document_items').select('*', { count: 'exact', head: true }),
+      filters
+    )
+
+  const [totalRes, shippedRes, leftRes, repackedRes, aggRes] = (await Promise.all([
+    withSupabaseRetry(() => baseHead(), 'getDocumentItemsPageStats.total'),
+    withSupabaseRetry(
+      () => applyDocumentItemsListFilters(supabase.from('document_items').select('*', { count: 'exact', head: true }), filters).eq('section', 'shipped'),
+      'getDocumentItemsPageStats.shipped'
+    ),
+    withSupabaseRetry(
+      () => applyDocumentItemsListFilters(supabase.from('document_items').select('*', { count: 'exact', head: true }), filters).eq('section', 'left_in_warehouse'),
+      'getDocumentItemsPageStats.left'
+    ),
+    withSupabaseRetry(
+      () => applyDocumentItemsListFilters(supabase.from('document_items').select('*', { count: 'exact', head: true }), filters).eq('section', 'repacked'),
+      'getDocumentItemsPageStats.repacked'
+    ),
+    withSupabaseRetry(
+      () =>
+        applyDocumentItemsListFilters(
+          supabase
+            .from('document_items')
+            .select('total_cartons.sum(),total_quantity.sum(),total_cbm.sum(),total_weight_kg.sum(),total_amount_rmb.sum()'),
+          filters
+        ).maybeSingle(),
+      'getDocumentItemsPageStats.agg'
+    ),
+  ])) as [
+    { count: number | null; error: { message: string } | null },
+    { count: number | null; error: { message: string } | null },
+    { count: number | null; error: { message: string } | null },
+    { count: number | null; error: { message: string } | null },
+    { data: unknown; error: { message: string } | null },
+  ]
+
+  if (totalRes.error) throw new Error(totalRes.error.message)
+  if (shippedRes.error) throw new Error(shippedRes.error.message)
+  if (leftRes.error) throw new Error(leftRes.error.message)
+  if (repackedRes.error) throw new Error(repackedRes.error.message)
+  if (aggRes.error) logImport('getDocumentItemsPageStats.agg warning:', aggRes.error.message)
+
+  const totalCount = totalRes.count ?? 0
+  const aggRow = (aggRes.data ?? null) as Record<string, unknown> | null
+
+  return {
+    totalCount,
+    sectionCounts: {
+      shipped: shippedRes.count ?? 0,
+      left_in_warehouse: leftRes.count ?? 0,
+      repacked: repackedRes.count ?? 0,
+    },
+    totals: {
+      cartons: parseAggregateSum(aggRow, 'total_cartons'),
+      qty: parseAggregateSum(aggRow, 'total_quantity'),
+      cbm: parseAggregateSum(aggRow, 'total_cbm'),
+      weight: parseAggregateSum(aggRow, 'total_weight_kg'),
+      amount: parseAggregateSum(aggRow, 'total_amount_rmb'),
+    },
+  }
+}
+
+/**
+ * Footer / financial-summary rows for the Products table (not paginated with main grid).
+ */
+export async function getDocumentFooterRowsForList(filters: DocumentItemsListFilters): Promise<import('@/lib/types').DocumentItem[]> {
+  let qb = supabase
+    .from('document_items')
+    .select(DOCUMENT_ITEM_SELECT)
+    .or(buildDocumentFooterOrFilter())
+    .order('created_at', { ascending: false })
+    .limit(400)
+
+  if (filters.documentId) qb = qb.eq('document_id', filters.documentId)
+
+  const res = (await withSupabaseRetry(() => qb, 'getDocumentFooterRowsForList')) as {
+    data: unknown
+    error: { message: string } | null
+  }
+  if (res.error) throw new Error(res.error.message)
+  return ((res.data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+}
 
 type ImportValidationFlag =
   | 'missing_packing'
@@ -880,22 +1040,7 @@ export async function deleteAllDocumentItems(): Promise<void> {
 
 /** Deletes document_items rows that match financial summary / footer patterns. */
 export async function deleteDocumentFooterItems(documentId?: string | null): Promise<void> {
-  const footerPatterns = [
-    'TOTAL WEIGHT', 'TOTAL CBM', 'TOTAL CARTON', 'TOTAL COST', 'TOTAL BALANCE',
-    'GOODS BALANCE', 'CREDIT SUPPORT', 'PIVOC', 'FREIGHT', 'EXCHANGE RATE',
-    'BALANCE PAYMENT',
-    'outstanding balance is not paid',
-    'payment delay surcharge',
-    'vessel arrival mombasa',
-    'REDUCE DETAILS',
-  ]
-  const orFilter = footerPatterns
-    .flatMap(p => [
-      `marks.ilike.%${p}%`,
-      `description.ilike.%${p}%`,
-      `shop.ilike.%${p}%`,
-    ])
-    .join(',')
+  const orFilter = buildDocumentFooterOrFilter()
 
   let query = supabase.from('document_items').delete().or(orFilter)
   if (documentId) query = (query as any).eq('document_id', documentId)
