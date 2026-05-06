@@ -681,6 +681,45 @@ export async function adjustDocumentItemCartons(id: string, delta: number) {
   revalidatePath('/products')
 }
 
+export async function markDocumentItemOutOfStock(id: string): Promise<void> {
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('document_items').update({ total_cartons: 0, total_quantity: 0 }).eq('id', id),
+    'markDocumentItemOutOfStock'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/compiled-products')
+  revalidatePath('/products')
+}
+
+export async function updateDocumentItem(id: string, formData: FormData): Promise<void> {
+  const update: Record<string, unknown> = {
+    marks: ((formData.get('marks') as string) || '').trim() || null,
+    item_code: ((formData.get('item_code') as string) || '').trim() || null,
+    description: ((formData.get('description') as string) || '').trim() || null,
+    shop: ((formData.get('shop') as string) || '').trim() || null,
+    packaging: ((formData.get('packaging') as string) || '').trim() || null,
+    total_cartons: intOrNull(formData.get('total_cartons')),
+    total_quantity: intOrNull(formData.get('total_quantity')),
+    dim_l_cm: numOrNull(formData.get('dim_l_cm')),
+    dim_w_cm: numOrNull(formData.get('dim_w_cm')),
+    dim_h_cm: numOrNull(formData.get('dim_h_cm')),
+    unit_cbm: numOrNull(formData.get('unit_cbm')),
+    total_cbm: numOrNull(formData.get('total_cbm')),
+    unit_weight_kg: numOrNull(formData.get('unit_weight_kg')),
+    total_weight_kg: numOrNull(formData.get('total_weight_kg')),
+    unit_price_rmb: numOrNull(formData.get('unit_price_rmb')),
+    total_amount_rmb: numOrNull(formData.get('total_amount_rmb')),
+  }
+
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('document_items').update(update).eq('id', id),
+    'updateDocumentItem'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/compiled-products')
+  revalidatePath('/products')
+}
+
 export async function deleteProduct(id: string) {
   const { error } = await supabase.from('products').delete().eq('id', id)
   if (error) throw new Error(error.message)

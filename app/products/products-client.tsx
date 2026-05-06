@@ -5,12 +5,20 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import {
+  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import {
-  Search, Trash2, Upload, Loader2,
+  Search, Trash2, Upload, Loader2, MoreHorizontal, Pencil, AlertTriangle,
 } from 'lucide-react'
 import {
   getDocumentImportMeta,
@@ -19,6 +27,8 @@ import {
   deleteAllDocumentItems,
   deleteDocumentItemsBySection,
   deleteDocumentFooterItems,
+  markDocumentItemOutOfStock,
+  updateDocumentItem,
   importProducts,
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
@@ -145,6 +155,7 @@ function SectionBadge({ section }: { section: DocumentItem['section'] }) {
 export function ProductsClient({ items, importMeta, productDocuments }: Props) {
   const [query, setQuery] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
+  const [editingItem, setEditingItem] = useState<DocumentItem | null>(null)
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set())
   const [footerMeta, setFooterMeta] = useState<ImportMeta | null>(importMeta)
   const [footerPaymentRows, setFooterPaymentRows] = useState<DocumentFooterPaymentRow[] | null>(null)
@@ -275,6 +286,27 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
       try {
         await deleteDocumentItem(id)
         toast.success('Row deleted')
+      } catch (e: any) { toast.error(e.message) }
+    })
+  }
+
+  function handleMarkOutOfStock(item: DocumentItem) {
+    if (!confirm(`Mark "${item.description ?? item.marks ?? 'this row'}" as out of stock?`)) return
+    startTransition(async () => {
+      try {
+        await markDocumentItemOutOfStock(item.id)
+        toast.success('Marked as out of stock')
+      } catch (e: any) { toast.error(e.message) }
+    })
+  }
+
+  function handleSaveItemEdit(formData: FormData) {
+    if (!editingItem) return
+    startTransition(async () => {
+      try {
+        await updateDocumentItem(editingItem.id, formData)
+        setEditingItem(null)
+        toast.success('Row updated')
       } catch (e: any) { toast.error(e.message) }
     })
   }
@@ -664,14 +696,22 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                       <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
                       <td className="p-2"><SectionBadge section={p.section} /></td>
                       <td className="p-1">
-                        <Button
-                          type="button" variant="ghost" size="icon"
-                          className="h-7 w-7 text-slate-300 hover:text-red-600"
-                          disabled={isPending}
-                          onClick={() => handleDeleteItem(p.id)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon" className="h-7 w-7" />}>
+                            <MoreHorizontal className="h-3.5 w-3.5" />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => setEditingItem(p)}>
+                              <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="text-amber-700" onClick={() => handleMarkOutOfStock(p)}>
+                              <AlertTriangle className="h-3.5 w-3.5 mr-2" /> Mark Out of Stock
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="text-red-600" onClick={() => handleDeleteItem(p.id)}>
+                              <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </td>
                     </tr>
                     )
@@ -844,6 +884,66 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
           </div>
         </div>
       )}
+
+      <Dialog open={!!editingItem} onOpenChange={(open) => !open && setEditingItem(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit Product Row</DialogTitle>
+          </DialogHeader>
+          {editingItem && (
+            <form action={handleSaveItemEdit} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Marks" name="marks" defaultValue={editingItem.marks ?? ''} />
+                <Field label="Item No" name="item_code" defaultValue={editingItem.item_code ?? ''} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Shop" name="shop" defaultValue={editingItem.shop ?? ''} />
+                <Field label="Packing" name="packaging" defaultValue={editingItem.packaging ?? ''} />
+              </div>
+              <div>
+                <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
+                <Textarea name="description" rows={2} defaultValue={editingItem.description ?? ''} className="text-sm resize-none" />
+              </div>
+              <div className="grid grid-cols-5 gap-3">
+                <Field label="CTN" name="total_cartons" type="number" defaultValue={String(editingItem.total_cartons ?? '')} />
+                <Field label="Qty" name="total_quantity" type="number" defaultValue={String(editingItem.total_quantity ?? '')} />
+                <Field label="U.CBM" name="unit_cbm" type="number" step="0.0001" defaultValue={String(editingItem.unit_cbm ?? '')} />
+                <Field label="T.CBM" name="total_cbm" type="number" step="0.0001" defaultValue={String(editingItem.total_cbm ?? '')} />
+                <Field label="Amount ¥" name="total_amount_rmb" type="number" step="0.01" defaultValue={String(editingItem.total_amount_rmb ?? '')} />
+              </div>
+              <div className="grid grid-cols-5 gap-3">
+                <Field label="L (cm)" name="dim_l_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_l_cm ?? '')} />
+                <Field label="W (cm)" name="dim_w_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_w_cm ?? '')} />
+                <Field label="H (cm)" name="dim_h_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_h_cm ?? '')} />
+                <Field label="U.Wkg" name="unit_weight_kg" type="number" step="0.001" defaultValue={String(editingItem.unit_weight_kg ?? '')} />
+                <Field label="T.Wkg" name="total_weight_kg" type="number" step="0.001" defaultValue={String(editingItem.total_weight_kg ?? '')} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Unit Price ¥" name="unit_price_rmb" type="number" step="0.01" defaultValue={String(editingItem.unit_price_rmb ?? '')} />
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" size="sm" onClick={() => setEditingItem(null)}>Cancel</Button>
+                <Button type="submit" size="sm" disabled={isPending}>Save Changes</Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+function Field({ label, name, type = 'text', defaultValue, step }: {
+  label: string
+  name: string
+  type?: string
+  defaultValue?: string
+  step?: string
+}) {
+  return (
+    <div>
+      <Label className="text-xs text-slate-600 mb-1 block">{label}</Label>
+      <Input name={name} type={type} defaultValue={defaultValue} step={step} className="h-8 text-sm" />
     </div>
   )
 }
