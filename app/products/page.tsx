@@ -58,8 +58,6 @@ export default async function ProductsPage({
       globalStats={globalStats}
       docScopeStats={docScopeStats}
       footerRows={footerRows}
-      page={page}
-      pageSize={PRODUCTS_PAGE_SIZE}
       initialQ={q}
       initialDoc={doc}
     />

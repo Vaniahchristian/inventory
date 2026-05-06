@@ -20,7 +20,6 @@ import {
 } from '@/components/ui/select'
 import {
   Search, Trash2, Upload, Loader2, MoreHorizontal, Pencil, AlertTriangle, Plus, Minus, Download, FileSpreadsheet, FileText,
-  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import {
   getDocumentImportMeta,
@@ -49,8 +48,6 @@ type Props = {
   globalStats: DocumentItemsPageStats
   docScopeStats: DocumentItemsPageStats | null
   footerRows: DocumentItem[]
-  page: number
-  pageSize: number
   initialQ: string
   initialDoc: string
 }
@@ -247,8 +244,6 @@ export function ProductsClient({
   globalStats,
   docScopeStats,
   footerRows,
-  page,
-  pageSize,
   initialQ,
   initialDoc,
 }: Props) {
@@ -284,15 +279,6 @@ export function ProductsClient({
     }
     router.replace(`${pathname}?${params.toString()}`)
   }, [pathname, router, searchParams])
-
-  const totalPages = Math.max(1, Math.ceil(listStats.totalCount / pageSize))
-  const goPage = useCallback((next: number) => {
-    const safe = Math.max(1, Math.min(totalPages, next))
-    const params = new URLSearchParams(searchParams.toString())
-    if (safe <= 1) params.delete('page')
-    else params.set('page', String(safe))
-    router.replace(`${pathname}?${params.toString()}`)
-  }, [pathname, router, searchParams, totalPages])
 
   const [editingItem, setEditingItem] = useState<DocumentItem | null>(null)
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
@@ -626,8 +612,8 @@ export function ProductsClient({
           <h1 className="text-xl font-semibold text-slate-900">Products</h1>
           <p className="text-sm text-slate-500 mt-0.5">
             {selectedDocumentId === 'all'
-              ? `${listStats.totalCount} rows match filters · page ${page} of ${totalPages} (${pageSize} per page) · latest import per file name`
-              : `${listStats.totalCount} rows match · page ${page} of ${totalPages} · latest import for this file`}
+              ? `${listStats.totalCount} rows match filters · latest import per file name`
+              : `${listStats.totalCount} rows match · latest import for this file`}
           </p>
           {selectedRows.length > 0 && (
             <p className="text-xs text-emerald-700 mt-1">{selectedRows.length} selected</p>
@@ -794,39 +780,6 @@ export function ProductsClient({
         )}
       </div>
 
-      <div className="flex items-center justify-between gap-2 flex-wrap text-sm text-slate-600">
-        <span>
-          Page <span className="tabular-nums">{page}</span> of <span className="tabular-nums">{totalPages}</span>
-          {' · '}
-          <span className="tabular-nums">{listStats.totalCount}</span> rows match
-          {items.length > 0 && (
-            <span className="text-slate-400"> ({items.length} on this page)</span>
-          )}
-        </span>
-        <div className="flex gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1"
-            disabled={page <= 1 || isPending}
-            onClick={() => goPage(page - 1)}
-          >
-            <ChevronLeft className="h-3.5 w-3.5" /> Previous
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1"
-            disabled={page >= totalPages || isPending}
-            onClick={() => goPage(page + 1)}
-          >
-            Next <ChevronRight className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
-
       {/* Main table */}
       <div className="rounded-md border bg-white overflow-x-auto">
         <table className="w-full text-xs border-collapse min-w-[1900px]">
@@ -868,7 +821,7 @@ export function ProductsClient({
                   {importStage
                     ? 'Import in progress…'
                     : listStats.totalCount > 0
-                      ? 'No product rows on this page. Try another page or clear filters.'
+                      ? 'No product rows in this view. Try clearing filters.'
                       : 'No rows found. Save a PDF via Live View.'}
                 </td>
               </tr>
