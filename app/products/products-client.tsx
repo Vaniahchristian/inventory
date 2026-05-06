@@ -18,7 +18,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import {
-  Search, Trash2, Upload, Loader2, MoreHorizontal, Pencil, AlertTriangle,
+  Search, Trash2, Upload, Loader2, MoreHorizontal, Pencil, AlertTriangle, Plus, Minus,
 } from 'lucide-react'
 import {
   getDocumentImportMeta,
@@ -27,6 +27,7 @@ import {
   deleteAllDocumentItems,
   deleteDocumentItemsBySection,
   deleteDocumentFooterItems,
+  adjustDocumentItemCartons,
   markDocumentItemOutOfStock,
   updateDocumentItem,
   importProducts,
@@ -156,6 +157,7 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
   const [query, setQuery] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
   const [editingItem, setEditingItem] = useState<DocumentItem | null>(null)
+  const [adjustingId, setAdjustingId] = useState<string | null>(null)
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set())
   const [footerMeta, setFooterMeta] = useState<ImportMeta | null>(importMeta)
   const [footerPaymentRows, setFooterPaymentRows] = useState<DocumentFooterPaymentRow[] | null>(null)
@@ -355,6 +357,18 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
         toast.success(`Deleted ${count} rows`)
       } catch (e: any) { toast.error(e.message) }
     })
+  }
+
+  async function handleAdjustCartons(id: string, delta: number) {
+    if (adjustingId) return
+    setAdjustingId(id)
+    try {
+      await adjustDocumentItemCartons(id, delta)
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setAdjustingId(null)
+    }
   }
 
   function toggleRowSelection(id: string) {
@@ -682,7 +696,31 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                       <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
                       <td className="p-2 text-slate-700 max-w-[200px]">{p.description ?? '-'}</td>
                       <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
-                      <td className="p-2 text-right tabular-nums">{fmtN(p.total_cartons, 0)}</td>
+                      <td className="p-2 text-right tabular-nums">
+                        <div className="flex items-center justify-end gap-0.5">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
+                            disabled={adjustingId === p.id}
+                            onClick={() => handleAdjustCartons(p.id, -1)}
+                          >
+                            <Minus className="h-2.5 w-2.5" />
+                          </Button>
+                          <span className="w-7 text-center tabular-nums">{fmtN(p.total_cartons, 0)}</span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 rounded text-slate-500 hover:text-slate-900"
+                            disabled={adjustingId === p.id}
+                            onClick={() => handleAdjustCartons(p.id, +1)}
+                          >
+                            <Plus className="h-2.5 w-2.5" />
+                          </Button>
+                        </div>
+                      </td>
                       <td className="p-2 text-right tabular-nums">{fmtN(p.total_quantity, 0)}</td>
                       <td className="p-2 text-right tabular-nums">{fmtN(p.dim_l_cm, 1)}</td>
                       <td className="p-2 text-right tabular-nums">{fmtN(p.dim_w_cm, 1)}</td>
