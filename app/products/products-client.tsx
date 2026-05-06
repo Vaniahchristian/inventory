@@ -682,7 +682,10 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
                         </td>
                       </tr>
                     ) : (
-                    <tr key={p.id} className={`border-b border-slate-100 ${sectionClass(p.section)}`}>
+                    <tr
+                      key={p.id}
+                      className={`border-b border-slate-100 ${selectedRowIds.has(p.id) ? 'bg-indigo-100 hover:bg-indigo-100' : sectionClass(p.section)}`}
+                    >
                       <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
                       <td className="p-2 text-center">
                         <Checkbox
