@@ -59,6 +59,36 @@ type LlmAlignedRow = {
   total_amount_rmb: number | null
 }
 
+const DOCUMENT_ITEM_SELECT = [
+  'id',
+  'document_id',
+  'line_no',
+  'marks',
+  'item_code',
+  'description',
+  'shop',
+  'packaging',
+  'total_cartons',
+  'total_quantity',
+  'unit_price_rmb',
+  'total_amount_rmb',
+  'dim_l_cm',
+  'dim_w_cm',
+  'dim_h_cm',
+  'unit_cbm',
+  'total_cbm',
+  'unit_weight_kg',
+  'total_weight_kg',
+  'warehouse',
+  'barcode',
+  'box_no_start',
+  'box_no_end',
+  'section',
+  'remarks',
+  'created_at',
+  'documents(source_file_name, client_id, container_no, document_date, doc_number)',
+].join(', ')
+
 type ImportValidationFlag =
   | 'missing_packing'
   | 'missing_name'
@@ -758,13 +788,28 @@ export async function getDocumentItems() {
     () =>
       supabase
         .from('document_items')
-        .select('*, documents(source_file_name, client_id, container_no, document_date, doc_number)')
+        .select(DOCUMENT_ITEM_SELECT)
         .order('created_at', { ascending: false })
         .order('line_no', { ascending: true }),
     'getDocumentItems'
   )
   if (error) throw new Error(`Failed to fetch document items: ${error.message}`)
-  return (data ?? []) as import('@/lib/types').DocumentItem[]
+  return ((data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+}
+
+export async function getShippedDocumentItems() {
+  const { data, error } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('document_items')
+        .select(DOCUMENT_ITEM_SELECT)
+        .eq('section', 'shipped')
+        .order('created_at', { ascending: false })
+        .order('line_no', { ascending: true }),
+    'getShippedDocumentItems'
+  )
+  if (error) throw new Error(`Failed to fetch shipped document items: ${error.message}`)
+  return ((data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
 }
 
 /**

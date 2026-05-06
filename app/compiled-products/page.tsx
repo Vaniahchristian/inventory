@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 
-import { getDocumentItems, getDocumentItemDocuments, getLatestImportMeta } from '@/app/actions/products'
+import { getShippedDocumentItems, getDocumentItemDocuments, getLatestImportMeta } from '@/app/actions/products'
 import { CompiledProductsClient } from './compiled-client'
 import type { DocumentItem } from '@/lib/types'
 
@@ -50,7 +50,7 @@ function mapToProduct(item: DocumentItem) {
 export default async function CompiledProductsPage() {
   const [itemsResult, importMetaResult, productDocumentsResult] =
     await Promise.allSettled([
-      getDocumentItems(),
+      getShippedDocumentItems(),
       getLatestImportMeta(),
       getDocumentItemDocuments(),
     ])
@@ -58,8 +58,7 @@ export default async function CompiledProductsPage() {
   if (itemsResult.status === 'rejected') throw itemsResult.reason
 
   const items = itemsResult.value
-  const shipped = items.filter(item => item.section === 'shipped')
-  const products = shipped.map(mapToProduct)
+  const products = items.map(mapToProduct)
   const importMeta = importMetaResult.status === 'fulfilled' ? importMetaResult.value : null
   const productDocuments = productDocumentsResult.status === 'fulfilled' ? productDocumentsResult.value : []
 
