@@ -378,7 +378,12 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
   function runExport() {
     const fields = EXPORT_FIELDS.map(f => f.key).filter(k => selectedFields.has(k))
     if (fields.length === 0) return
-    const rows = filteredDataRows.length < compiledRows.length ? filteredDataRows : compiledRows
+    const rows =
+      selectedDataRows.length > 0
+        ? selectedDataRows
+        : filteredDataRows.length < compiledRows.length
+          ? filteredDataRows
+          : compiledRows
     if (exportFormat === 'excel') exportToExcel(rows, fields, importMeta)
     else exportToPdf(rows, fields, importMeta)
     setExportOpen(false)
@@ -701,7 +706,10 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
           </div>
 
           <div className="flex justify-between items-center text-xs text-slate-400 pt-1">
-            <span>{selectedFields.size} field{selectedFields.size !== 1 ? 's' : ''} selected</span>
+            <span>
+              {selectedFields.size} field{selectedFields.size !== 1 ? 's' : ''} selected
+              {selectedDataRows.length > 0 ? ` · exporting ${selectedDataRows.length} selected row${selectedDataRows.length !== 1 ? 's' : ''}` : ''}
+            </span>
             <div className="flex gap-2">
               <button className="underline" onClick={() => setSelectedFields(new Set(EXPORT_FIELDS.map(f => f.key)))}>
                 All

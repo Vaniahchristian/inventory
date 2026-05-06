@@ -18,7 +18,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import {
-  Search, Trash2, Upload, Loader2, MoreHorizontal, Pencil, AlertTriangle, Plus, Minus,
+  Search, Trash2, Upload, Loader2, MoreHorizontal, Pencil, AlertTriangle, Plus, Minus, Download, FileSpreadsheet, FileText,
 } from 'lucide-react'
 import {
   getDocumentImportMeta,
@@ -151,6 +151,66 @@ function SectionBadge({ section }: { section: DocumentItem['section'] }) {
   if (section === 'repacked')
     return <Badge variant="outline" className="text-[10px] border-violet-300 text-violet-700 bg-violet-50">repacked</Badge>
   return <Badge variant="outline" className="text-[10px] border-emerald-300 text-emerald-700 bg-emerald-50">shipped</Badge>
+}
+
+async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
+  const XLSX = await import('xlsx')
+  const header = ['No.', 'Marks', 'Shop', 'Item No', 'Description', 'Packing', 'CTN', 'Qty', 'L', 'W', 'H', 'U.CBM', 'T.CBM', 'U.Wkg', 'T.Wkg', 'U.Price (RMB)', 'Amount (RMB)', 'Section']
+  const data = rows.map((p, i) => [
+    i + 1,
+    p.marks ?? '-',
+    p.shop ?? '-',
+    p.item_code ?? '-',
+    p.description ?? '-',
+    p.packaging ?? '-',
+    p.total_cartons ?? 0,
+    p.total_quantity ?? 0,
+    p.dim_l_cm ?? null,
+    p.dim_w_cm ?? null,
+    p.dim_h_cm ?? null,
+    p.unit_cbm ?? null,
+    p.total_cbm ?? null,
+    p.unit_weight_kg ?? null,
+    p.total_weight_kg ?? null,
+    p.unit_price_rmb ?? null,
+    p.total_amount_rmb ?? null,
+    p.section,
+  ])
+  const ws = XLSX.utils.aoa_to_sheet([header, ...data])
+  ws['!cols'] = header.map((_, idx) => ({ wch: idx === 0 ? 5 : 16 }))
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Products')
+  XLSX.writeFile(wb, `products_${Date.now()}.xlsx`)
+}
+
+async function exportDocumentItemsToPdf(rows: DocumentItem[]) {
+  const { default: jsPDF } = await import('jspdf')
+  const { default: autoTable } = await import('jspdf-autotable')
+  const doc = new jsPDF({ orientation: 'landscape', format: 'a3' })
+  doc.setFontSize(13)
+  doc.text('Products', 14, 14)
+  autoTable(doc, {
+    startY: 20,
+    head: [['No.', 'Marks', 'Shop', 'Item No', 'Description', 'Packing', 'CTN', 'Qty', 'T.CBM', 'T.Wkg', 'Amount (RMB)', 'Section']],
+    body: rows.map((p, i) => [
+      i + 1,
+      p.marks ?? '-',
+      p.shop ?? '-',
+      p.item_code ?? '-',
+      p.description ?? '-',
+      p.packaging ?? '-',
+      p.total_cartons ?? 0,
+      p.total_quantity ?? 0,
+      p.total_cbm ?? '-',
+      p.total_weight_kg ?? '-',
+      p.total_amount_rmb ?? '-',
+      p.section,
+    ]),
+    styles: { fontSize: 7, cellPadding: 1.5, overflow: 'linebreak' },
+    headStyles: { fillColor: [30, 41, 59], fontSize: 7, cellPadding: 2 },
+    alternateRowStyles: { fillColor: [248, 250, 252] },
+  })
+  doc.save(`products_${Date.now()}.pdf`)
 }
 
 export function ProductsClient({ items, importMeta, productDocuments }: Props) {
@@ -390,6 +450,16 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
     })
   }
 
+  async function runExport(format: 'excel' | 'pdf') {
+    const rows = selectedRows.length > 0 ? selectedRows : selectableRows
+    if (rows.length === 0) {
+      toast.info('No rows to export')
+      return
+    }
+    if (format === 'excel') await exportDocumentItemsToExcel(rows)
+    else await exportDocumentItemsToPdf(rows)
+  }
+
   async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
     const startedAt = Date.now()
     const file = e.target.files?.[0]
@@ -519,6 +589,19 @@ export function ProductsClient({ items, importMeta, productDocuments }: Props) {
               ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Importing...</>
               : <><Upload className="h-3.5 w-3.5" /> Import</>}
           </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-8 gap-1.5" />}>
+              <Download className="h-3.5 w-3.5" /> Export
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => runExport('excel')}>
+                <FileSpreadsheet className="h-3.5 w-3.5 mr-2" /> Excel (.xlsx)
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => runExport('pdf')}>
+                <FileText className="h-3.5 w-3.5 mr-2" /> PDF
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button
             variant="outline" size="sm"
             className="h-8 gap-1.5 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
