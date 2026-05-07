@@ -325,7 +325,7 @@ export function ProductsClient({
       const params = new URLSearchParams(searchParams.toString())
       if (trimmed) params.set('q', trimmed)
       else params.delete('q')
-      params.set('page', '1')
+      params.delete('page')
       router.replace(`${pathname}?${params.toString()}`)
     }, 400)
     return () => clearTimeout(t)
@@ -696,7 +696,7 @@ export function ProductsClient({
               const params = new URLSearchParams(searchParams.toString())
               if (docId === 'all') params.delete('doc')
               else params.set('doc', docId)
-              params.set('page', '1')
+              params.delete('page')
               router.replace(`${pathname}?${params.toString()}`)
             }}
           >

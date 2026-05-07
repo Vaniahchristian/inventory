@@ -163,6 +163,23 @@ export async function getDocumentItemsPaged(opts: {
   return { items: ((res.data ?? []) as unknown) as import('@/lib/types').DocumentItem[] }
 }
 
+export async function getDocumentItemsForList(filters: DocumentItemsListFilters): Promise<import('@/lib/types').DocumentItem[]> {
+  const qb = applyDocumentItemsListFilters(
+    supabase
+      .from('document_items')
+      .select(DOCUMENT_ITEM_SELECT)
+      .order('created_at', { ascending: false })
+      .order('line_no', { ascending: true }),
+    filters
+  )
+  const res = (await withSupabaseRetry(() => qb, 'getDocumentItemsForList')) as {
+    data: unknown
+    error: { message: string } | null
+  }
+  if (res.error) throw new Error(`Failed to fetch document items: ${res.error.message}`)
+  return ((res.data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+}
+
 export async function getDocumentItemsPageStats(filters: DocumentItemsListFilters): Promise<DocumentItemsPageStats> {
   const baseHead = () =>
     applyDocumentItemsListFilters(
@@ -1731,11 +1748,17 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       const packingField = str(r['PACKING'] ?? '')
       const packingLooksStandard = /\d+\s*[a-zA-Z]+\s*\/\s*ctn/i.test(packingField)
       const packingLooksCartonCount = /^\d+(?:\.\d+)?\s*CTNS?$/i.test(packingField)
+      const tctnRaw = str(r['T.CTN'] ?? '')
+      const tqtyRaw = str(r['T.QTY'] ?? '')
+      const tctnLooksCartonCount = /^\d+(?:\.\d+)?\s*CTNS?$/i.test(tctnRaw)
+      const tqtyLooksQty = /^\d+(?:\.\d+)?\s*PCS?$/i.test(tqtyRaw) || (intOrNull(r['T.QTY']) ?? 0) > 0
       const packingLooksLikeName =
         /[A-Za-z\u4E00-\u9FFF]/.test(packingField) && !/\d+(?:\.\d+)?\s*CTNS?/i.test(packingField)
+      const nameLikelyLandedInPackingOnly =
+        packingLooksLikeName && tctnLooksCartonCount && tqtyLooksQty
       // Shifted only when "PACKING" clearly contains name-like text, not carton counts like "10CTNS".
       const isShifted =
-        !!packingField && !packingLooksStandard && !packingLooksCartonCount && packingLooksLikeName
+        !!packingField && !packingLooksStandard && !packingLooksCartonCount && packingLooksLikeName && !nameLikelyLandedInPackingOnly
 
       let name: string | null
       let packing: string | null
@@ -1749,17 +1772,31 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       let total_amount_rmb: number | null
 
       if (isShifted) {
-        // packingField actually contains the Chinese product name; real data shifts right
+        // Conservative shifted mapping: keep numeric columns aligned to canonical headers.
+        // In many malformed rows only the name overflows into PACKING, while numeric columns
+        // still remain in T.CTN/T.QTY/T.CBM/U.PRICE/T.AMOUNT.
         name = packingField || col6val || descGoods || null
-        packing = str(r['T.CTN'] ?? '') || null
-        cartons = intOrNull(r['T.QTY'])
-        quantity = intOrNull(r['T.CBM']) ?? 0
+        const inlinePacking = (name ?? '').match(/(\d+\s*pcs\s*\/\s*ctn)/i)?.[1] ?? null
+        packing = inlinePacking || null
+        cartons = intOrNull(r['T.CTN']) ?? intOrNull(r['T.QTY'])
+        quantity = intOrNull(r['T.QTY']) ?? 0
         unit_cbm = numOrNull(r['UNIT CBM'])
-        cbm = numOrNull(r['UNIT WEIGHT'])
-        unit_weight = str(r['T.WEIGHT'] ?? '') || null
-        total_weight = str(r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? '') || null
-        cost_price = num(r['T.AMOUNT'])
-        total_amount_rmb = numOrNull(r['__col15'] ?? r['__col14'] ?? '')
+        cbm = numOrNull(r['T.CBM'])
+        unit_weight = str(r['UNIT WEIGHT'] ?? '') || null
+        total_weight = str(r['T.WEIGHT'] ?? '') || null
+        cost_price = num(
+          r['U.PRICE (RMB)'] ?? r['U.PRICE(RMB)'] ?? r['unit_price_rmb'] ?? ''
+        )
+        total_amount_rmb = numOrNull(r['T.AMOUNT'] ?? r['__col15'] ?? r['__col14'] ?? '')
+        if (
+          (!(cost_price > 0)) &&
+          total_amount_rmb != null &&
+          total_amount_rmb > 0 &&
+          quantity > 0
+        ) {
+          const inferred = Math.round((total_amount_rmb / quantity) * 100) / 100
+          if (inferred > 0) cost_price = inferred
+        }
       } else {
         // Prefer whichever value starts with a Latin letter (English name over
         // Chinese-only text). If both or neither are Latin, descGoods wins.
