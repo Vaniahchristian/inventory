@@ -109,7 +109,9 @@ export function normaliseHeader(raw: string): string {
     .replace(/[）)]/g, ')')
     .trim()
   // Glue variants from PDFs/HTML: "U.PRICE(RMB)" → canonical "U.PRICE (RMB)"
+  // Also collapse "T. AMOUNT" → "T.AMOUNT" (Reducto sometimes adds a space after the dot)
   s = s
+    .replace(/\b([A-Z])\.\s+([A-Z])/g, '$1.$2')
     .replace(/\bU\.PRICE\s*\(/g, 'U.PRICE (')
     .replace(/\bUNIT\s+PRICE\s*\(/g, 'UNIT PRICE (')
     .replace(/\bT\.AMOUNT\s*\(/g, 'T.AMOUNT (')

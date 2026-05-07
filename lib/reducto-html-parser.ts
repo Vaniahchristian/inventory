@@ -470,6 +470,34 @@ function mergeFieldParts(a: string, b: string): string {
   return `${t1} ${t2}`
 }
 
+// When a table's header uses a single DESCRIPTION cell (no colspan) but data rows
+// contain an extra sub-description cell, every column after description shifts by 1.
+// This merges those overflow cells back into the description column so the mapping stays aligned.
+function normalizeRowToColMap(row: string[], colMap: Map<number, ProductField | 'skip'>): string[] {
+  if (colMap.size === 0) return row
+  const maxIdx = Math.max(...colMap.keys())
+  const overflow = row.length - (maxIdx + 1)
+  if (overflow <= 0) return row
+  let descIdx = -1
+  for (const [idx, field] of colMap) {
+    if (field === 'description') { descIdx = idx; break }
+  }
+  if (descIdx < 0) return row
+  // When the header already uses colspan to spread description across multiple
+  // colMap entries (e.g. colMap[4]=description AND colMap[5]=description), the
+  // apparent overflow is caused by an unrecognised trailing column — NOT by an
+  // extra sub-description cell.  Normalising here would shift every column after
+  // description by one, corrupting CTN/QTY/CBM/etc.
+  if (colMap.get(descIdx + 1) === 'description') return row
+  const normalized = [...row]
+  for (let i = 0; i < overflow; i++) {
+    const extra = (normalized[descIdx + 1] ?? '').trim()
+    if (extra) normalized[descIdx] = normalized[descIdx] ? `${normalized[descIdx]} ${extra}` : extra
+    normalized.splice(descIdx + 1, 1)
+  }
+  return normalized
+}
+
 function buildRawFromRow(
   row: string[],
   colMap: Map<number, ProductField | 'skip'>
@@ -888,8 +916,9 @@ function parseGridToProducts(
       continue
     }
 
-    // Build raw field map — merge colspan-expanded headers: same field on adjacent columns
-    const raw = buildRawFromRow(row, colMap)
+    // Build raw field map — normalize row length first (handles extra description cells in
+    // tables where the header has DESCRIPTION as a single cell instead of colspan=3)
+    const raw = buildRawFromRow(normalizeRowToColMap(row, colMap), colMap)
 
     // Yellow / rolled section subtotal bars (CTNS+CBM+KGS+¥)
     // In inventory mode: skip entirely — not real product rows.
