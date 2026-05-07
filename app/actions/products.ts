@@ -857,13 +857,71 @@ export async function adjustProductCartons(id: string, delta: number) {
 
 export async function adjustDocumentItemCartons(id: string, delta: number) {
   const { data } = await withSupabaseRetry(
-    () => supabase.from('document_items').select('total_cartons').eq('id', id).single(),
+    () =>
+      supabase
+        .from('document_items')
+        .select('total_cartons,total_quantity,unit_cbm,unit_weight_kg,unit_price_rmb,packaging')
+        .eq('id', id)
+        .single(),
     'adjustDocumentItemCartons.select'
   )
-  const current = data?.total_cartons ?? 0
-  const next = Math.max(0, current + delta)
+
+  const toNum = (v: unknown): number | null => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string' && v.trim()) {
+      const n = Number(v)
+      return Number.isFinite(n) ? n : null
+    }
+    return null
+  }
+
+  const currentCartons = toNum(data?.total_cartons) ?? 0
+  const currentQty = toNum(data?.total_quantity) ?? 0
+  const unitPriceRmb = toNum(data?.unit_price_rmb)
+  const unitCbm = toNum(data?.unit_cbm)
+  const unitWeightKg = toNum(data?.unit_weight_kg)
+  const packaging = typeof data?.packaging === 'string' ? data.packaging : ''
+  const nextCartons = Math.max(0, currentCartons + delta)
+
+  // Primary qty-per-carton source is existing row math; fallback to packaging text (e.g. "24 PCS/CTN").
+  let qtyPerCarton: number | null = null
+  if (currentCartons > 0 && currentQty > 0) {
+    qtyPerCarton = currentQty / currentCartons
+  } else if (packaging) {
+    const m = packaging.match(/(\d+(?:\.\d+)?)\s*(?:PCS|PC|PIECES)?\s*(?:\/\s*CTN|CTN)?/i)
+    if (m?.[1]) {
+      const parsed = Number(m[1])
+      if (Number.isFinite(parsed) && parsed > 0) qtyPerCarton = parsed
+    }
+  }
+
+  const nextQty =
+    nextCartons <= 0 ? 0
+      : qtyPerCarton != null ? Math.max(0, Math.round(qtyPerCarton * nextCartons))
+      : currentQty
+
+  const roundTo = (n: number, places: number): number =>
+    Number(n.toFixed(places))
+
+  const nextAmountRmb =
+    unitPriceRmb != null ? roundTo(unitPriceRmb * nextQty, 2) : null
+  const nextTotalCbm =
+    unitCbm != null ? roundTo(unitCbm * nextCartons, 4) : null
+  const nextTotalWeightKg =
+    unitWeightKg != null ? roundTo(unitWeightKg * nextCartons, 3) : null
+
   const { error } = await withSupabaseRetry(
-    () => supabase.from('document_items').update({ total_cartons: next }).eq('id', id),
+    () =>
+      supabase
+        .from('document_items')
+        .update({
+          total_cartons: nextCartons,
+          total_quantity: nextQty,
+          total_amount_rmb: nextAmountRmb,
+          total_cbm: nextTotalCbm,
+          total_weight_kg: nextTotalWeightKg,
+        })
+        .eq('id', id),
     'adjustDocumentItemCartons.update'
   )
   if (error) throw new Error(error.message)
