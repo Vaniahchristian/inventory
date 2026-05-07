@@ -1572,6 +1572,51 @@ function repairNoPackingAmountRow(row: MappedRow): MappedRow {
   }
 }
 
+function repairCompactPackedShiftRow(row: MappedRow): MappedRow {
+  const packaging = str(row.packing)
+  const parsedCartonsFromPackaging = parsePackingCartons(packaging)
+  const desc = str(row.description)
+  const trailingPack = parseTrailingPackingFromDescription(desc)
+  const looksLikeCompactShift =
+    parsedCartonsFromPackaging != null &&
+    trailingPack.packing != null &&
+    (row.cartons ?? 0) > 0 &&
+    row.quantity > 0 &&
+    row.quantity < 5 &&
+    row.unit_cbm == null &&
+    row.total_amount_rmb == null &&
+    row.cost_price >= 100
+
+  if (!looksLikeCompactShift) return row
+
+  const cartons = parsedCartonsFromPackaging
+  const quantity = row.cartons ?? 0
+  const totalCbm = row.quantity
+  const unitCbm = cartons > 0 ? +(totalCbm / cartons).toFixed(6) : null
+  const unitWeightNum = numOrNull(row.total_weight)
+  const amountNum = row.cost_price > 0 ? row.cost_price : null
+  const inferredUnitPrice =
+    unitWeightNum != null && unitWeightNum > 0
+      ? unitWeightNum
+      : (amountNum != null && quantity > 0 ? +(amountNum / quantity).toFixed(4) : 0)
+
+  return {
+    ...row,
+    description: trailingPack.description ?? row.description,
+    packing: trailingPack.packing ?? row.packing,
+    unit: trailingPack.packing ? parseUnit(trailingPack.packing) : row.unit,
+    cartons,
+    quantity,
+    unit_cbm: unitCbm,
+    cbm: totalCbm,
+    unit_weight: row.cbm != null ? `${row.cbm}KGS` : row.unit_weight,
+    total_weight: row.unit_weight ?? row.total_weight,
+    cost_price: inferredUnitPrice > 0 ? inferredUnitPrice : row.cost_price,
+    total_amount_rmb: amountNum,
+    remarks: row.remarks ? `${row.remarks};repair:compact_packed_shift_row` : 'repair:compact_packed_shift_row',
+  }
+}
+
 function repairSalesOrderRow(row: MappedRow): MappedRow {
   let next: MappedRow = { ...row }
   const cartons = next.cartons ?? 0
@@ -1843,6 +1888,7 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       }
       mappedRow = repairShiftedPackingListRow(mappedRow)
       mappedRow = repairNoPackingAmountRow(mappedRow)
+      mappedRow = repairCompactPackedShiftRow(mappedRow)
 
       const fromClaudeCore = str(r['__source']) === 'claude_core'
       const shouldUseLlm = !fromClaudeCore && (aiMode === 'full' || shouldUseLlmAlignment(r, mappedRow))

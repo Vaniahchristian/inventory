@@ -54,7 +54,8 @@
       "Bash(npx supabase *)",
       "Bash(Remove-Item -Recurse -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\review-queue\")",
       "Bash(Remove-Item -Recurse -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\categories\")",
-      "Bash(Remove-Item -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\actions\\\\categories.ts\")"
+      "Bash(Remove-Item -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\actions\\\\categories.ts\")",
+      "PowerShell(Get-Item *)"
     ]
   },
   "enableAllProjectMcpServers": true,
