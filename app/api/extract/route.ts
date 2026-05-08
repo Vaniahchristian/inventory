@@ -170,7 +170,7 @@ export async function POST(req: Request) {
         if (!skipInsert) {
           try {
             const fileSha256 = crypto.createHash('sha256').update(fallbackText || fileName).digest('hex')
-            const result = await insertToSupabase(fileName, fileSha256, extraction, [])
+            const result = await insertToSupabase(fileName, fileSha256, extraction, [], structured.sectionSubtotals)
             documentId = result.document_id
           } catch (err: any) {
             console.error(`[extract][${debugId}] DB insert failed: ${err?.message ?? err}`)

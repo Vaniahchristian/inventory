@@ -55,7 +55,10 @@
       "Bash(Remove-Item -Recurse -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\review-queue\")",
       "Bash(Remove-Item -Recurse -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\categories\")",
       "Bash(Remove-Item -Force \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\app\\\\actions\\\\categories.ts\")",
-      "PowerShell(Get-Item *)"
+      "PowerShell(Get-Item *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\" -Recurse -File)",
+      "Bash(Get-Content -Path 'C:\\\\Users\\\\user\\\\Desktop\\\\kato\\\\inventory\\\\parse_result_2026-05-08.json')",
+      "Bash(Measure-Object -Line)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -2,6 +2,7 @@ import { ExtractedDocument, ExtractedProduct, ClaudeExtractionResult } from './c
 import { isFullExtractBanner, isSubtotalBanner, isFooterBanner } from '@/lib/full-extract'
 import { filterToInventoryProducts } from '@/lib/sections'
 import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from '@/lib/manifest-section-fixer'
+import type { SectionSubtotal } from '@/lib/reducto-html-parser'
 import { ValidationResult, validateExtraction } from './validator'
 import { supabase } from './supabase'
 
@@ -16,7 +17,8 @@ export async function insertToSupabase(
   fileName: string,
   fileSha256: string | null,
   extraction: ClaudeExtractionResult,
-  ocrLines: string[]
+  ocrLines: string[],
+  sectionSubtotals?: SectionSubtotal[]
 ): Promise<InsertResult> {
   const doc = extraction.document
   const rawAuditProducts = extraction.products
@@ -28,7 +30,10 @@ export async function insertToSupabase(
   }
   const docType = doc.document_type
   const fullProducts = normalizeSalesOrderProducts(
-    dedupeShippedCartonCounts(fixManifestSectionContinuity(filtered, docType), docType),
+    dedupeShippedCartonCounts(
+      fixManifestSectionContinuity(filtered, docType),
+      docType
+    ),
     doc
   )
   // Validation uses shipped-only rows (totals cross-check); insertion stores all sections.
@@ -69,13 +74,48 @@ export async function insertToSupabase(
   const computedQty = physicalProducts.reduce((s, p) => s + (p.total_qty ?? 0), 0)
   const computedCBM = physicalProducts.reduce((s, p) => s + (p.total_cbm ?? 0), 0)
   const computedWeight = physicalProducts.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
-  // Amount: footer covers all sections including goods-left,
-  // but excludes carryover rows from "BEFORE GOODS ...".
-  const computedAmount = fullProducts.reduce((s, p) => {
-    const remarks = (p.remarks ?? '').toLowerCase()
-    if (remarks.includes('carryover:before_goods')) return s
-    return s + (p.total_amount_rmb ?? 0)
-  }, 0)
+  // Amount: footer covers all sections including goods-left.
+  const computedAmount = fullProducts.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+
+  // Per-section aggregates for comparison against PDF yellow-bar subtotals.
+  // Physical metrics for left_in_warehouse are zeroed by design (not shipped), so only
+  // compare their amount. Shipped and repacked compare all four metrics.
+  const sectionAggs: Record<string, { cartons: number; cbm: number; weight: number; amount: number }> = {}
+  for (const p of fullProducts) {
+    const sec = p.section ?? 'shipped'
+    if (!sectionAggs[sec]) sectionAggs[sec] = { cartons: 0, cbm: 0, weight: 0, amount: 0 }
+    sectionAggs[sec].cartons += p.total_cartons ?? 0
+    sectionAggs[sec].cbm += p.total_cbm ?? 0
+    sectionAggs[sec].weight += p.total_weight_kg ?? 0
+    sectionAggs[sec].amount += p.total_amount_rmb ?? 0
+  }
+
+  const sectionComparison: Record<string, object> = {}
+  if (sectionSubtotals && sectionSubtotals.length > 0) {
+    // Use last bar per section — for left_in_warehouse that's GOODS LEFT (BEFORE GOODS already filtered at parse time).
+    const lastBarBySection: Record<string, typeof sectionSubtotals[0]> = {}
+    for (const bar of sectionSubtotals) lastBarBySection[bar.section] = bar
+
+    for (const [sec, bar] of Object.entries(lastBarBySection)) {
+      const agg = sectionAggs[sec] ?? { cartons: 0, cbm: 0, weight: 0, amount: 0 }
+      const isWarehouse = sec === 'left_in_warehouse'
+      sectionComparison[sec] = isWarehouse
+        ? {
+            computed_amount_rmb: round(agg.amount),
+            pdf_amount_rmb: bar.total_amount_rmb,
+          }
+        : {
+            computed_cartons: round(agg.cartons),
+            computed_cbm: round(agg.cbm),
+            computed_weight_kg: round(agg.weight),
+            computed_amount_rmb: round(agg.amount),
+            pdf_cartons: bar.total_cartons,
+            pdf_cbm: bar.total_cbm,
+            pdf_weight_kg: bar.total_weight_kg,
+            pdf_amount_rmb: bar.total_amount_rmb,
+          }
+    }
+  }
 
   const { error: totalsError } = await supabase.from('document_totals').insert({
     document_id,
@@ -90,7 +130,11 @@ export async function insertToSupabase(
     computed_weight_kg: round(computedWeight),
     computed_amount_rmb: round(computedAmount),
     totals_match: validation.totals_match,
-    totals_diff: validation.totals_diff,
+    totals_diff: {
+      ...validation.totals_diff,
+      ...(Object.keys(sectionComparison).length > 0 ? { sections: sectionComparison } : {}),
+      ...(sectionSubtotals && sectionSubtotals.length > 0 ? { section_subtotals: sectionSubtotals } : {}),
+    },
   })
   if (totalsError) throw new Error(`Document totals insert failed: ${totalsError.message}`)
 

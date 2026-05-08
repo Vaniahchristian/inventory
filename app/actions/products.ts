@@ -187,7 +187,7 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
       filters
     )
 
-  const [totalRes, shippedRes, leftRes, repackedRes, aggRes] = (await Promise.all([
+  const [totalRes, shippedRes, leftRes, repackedRes, totalsRowsRes] = (await Promise.all([
     withSupabaseRetry(() => baseHead(), 'getDocumentItemsPageStats.total'),
     withSupabaseRetry(
       () => applyDocumentItemsListFilters(supabase.from('document_items').select('*', { count: 'exact', head: true }), filters).eq('section', 'shipped'),
@@ -206,9 +206,9 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
         applyDocumentItemsListFilters(
           supabase
             .from('document_items')
-            .select('total_cartons.sum(),total_quantity.sum(),total_cbm.sum(),total_weight_kg.sum(),total_amount_rmb.sum()'),
+            .select('total_cartons,total_quantity,total_cbm,total_weight_kg,total_amount_rmb'),
           filters
-        ).maybeSingle(),
+        ),
       'getDocumentItemsPageStats.agg'
     ),
   ])) as [
@@ -223,10 +223,27 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
   if (shippedRes.error) throw new Error(shippedRes.error.message)
   if (leftRes.error) throw new Error(leftRes.error.message)
   if (repackedRes.error) throw new Error(repackedRes.error.message)
-  if (aggRes.error) logImport('getDocumentItemsPageStats.agg warning:', aggRes.error.message)
+  if (totalsRowsRes.error) throw new Error(totalsRowsRes.error.message)
 
   const totalCount = totalRes.count ?? 0
-  const aggRow = (aggRes.data ?? null) as Record<string, unknown> | null
+  const totalsRows = ((totalsRowsRes.data ?? []) as unknown[]) as Record<string, unknown>[]
+  const summedTotals = totalsRows.reduce<{
+    cartons: number
+    qty: number
+    cbm: number
+    weight: number
+    amount: number
+  }>(
+    (acc, row) => {
+      acc.cartons += parseAggregateSum(row, 'total_cartons')
+      acc.qty += parseAggregateSum(row, 'total_quantity')
+      acc.cbm += parseAggregateSum(row, 'total_cbm')
+      acc.weight += parseAggregateSum(row, 'total_weight_kg')
+      acc.amount += parseAggregateSum(row, 'total_amount_rmb')
+      return acc
+    },
+    { cartons: 0, qty: 0, cbm: 0, weight: 0, amount: 0 }
+  )
 
   return {
     totalCount,
@@ -236,11 +253,11 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
       repacked: repackedRes.count ?? 0,
     },
     totals: {
-      cartons: parseAggregateSum(aggRow, 'total_cartons'),
-      qty: parseAggregateSum(aggRow, 'total_quantity'),
-      cbm: parseAggregateSum(aggRow, 'total_cbm'),
-      weight: parseAggregateSum(aggRow, 'total_weight_kg'),
-      amount: parseAggregateSum(aggRow, 'total_amount_rmb'),
+      cartons: summedTotals.cartons,
+      qty: summedTotals.qty,
+      cbm: summedTotals.cbm,
+      weight: summedTotals.weight,
+      amount: summedTotals.amount,
     },
   }
 }
@@ -1471,6 +1488,14 @@ function parsePackingCartons(packing: string | null | undefined): number | null 
   return Number.isFinite(n) ? n : null
 }
 
+function parsePackingPcsPerCarton(packing: string | null | undefined): number | null {
+  const s = str(packing)
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*pcs\/ctn$/i)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
 function parseTrailingPackingFromDescription(description: string | null | undefined): { description: string | null; packing: string | null; qtyPerCarton: number | null } {
   const s = str(description)
   const m = s.match(/^(.*?)(\d+(?:\.\d+)?\s*pcs\/ctn)\s*$/i)
@@ -1574,11 +1599,12 @@ function repairNoPackingAmountRow(row: MappedRow): MappedRow {
 
 function repairCompactPackedShiftRow(row: MappedRow): MappedRow {
   const packaging = str(row.packing)
-  const parsedCartonsFromPackaging = parsePackingCartons(packaging)
+  const parsedCartonsFromPacking = parsePackingCartons(packaging)
+  const parsedPcsPerCartonFromPacking = parsePackingPcsPerCarton(packaging)
   const desc = str(row.description)
   const trailingPack = parseTrailingPackingFromDescription(desc)
   const looksLikeCompactShift =
-    parsedCartonsFromPackaging != null &&
+    parsedCartonsFromPacking != null &&
     trailingPack.packing != null &&
     (row.cartons ?? 0) > 0 &&
     row.quantity > 0 &&
@@ -1587,12 +1613,31 @@ function repairCompactPackedShiftRow(row: MappedRow): MappedRow {
     row.total_amount_rmb == null &&
     row.cost_price >= 100
 
-  if (!looksLikeCompactShift) return row
+  const looksLikePackedCartonShift =
+    (
+      (parsedCartonsFromPacking != null && (row.cartons ?? 0) > Math.max(20, parsedCartonsFromPacking * 2)) ||
+      (parsedPcsPerCartonFromPacking != null && (row.cartons ?? 0) > 0 && (row.cartons ?? 0) <= 20)
+    ) &&
+    row.quantity > 0 &&
+    row.quantity <= 200 &&
+    (row.unit_cbm ?? 0) > 0 &&
+    (row.unit_cbm ?? 0) <= 5 &&
+    ((row.total_amount_rmb ?? 0) <= 100 || row.total_amount_rmb == null) &&
+    (
+      row.cost_price >= 500 ||
+      ((numOrNull(row.total_weight) ?? 0) >= 20 && (numOrNull(row.total_weight) ?? 0) <= 600)
+    )
 
-  const cartons = parsedCartonsFromPackaging
-  const quantity = row.cartons ?? 0
-  const totalCbm = row.quantity
-  const unitCbm = cartons > 0 ? +(totalCbm / cartons).toFixed(6) : null
+  if (!looksLikeCompactShift && !looksLikePackedCartonShift) return row
+
+  const cartons = parsedCartonsFromPacking ?? row.cartons
+  const cartonsNum = cartons ?? 0
+  const quantity =
+    parsedPcsPerCartonFromPacking != null && cartonsNum > 0
+      ? Math.round(cartonsNum * parsedPcsPerCartonFromPacking)
+      : (row.cartons ?? 0)
+  const totalCbm = looksLikePackedCartonShift ? (row.unit_cbm ?? 0) : row.quantity
+  const unitCbm = cartonsNum > 0 && totalCbm > 0 ? +(totalCbm / cartonsNum).toFixed(6) : null
   const unitWeightNum = numOrNull(row.total_weight)
   const amountNum = row.cost_price > 0 ? row.cost_price : null
   const inferredUnitPrice =
@@ -1603,8 +1648,14 @@ function repairCompactPackedShiftRow(row: MappedRow): MappedRow {
   return {
     ...row,
     description: trailingPack.description ?? row.description,
-    packing: trailingPack.packing ?? row.packing,
-    unit: trailingPack.packing ? parseUnit(trailingPack.packing) : row.unit,
+    packing:
+      trailingPack.packing ??
+      (parsedPcsPerCartonFromPacking != null
+        ? `${parsedPcsPerCartonFromPacking}pcs/ctn`
+        : (cartonsNum > 0 && quantity > 0 && quantity % cartonsNum === 0
+          ? `${Math.round(quantity / cartonsNum)}pcs/ctn`
+          : row.packing)),
+    unit: 'pcs',
     cartons,
     quantity,
     unit_cbm: unitCbm,
@@ -1613,7 +1664,76 @@ function repairCompactPackedShiftRow(row: MappedRow): MappedRow {
     total_weight: row.unit_weight ?? row.total_weight,
     cost_price: inferredUnitPrice > 0 ? inferredUnitPrice : row.cost_price,
     total_amount_rmb: amountNum,
-    remarks: row.remarks ? `${row.remarks};repair:compact_packed_shift_row` : 'repair:compact_packed_shift_row',
+    dim_h_cm: looksLikePackedCartonShift ? row.quantity : row.dim_h_cm,
+    dim_w_cm: looksLikePackedCartonShift ? row.dim_h_cm : row.dim_w_cm,
+    dim_l_cm: looksLikePackedCartonShift ? row.dim_w_cm : row.dim_l_cm,
+    remarks: row.remarks ? `${row.remarks};repair:compact_packed_shift_row_v2` : 'repair:compact_packed_shift_row_v2',
+  }
+}
+
+function repairManifestOutlierRow(row: MappedRow): MappedRow {
+  const cartonsFromPacking = parsePackingCartons(row.packing)
+  if (cartonsFromPacking == null || cartonsFromPacking <= 0) return row
+
+  const cartons = row.cartons ?? 0
+  const qty = row.quantity ?? 0
+  const totalCbm = row.cbm ?? 0
+  const unitWeightNum = numOrNull(row.unit_weight)
+  const totalWeightNum = numOrNull(row.total_weight)
+  const totalAmount = row.total_amount_rmb
+  const unitPrice = row.cost_price
+
+  // Variant A: cartons column captured quantity and qty column captured dimensions.
+  const looksLikeQtyMovedToCartons =
+    cartons > Math.max(20, cartonsFromPacking * 2) &&
+    qty >= 20 &&
+    qty <= 220 &&
+    totalCbm >= 5 &&
+    unitPrice >= 500 &&
+    totalAmount == null
+
+  // Variant B: single-carton (or low-carton) rows where qty captured dimension
+  // and price/weight/amount columns shifted right.
+  const looksLikeSingleCartonShift =
+    cartons > 0 &&
+    cartons <= 6 &&
+    qty >= 20 &&
+    qty <= 220 &&
+    totalCbm >= 5 &&
+    totalAmount == null &&
+    totalWeightNum != null &&
+    unitPrice > 0 &&
+    Math.abs(totalWeightNum - unitPrice) <= 0.01
+
+  if (!looksLikeQtyMovedToCartons && !looksLikeSingleCartonShift) return row
+
+  const fixedQty = looksLikeQtyMovedToCartons ? cartons : cartonsFromPacking
+  const fixedTotalCbm = row.unit_cbm ?? row.cbm
+  const fixedUnitCbm =
+    fixedTotalCbm != null && cartonsFromPacking > 0
+      ? +(fixedTotalCbm / cartonsFromPacking).toFixed(6)
+      : row.unit_cbm
+
+  const fixedUnitWeight =
+    totalCbm > 0 ? `${totalCbm}KGS` : row.unit_weight
+  const fixedTotalWeight =
+    unitWeightNum != null && unitWeightNum > 0 ? `${unitWeightNum}KGS` : row.total_weight
+
+  return {
+    ...row,
+    cartons: cartonsFromPacking,
+    quantity: fixedQty,
+    packing: row.packing,
+    unit: 'pcs',
+    unit_cbm: fixedUnitCbm,
+    cbm: fixedTotalCbm,
+    unit_weight: fixedUnitWeight,
+    total_weight: fixedTotalWeight,
+    cost_price: totalWeightNum != null && totalWeightNum > 0 ? totalWeightNum : row.cost_price,
+    total_amount_rmb: unitPrice > 0 ? unitPrice : row.total_amount_rmb,
+    remarks: row.remarks
+      ? `${row.remarks};repair:manifest_outlier_shift`
+      : 'repair:manifest_outlier_shift',
   }
 }
 
@@ -1712,6 +1832,9 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
   let llmAttempts = 0
   let llmApplied = 0
   const aiMode = (process.env.AI_IMPORT_MODE ?? 'hybrid').toLowerCase() // hybrid | full
+  const llmImportEnabled = ['1', 'true', 'yes', 'on'].includes(
+    str(process.env.AI_IMPORT_USE_LLM).toLowerCase()
+  )
   const invalidMarksSamples: string[] = []
   const zeroOrBad: {
     sku: string | null
@@ -1889,9 +2012,13 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
       mappedRow = repairShiftedPackingListRow(mappedRow)
       mappedRow = repairNoPackingAmountRow(mappedRow)
       mappedRow = repairCompactPackedShiftRow(mappedRow)
+      mappedRow = repairManifestOutlierRow(mappedRow)
 
       const fromClaudeCore = str(r['__source']) === 'claude_core'
-      const shouldUseLlm = !fromClaudeCore && (aiMode === 'full' || shouldUseLlmAlignment(r, mappedRow))
+      const shouldUseLlm =
+        llmImportEnabled &&
+        !fromClaudeCore &&
+        (aiMode === 'full' || shouldUseLlmAlignment(r, mappedRow))
       mapped.push(mappedRow)
       if (shouldUseLlm) {
         llmCandidates.push({ mappedIndex: mapped.length - 1, raw: r, sku })
@@ -2090,6 +2217,17 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         await sleep(llmBatchPauseMs)
       }
     }
+  }
+
+  // Ensure deterministic column-shift repairs still hold after optional LLM alignment.
+  // LLM can improve names/packing text, but it should not reintroduce shifted totals.
+  for (let i = 0; i < mapped.length; i++) {
+    let row = mapped[i]
+    row = repairShiftedPackingListRow(row)
+    row = repairNoPackingAmountRow(row)
+    row = repairCompactPackedShiftRow(row)
+    row = repairManifestOutlierRow(row)
+    mapped[i] = row
   }
 
   logImport(

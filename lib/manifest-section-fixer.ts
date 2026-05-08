@@ -33,6 +33,18 @@ function rowsAreOcrDuplicate(a: ExtractedProduct, b: ExtractedProduct): boolean 
   // different "parts" rows can share a generic description but are distinct SKUs.
   if (normStr(a.marks) === '' && normStr(a.item_code) === '') return false
   if (normStr(b.marks) === '' && normStr(b.item_code) === '') return false
+  // Do not dedupe generic no-price parts lines; identical-looking rows can be distinct SKUs.
+  const looksGenericPartsA =
+    normStr(a.item_code) === '' &&
+    normStr(a.description).toUpperCase() === 'FOOD WARMER PARTS' &&
+    a.unit_price_rmb === null &&
+    a.total_amount_rmb === null
+  const looksGenericPartsB =
+    normStr(b.item_code) === '' &&
+    normStr(b.description).toUpperCase() === 'FOOD WARMER PARTS' &&
+    b.unit_price_rmb === null &&
+    b.total_amount_rmb === null
+  if (looksGenericPartsA && looksGenericPartsB) return false
   if (normStr(a.marks) !== normStr(b.marks)) return false
   if (normStr(a.item_code) !== normStr(b.item_code)) return false
   if (normStr(a.description) !== normStr(b.description)) return false
@@ -64,7 +76,18 @@ function isRowspanContinuationSplit(prev: ExtractedProduct, cur: ExtractedProduc
   const curDesc = normStr(cur.description)
   const prevDesc = normStr(prev.description)
 
-  if (curMarks === '') return true
+  if (curMarks === '') {
+    // Guard against cross-block false positives (e.g. FOOD WARMER PARTS after knife rows).
+    // Treat blank-marks rows as continuations only when description is blank or highly similar.
+    if (curDesc === '') return true
+    if (prevDesc === '') return false
+    const sameDesc = curDesc === prevDesc
+    const nearCbm =
+      (prev.total_cbm ?? 0) > 0 &&
+      (cur.total_cbm ?? 0) > 0 &&
+      Math.abs((prev.total_cbm ?? 0) - (cur.total_cbm ?? 0)) <= SPLIT_TIER_CBM_MAX_DIFF
+    return sameDesc || nearCbm
+  }
 
   if (curMarks === prevMarks && curDesc === '' && prevDesc !== '') return true
 
@@ -157,6 +180,51 @@ function normalizeManifestCartonCounts(
     }
   }
   return out
+}
+
+/**
+ * Zero physical container metrics (cartons, CBM, weight) for left_in_warehouse items.
+ * These goods are not loaded into the container, so they must not contribute to container
+ * physical totals. Financial amounts are preserved — they may still be tracked for payment.
+ */
+export function zeroWarehousePhysicalMetrics(products: ExtractedProduct[]): ExtractedProduct[] {
+  return products.map(p => {
+    if ((p.section ?? 'shipped') !== 'left_in_warehouse') return p
+    const alreadyZero =
+      (p.total_cartons ?? 0) === 0 &&
+      (p.total_cbm ?? 0) === 0 &&
+      (p.total_weight_kg ?? 0) === 0
+    if (alreadyZero) return p
+    return {
+      ...p,
+      total_cartons: 0,
+      total_cbm: 0,
+      total_weight_kg: 0,
+      remarks: appendRemark(p.remarks, 'warehouse:physical_zeroed'),
+    }
+  })
+}
+
+/**
+ * Drop BEFORE GOODS carryover entries (remarks contains 'carryover:before_goods') when the
+ * same marks also appears as a genuine left_in_warehouse item in the GOODS LEFT section.
+ * Prevents double-counting: BEFORE GOODS page-1 is a historical reference; GOODS LEFT page-7
+ * is the authoritative current warehouse entry for the same physical goods.
+ */
+export function deduplicateBeforeGoodsCarryovers(products: ExtractedProduct[]): ExtractedProduct[] {
+  const genuineWarehouseMarks = new Set<string>()
+  for (const p of products) {
+    if ((p.section ?? 'shipped') !== 'left_in_warehouse') continue
+    if ((p.remarks ?? '').toLowerCase().includes('carryover:before_goods')) continue
+    const mark = (p.marks ?? '').trim().toUpperCase()
+    if (mark) genuineWarehouseMarks.add(mark)
+  }
+  if (genuineWarehouseMarks.size === 0) return products
+  return products.filter(p => {
+    if (!(p.remarks ?? '').toLowerCase().includes('carryover:before_goods')) return true
+    const mark = (p.marks ?? '').trim().toUpperCase()
+    return !genuineWarehouseMarks.has(mark)
+  })
 }
 
 /**

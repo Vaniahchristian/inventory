@@ -3,6 +3,7 @@ import {
   parseReductoChunks,
   type ParseMode,
   type ReductoChunkInput,
+  type SectionSubtotal,
 } from './reducto-html-parser'
 import { coerceDocument, coerceProductArray } from './extract-coerce'
 import { detectDocTypeFromFilename, detectDocType } from './prompts'
@@ -278,6 +279,7 @@ export async function extractWithReductoHtmlParser(
     pageCount: parseOutput.pageCount,
     jobId: parseOutput.jobId,
     credits: parseOutput.credits,
+    sectionSubtotals: parseResult.sectionSubtotals,
   }
 }
 
@@ -507,6 +509,7 @@ export interface ReductoStructuredResult {
   pageCount: number
   jobId: string
   credits: number
+  sectionSubtotals?: SectionSubtotal[]
 }
 
 export async function extractStructuredWithReducto(

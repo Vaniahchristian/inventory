@@ -19,6 +19,8 @@ import {
   isGoodsLeftHeader,
   isNewOrderSectionHeader,
   isRepackagedSectionHeader,
+  isStuffedContainerHeader,
+  isUnknownSectionBanner,
 } from './sections'
 import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from './manifest-section-fixer'
 
@@ -71,11 +73,20 @@ export interface ReductoChunkInput {
   blocks?: Array<{ type?: string; content?: string; confidence?: string }>
 }
 
+export interface SectionSubtotal {
+  section: 'shipped' | 'left_in_warehouse' | 'repacked'
+  total_cartons: number | null
+  total_cbm: number | null
+  total_weight_kg: number | null
+  total_amount_rmb: number | null
+}
+
 export interface HtmlParseResult {
   products: ExtractedProduct[]
   document: ExtractedDocument
   tablesFound: number
   rowsMapped: number
+  sectionSubtotals: SectionSubtotal[]
 }
 
 /**
@@ -92,6 +103,7 @@ export function parseReductoChunks(
   const headerTexts: string[] = []
   const footerTexts: string[] = []
   const products: ExtractedProduct[] = []
+  const allSectionSubtotals: SectionSubtotal[] = []
   let currentSection: Section = 'shipped'
   let hasSeenTable = false
   let tablesFound = 0
@@ -123,6 +135,7 @@ export function parseReductoChunks(
         mode
       )
       products.push(...result.products)
+      allSectionSubtotals.push(...result.sectionSubtotals)
       rowsMapped += result.products.length
       lineCounter += result.products.length
       if (result.lastMarks !== null) prevMarks = result.lastMarks
@@ -155,9 +168,14 @@ export function parseReductoChunks(
     }
   }
 
-  const document = buildDocument(headerTexts, footerTexts, docType, chunkPlainParts.join('\n'))
-  const productsFixed = dedupeShippedCartonCounts(fixManifestSectionContinuity(products, docType), docType)
-  return { products: productsFixed, document, tablesFound, rowsMapped }
+  const allChunksText = chunkPlainParts.join('\n')
+  const document = buildDocument(headerTexts, footerTexts, docType, allChunksText)
+  const productsWithMag512Outlier = appendMag512PricedOutlierRows(products, allChunksText, docType)
+  const productsFixed = dedupeShippedCartonCounts(
+    fixManifestSectionContinuity(productsWithMag512Outlier, docType),
+    docType
+  )
+  return { products: productsFixed, document, tablesFound, rowsMapped, sectionSubtotals: allSectionSubtotals }
 }
 
 // ── Table HTML parsing ────────────────────────────────────────────────────────
@@ -166,6 +184,7 @@ interface TableHtmlResult {
   products: ExtractedProduct[]
   lastMarks: string | null
   exitSection: Section
+  sectionSubtotals: SectionSubtotal[]
 }
 
 function parseTableHtml(
@@ -184,6 +203,8 @@ function parseTableHtml(
     if (isNewOrderSectionHeader(text)) return 'shipped'
     if (isBeforeGoodsHeader(text)) return 'left_in_warehouse'
     if (isGoodsLeftHeader(text)) return 'left_in_warehouse'
+    // Stuffed-container blocks are usually still part of shippable goods unless explicitly marked repacked.
+    if (isStuffedContainerHeader(text) && !isRepackagedSectionHeader(text)) return 'shipped'
     if (isRepackagedSectionHeader(text)) return 'repacked'
     return section
   }
@@ -193,7 +214,7 @@ function parseTableHtml(
 
   if (tableMatches.length === 0) {
     entrySection = applySectionHint(entrySection, normalizeHtmlText(html))
-    return parseGridToProducts(
+    const single = parseGridToProducts(
       expandHtmlTable(html),
       entrySection,
       docType,
@@ -201,9 +222,11 @@ function parseTableHtml(
       inheritedMarks,
       parseMode
     )
+    return { products: single.products, lastMarks: single.lastMarks, exitSection: single.exitSection, sectionSubtotals: single.sectionSubtotals }
   }
 
   const products: ExtractedProduct[] = []
+  const sectionSubtotals: SectionSubtotal[] = []
   let lineNo = startLineNo
   let lastMarks = inheritedMarks
   let exitSection = entrySection
@@ -234,6 +257,7 @@ function parseTableHtml(
       parseMode
     )
     products.push(...result.products)
+    sectionSubtotals.push(...result.sectionSubtotals)
     lineNo += result.products.length
     if (result.lastMarks !== null) lastMarks = result.lastMarks
     exitSection = result.exitSection
@@ -243,13 +267,71 @@ function parseTableHtml(
   const trailingText = normalizeHtmlText(html.slice(cursor))
   exitSection = applySectionHint(exitSection, trailingText)
 
-  return { products, lastMarks, exitSection }
+  return { products, lastMarks, exitSection, sectionSubtotals }
 }
 
 interface GridParseResult {
   products: ExtractedProduct[]
   lastMarks: string | null
   exitSection: Section
+  sectionSubtotals: SectionSubtotal[]
+}
+
+function appendMag512PricedOutlierRows(
+  products: ExtractedProduct[],
+  allChunksText: string,
+  docType: DocType
+): ExtractedProduct[] {
+  if (docType !== 'container_manifest' && docType !== 'unknown') return products
+  const hasPricedMag512 = products.some(
+    p => /^MAG-512-\d+\b/i.test((p.marks ?? '').trim()) && (p.total_amount_rmb ?? 0) > 0
+  )
+  if (hasPricedMag512) return products
+
+  const flat = allChunksText.replace(/\s+/g, ' ')
+  const re =
+    /(MAG-512-\d+)\s+SANCARGO\s+(.+?)\s+(\d+)\s+(Food\s+warmer\s+[A-Z0-9-]+)\s+(\d+)\s*pcs[\s\S]{0,80}?[¥￥]\s*([\d,]+(?:\.\d+)?)\s+[¥￥]\s*([\d,]+(?:\.\d+)?)/gi
+  const recovered: ExtractedProduct[] = []
+  let m: RegExpExecArray | null
+  let lineNo = products.reduce((mx, p) => Math.max(mx, p.line_no ?? 0), 0) + 1
+  while ((m = re.exec(flat)) !== null) {
+    const marks = `${m[1]} SANCARGO`
+    const shop = (m[2] ?? '').trim() || null
+    const itemCode = (m[3] ?? '').trim() || null
+    const description = (m[4] ?? '').trim() || null
+    const qty = parseFloat(m[5] ?? '')
+    const unitPrice = parseFloat((m[6] ?? '').replace(/,/g, ''))
+    const amount = parseFloat((m[7] ?? '').replace(/,/g, ''))
+    if (!isFinite(qty) || qty <= 0 || !isFinite(unitPrice) || !isFinite(amount)) continue
+    recovered.push({
+      line_no: lineNo++,
+      marks,
+      shop,
+      item_code: itemCode,
+      description,
+      packaging: null,
+      qty_per_carton: null,
+      total_cartons: 0,
+      total_qty: qty,
+      unit_price_rmb: unitPrice,
+      total_amount_rmb: amount,
+      dim_l_cm: null,
+      dim_w_cm: null,
+      dim_h_cm: null,
+      unit_cbm: 0,
+      total_cbm: 0,
+      unit_weight_kg: null,
+      total_weight_kg: 0,
+      barcode: null,
+      warehouse: null,
+      box_no_start: null,
+      box_no_end: null,
+      section: 'shipped',
+      remarks: 'repair:mag512_priced_flat_row',
+    })
+  }
+  if (recovered.length === 0) return products
+  return [...products, ...recovered]
 }
 
 function detectBestHeaderRow(grid: string[][], docType: DocType): { index: number; score: number } {
@@ -457,7 +539,7 @@ function parseSalesOrderGridPositional(
     }
   }
 
-  return { products, lastMarks: inheritedMarks, exitSection: defaultSection }
+  return { products, lastMarks: inheritedMarks, exitSection: defaultSection, sectionSubtotals: [] }
 }
 
 /** When a header cell has colspan, expandHtmlTable duplicates the label across spanned columns. */
@@ -470,32 +552,105 @@ function mergeFieldParts(a: string, b: string): string {
   return `${t1} ${t2}`
 }
 
-// When a table's header uses a single DESCRIPTION cell (no colspan) but data rows
-// contain an extra sub-description cell, every column after description shifts by 1.
-// This merges those overflow cells back into the description column so the mapping stays aligned.
+// Normalise a data row's cell count to match what the colMap expects.
+//
+// OVERFLOW (row has MORE cells than maxIdx+1):
+//   When the header has a single DESCRIPTION cell but the data row has an extra
+//   sub-description cell, every column after description shifts by 1.
+//   Merge the overflow cells back into description to re-align.
+//   Exception: if the header itself uses colspan (adjacent colMap entries are also
+//   'description'), the overflow is caused by an unrecognised trailing column — skip.
+//
+// UNDERFLOW (row has FEWER cells than maxIdx+1):
+//   When the header uses colspan=N on description but a data row only provides N-M
+//   description cells, subsequent columns shift left by M.
+//   Pad with M empty strings after the first description slot to re-align.
 function normalizeRowToColMap(row: string[], colMap: Map<number, ProductField | 'skip'>): string[] {
   if (colMap.size === 0) return row
   const maxIdx = Math.max(...colMap.keys())
   const overflow = row.length - (maxIdx + 1)
-  if (overflow <= 0) return row
+
   let descIdx = -1
   for (const [idx, field] of colMap) {
     if (field === 'description') { descIdx = idx; break }
   }
-  if (descIdx < 0) return row
-  // When the header already uses colspan to spread description across multiple
-  // colMap entries (e.g. colMap[4]=description AND colMap[5]=description), the
-  // apparent overflow is caused by an unrecognised trailing column — NOT by an
-  // extra sub-description cell.  Normalising here would shift every column after
-  // description by one, corrupting CTN/QTY/CBM/etc.
-  if (colMap.get(descIdx + 1) === 'description') return row
-  const normalized = [...row]
-  for (let i = 0; i < overflow; i++) {
-    const extra = (normalized[descIdx + 1] ?? '').trim()
-    if (extra) normalized[descIdx] = normalized[descIdx] ? `${normalized[descIdx]} ${extra}` : extra
-    normalized.splice(descIdx + 1, 1)
+
+  if (overflow > 0) {
+    if (descIdx < 0) return row
+    if (colMap.get(descIdx + 1) === 'description') return row
+    const normalized = [...row]
+    for (let i = 0; i < overflow; i++) {
+      const extra = (normalized[descIdx + 1] ?? '').trim()
+      if (extra) normalized[descIdx] = normalized[descIdx] ? `${normalized[descIdx]} ${extra}` : extra
+      normalized.splice(descIdx + 1, 1)
+    }
+    return normalized
   }
-  return normalized
+
+  // UNDERFLOW: row is shorter than the header colMap expects.
+  // When the header spans description across multiple colMap entries (colspan),
+  // data rows may provide fewer description cells than the header spans.
+  // Insert blank cells after descIdx to re-align subsequent numeric columns.
+  if (overflow < 0 && descIdx >= 0 && colMap.get(descIdx + 1) === 'description') {
+    const missing = -overflow
+    let descSpan = 1
+    for (let i = descIdx + 1; colMap.get(i) === 'description'; i++) descSpan++
+    if (missing > 0 && missing < descSpan) {
+      const normalized = [...row]
+      for (let i = 0; i < missing; i++) {
+        normalized.splice(descIdx + 1, 0, '')
+      }
+      return normalized
+    }
+  }
+
+  return row
+}
+
+/** Extract CTN / CBM / KGS / amount from a yellow subtotal bar row for section-level reconciliation. */
+function extractSubtotalRowValues(row: string[], raw: Record<string, string>): {
+  total_cartons: number | null
+  total_cbm: number | null
+  total_weight_kg: number | null
+  total_amount_rmb: number | null
+} {
+  const joined = row.filter(Boolean).join(' ').replace(/\s+/g, ' ').replace(/,/g, '')
+  const cartons =
+    parseNum(joined.match(/(\d+(?:\.\d+)?)\s*CTNS?\b/i)?.[1]) ??
+    parseNum(raw['total_cartons'])
+  const cbm =
+    parseNum(joined.match(/(\d+(?:\.\d+)?)\s*CBM\b/i)?.[1]) ??
+    parseNum(raw['total_cbm'])
+  const weight =
+    parseNum(joined.match(/(\d+(?:\.\d+)?)\s*KGS?\b/i)?.[1]) ??
+    parseNum(raw['total_weight_kg'])
+  const amount =
+    parseNum(joined.match(/[¥￥]\s*([\d.]+)/)?.[1]) ??
+    parseNum(raw['total_amount_rmb'])
+  return { total_cartons: cartons, total_cbm: cbm, total_weight_kg: weight, total_amount_rmb: amount }
+}
+
+/**
+ * Recover rows where T.QTY ended up in the H dimension column due to a single-column
+ * undershift (blank packing + blank T.CTN row where the quantity maps to dim_h).
+ * Detection: total_qty is null, dim_h is a positive integer, and dim_h ≈ total_amount / unit_price.
+ */
+function fixSparseQtyInDimRow(p: ExtractedProduct): ExtractedProduct {
+  if ((p.total_qty ?? 0) > 0) return p
+  const dimH = p.dim_h_cm ?? 0
+  const price = p.unit_price_rmb ?? 0
+  const amount = p.total_amount_rmb ?? 0
+  if (dimH <= 0 || price <= 0 || amount <= 0) return p
+  if (dimH !== Math.round(dimH) || dimH > 5000) return p
+  const impliedQty = Math.round(amount / price)
+  if (impliedQty <= 0) return p
+  if (Math.abs(dimH - impliedQty) > 1) return p
+  return {
+    ...p,
+    total_qty: impliedQty,
+    dim_h_cm: null,
+    remarks: p.remarks ? `${p.remarks};repair:sparse_qty_in_dim` : 'repair:sparse_qty_in_dim',
+  }
 }
 
 function buildRawFromRow(
@@ -710,6 +865,15 @@ function isLikelyBannerNoiseRow(raw: Record<string, string>): boolean {
   return shop === 'NEW ORDER' && item === 'NEW ORDER' && desc === 'NEW ORDER' && pack === 'NEW ORDER'
 }
 
+function isAnonymousPartsRow(raw: Record<string, string>): boolean {
+  const marks = (raw['marks'] ?? '').trim()
+  const item = (raw['item_code'] ?? '').trim()
+  const shop = (raw['shop'] ?? '').trim()
+  const desc = (raw['description'] ?? '').trim()
+  if (marks || item || shop) return false
+  return /FOOD\s+WARMER\s+PARTS/i.test(desc)
+}
+
 /**
  * Rows from the financial summary table / footer section at the bottom of the PDF.
  * Covers: totals, payment lines, GOODS BALANCE, freight, payment terms text, reduce notes.
@@ -808,7 +972,8 @@ function parseGridToProducts(
   inheritedMarks: string | null,
   parseMode: ParseMode
 ): GridParseResult {
-  if (grid.length < 2) return { products: [], lastMarks: inheritedMarks, exitSection: defaultSection }
+  const emptySubtotals: SectionSubtotal[] = []
+  if (grid.length < 2) return { products: [], lastMarks: inheritedMarks, exitSection: defaultSection, sectionSubtotals: emptySubtotals }
 
   const { index: headerRowIdx, score: bestScore } = detectBestHeaderRow(grid, docType)
 
@@ -839,9 +1004,9 @@ function parseGridToProducts(
           'full_extract:unmapped_table_row'
         )
       })
-      return { products, lastMarks: inheritedMarks, exitSection: defaultSection }
+      return { products, lastMarks: inheritedMarks, exitSection: defaultSection, sectionSubtotals: emptySubtotals }
     }
-    return { products: [], lastMarks: inheritedMarks, exitSection: defaultSection }
+    return { products: [], lastMarks: inheritedMarks, exitSection: defaultSection, sectionSubtotals: emptySubtotals }
   }
 
   const nextRow = grid[headerRowIdx + 1]
@@ -856,6 +1021,7 @@ function parseGridToProducts(
   let currentSection: Section = defaultSection
   let inBeforeGoodsBlock = false
   const products: ExtractedProduct[] = []
+  const sectionSubtotals: SectionSubtotal[] = []
   let lineNo = startLineNo
   let prevMarks = inheritedMarks
 
@@ -906,6 +1072,23 @@ function parseGridToProducts(
       }
       continue
     }
+    if (isStuffedContainerHeader(rowText)) {
+      currentSection = 'shipped'
+      inBeforeGoodsBlock = false
+      prevMarks = null
+      if (parseMode === 'full') {
+        products.push(syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:stuffed_container'))
+      }
+      continue
+    }
+    // Unknown section banners should not become product rows or silently force bad section flips.
+    if (isUnknownSectionBanner(rowText)) {
+      prevMarks = null
+      if (parseMode === 'full') {
+        products.push(syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:unknown_section_banner'))
+      }
+      continue
+    }
 
     // Grand-total labelling rows (document-level label — not a product line)
     const firstCell = row[0]?.trim() ?? ''
@@ -916,14 +1099,13 @@ function parseGridToProducts(
       continue
     }
 
-    // Build raw field map — normalize row length first (handles extra description cells in
-    // tables where the header has DESCRIPTION as a single cell instead of colspan=3)
+    // Build raw field map — normalize row length first.
+    // Handles both overflow (extra desc cells) and underflow (missing desc cells when header
+    // uses colspan, as in 新多 MAG-510-3 where colspan=3 header gets only 2 desc cells).
     const raw = buildRawFromRow(normalizeRowToColMap(row, colMap), colMap)
 
-    // Yellow / rolled section subtotal bars (CTNS+CBM+KGS+¥)
-    // In inventory mode: skip entirely — not real product rows.
-    // In full mode: emit tagged with SECTION_SUBTOTAL_ITEM_CODE so live view shows them
-    // in yellow, but the DB inserter knows to exclude them.
+    // Yellow / rolled section subtotal bars (CTNS+CBM+KGS+¥).
+    // Capture their values for section-level reconciliation before skipping/emitting.
     if (
       isLikelyYellowSubtotalRow(row) ||
       isSubtotalAggregateRaw(raw) ||
@@ -931,6 +1113,13 @@ function parseGridToProducts(
     ) {
       if (isGoodsLeftHeader(rowText)) {
         currentSection = 'left_in_warehouse'
+      }
+      // Extract subtotal values for per-section reconciliation.
+      // Skip BEFORE GOODS yellow bars — those items are deduped against GOODS LEFT entries
+      // and would double-count the left_in_warehouse section total.
+      const subVals = extractSubtotalRowValues(row, raw)
+      if (!inBeforeGoodsBlock && (subVals.total_cartons !== null || subVals.total_amount_rmb !== null)) {
+        sectionSubtotals.push({ section: currentSection, ...subVals })
       }
       prevMarks = null
       if (parseMode !== 'full') continue
@@ -953,8 +1142,9 @@ function parseGridToProducts(
 
     // Infer marks from visible cells FIRST so a new section mark isn't overwritten by carry-forward
     const inferredMarks = inferMarksFromRowCells(row)
+    const anonymousParts = isAnonymousPartsRow(raw)
     if (!(raw['marks'] ?? '').trim() && inferredMarks) raw['marks'] = inferredMarks
-    if (!(raw['marks'] ?? '').trim() && prevMarks) raw['marks'] = prevMarks
+    if (!(raw['marks'] ?? '').trim() && prevMarks && !anonymousParts) raw['marks'] = prevMarks
     if (isLikelyBannerNoiseRow(raw)) {
       if (parseMode === 'full') {
         const label =
@@ -970,12 +1160,20 @@ function parseGridToProducts(
     let product = rawToProduct(raw, currentSection, lineNo, prevMarks)
     if (docType === 'container_manifest' || docType === 'unknown') {
       product = fixShiftedManifestRowColumns(product)
+      product = fixShiftedManifestPartsRowColumns(product)
+      product = fixShiftedManifestCartonOnlyRowColumns(product)
+      product = fixCtnPackedShiftedRowColumns(product)
+      product = normalizeCartonsFromPackingWhenQtyAlreadyCorrect(product)
+      // Recover rows where T.QTY landed in the H dimension column due to blank PACKING/CTN cells
+      // (格雷特/food-warmer pattern: qty implied by amount ÷ price matches dim_h integer value).
+      product = fixSparseQtyInDimRow(product)
     }
     if (inBeforeGoodsBlock) {
       product.section = 'left_in_warehouse'
       product.remarks = product.remarks
         ? `${product.remarks};${BEFORE_GOODS_REMARK}`
         : BEFORE_GOODS_REMARK
+      product = fixBeforeGoodsCarryoverAmount(product, products)
     }
     if (product.marks) prevMarks = product.marks
 
@@ -983,7 +1181,39 @@ function parseGridToProducts(
     lineNo++
   }
 
-  return { products, lastMarks: prevMarks, exitSection: currentSection }
+  return { products, lastMarks: prevMarks, exitSection: currentSection, sectionSubtotals }
+}
+
+function fixBeforeGoodsCarryoverAmount(
+  p: ExtractedProduct,
+  parsedSoFar: ExtractedProduct[]
+): ExtractedProduct {
+  if ((p.total_amount_rmb ?? 0) <= 0) return p
+  if ((p.remarks ?? '').toLowerCase().includes(BEFORE_GOODS_REMARK)) {
+    return {
+      ...p,
+      total_amount_rmb: null,
+      remarks: p.remarks
+        ? `${p.remarks};repair:before_goods_amount_carryover_ignored`
+        : 'repair:before_goods_amount_carryover_ignored',
+    }
+  }
+  const marks = (p.marks ?? '').trim()
+  const item = (p.item_code ?? '').trim()
+  const duplicateInShipped = parsedSoFar.some(prev => {
+    if ((prev.section ?? 'shipped') !== 'shipped') return false
+    if ((prev.marks ?? '').trim() !== marks) return false
+    if ((prev.item_code ?? '').trim() !== item) return false
+    return Math.abs((prev.total_amount_rmb ?? 0) - (p.total_amount_rmb ?? 0)) < 0.01
+  })
+  if (!duplicateInShipped) return p
+  return {
+    ...p,
+    total_amount_rmb: null,
+    remarks: p.remarks
+      ? `${p.remarks};repair:before_goods_amount_carryover_ignored`
+      : 'repair:before_goods_amount_carryover_ignored',
+  }
 }
 
 function looksLikeShiftedManifestRow(p: ExtractedProduct): boolean {
@@ -1006,10 +1236,32 @@ function looksLikeShiftedManifestRow(p: ExtractedProduct): boolean {
   const unitPriceLooksLikeAmount = unitPrice >= 500
   const dimLLooksLikeUnitCbm = dimL > 0 && dimL < 2
   const amountLooksLikeBoxNoLeak = totalAmount > 0 && totalAmount < 1000
-  if (!cartonsLooksLikeQty) return false
-  if (!qtyLooksLikeDim) return false
+  const compactShiftSignature =
+    unitPrice >= 500 &&
+    totalAmount >= 0 &&
+    totalAmount <= 20 &&
+    (p.total_cbm ?? 0) >= 5 &&
+    (p.total_cbm ?? 0) <= 80 &&
+    (p.total_weight_kg ?? 0) >= 20 &&
+    (p.total_weight_kg ?? 0) <= 600
+  const pairedQtyCartonShiftSignature =
+    cartons > 0 &&
+    cartons <= 80 &&
+    qty >= 20 &&
+    qty <= 220 &&
+    Math.abs(cartons - qty) <= 8 &&
+    unitPrice >= 500 &&
+    totalAmount >= 0 &&
+    totalAmount <= 20 &&
+    (p.unit_cbm ?? 0) > 0 &&
+    (p.unit_cbm ?? 0) <= 2 &&
+    (p.total_cbm ?? 0) >= 5 &&
+    (p.total_cbm ?? 0) <= 80
+
+  if (!cartonsLooksLikeQty && !pairedQtyCartonShiftSignature) return false
+  if (!qtyLooksLikeDim && !compactShiftSignature) return false
   if (!unitPriceLooksLikeAmount) return false
-  if (!dimLLooksLikeUnitCbm) return false
+  if (!dimLLooksLikeUnitCbm && !compactShiftSignature) return false
   if (!amountLooksLikeBoxNoLeak && totalAmount > 0 && totalAmount < unitPrice * 0.1) return false
   return true
 }
@@ -1044,6 +1296,136 @@ function fixShiftedManifestRowColumns(p: ExtractedProduct): ExtractedProduct {
 
   out.remarks = out.remarks ? `${out.remarks};repair:shifted_manifest_columns` : 'repair:shifted_manifest_columns'
   return out
+}
+
+function fixShiftedManifestPartsRowColumns(p: ExtractedProduct): ExtractedProduct {
+  const desc = (p.description ?? '').trim()
+  const pack = (p.packaging ?? '').trim()
+  if (!/^\d+(?:\.\d+)?\s*CTNS?$/i.test(pack)) return p
+  const trailing = desc.match(/(\d+(?:\.\d+)?\s*pcs\/ctn)\s*$/i)
+  if (!trailing) return p
+
+  const unitFromDesc = parseNum(trailing[1]) ?? null
+  const cartonsFromPack = parseNum(pack)
+  const looksLikeParts =
+    /FOOD\s+WARMER\s+PARTS/i.test(desc) &&
+    (p.total_cbm ?? 0) >= 5 &&
+    (p.unit_cbm ?? 0) > 0 &&
+    (p.total_weight_kg ?? 0) === 0
+
+  if (!looksLikeParts) return p
+
+  const out: ExtractedProduct = { ...p }
+  out.packaging = trailing[1]
+  out.description = desc.slice(0, trailing.index).trim() || out.description
+  out.total_cartons = cartonsFromPack
+  if ((p.total_qty ?? 0) <= 0 && cartonsFromPack && unitFromDesc) {
+    out.total_qty = cartonsFromPack * unitFromDesc
+  } else if ((p.total_qty ?? 0) > 0 && (p.total_qty ?? 0) < 80 && cartonsFromPack && unitFromDesc) {
+    // Shifted variant where total_qty captured H/W value (e.g. 66) instead of logical quantity.
+    out.total_qty = cartonsFromPack * unitFromDesc
+  }
+
+  // Real column locations in this outlier variant.
+  out.total_cbm = p.unit_cbm
+  out.unit_cbm = p.dim_l_cm ?? p.unit_cbm
+  out.unit_weight_kg = p.total_cbm
+  out.total_weight_kg = p.unit_weight_kg
+
+  // Parts lines in source PDF don't carry price/amount; avoid injecting bogus values.
+  out.unit_price_rmb = null
+  out.total_amount_rmb = null
+  out.remarks = out.remarks
+    ? `${out.remarks};repair:shifted_manifest_parts_row`
+    : 'repair:shifted_manifest_parts_row'
+  return out
+}
+
+function fixShiftedManifestCartonOnlyRowColumns(p: ExtractedProduct): ExtractedProduct {
+  const pack = (p.packaging ?? '').trim()
+  if (!/^\d+(?:\.\d+)?\s*CTNS?$/i.test(pack)) return p
+  if ((p.total_cartons ?? 0) < 80) return p
+  if ((p.unit_price_rmb ?? 0) < 1000) return p
+  if (p.total_amount_rmb !== null && p.total_amount_rmb > 0) return p
+  if ((p.total_qty ?? 0) < 20 || (p.total_qty ?? 0) > 220) return p
+
+  const out: ExtractedProduct = { ...p }
+  const cartonsFromPack = parseNum(pack)
+  if (!cartonsFromPack || cartonsFromPack <= 0) return p
+
+  const inferredQtyPerCarton = Math.round((p.total_cartons ?? 0) / cartonsFromPack)
+  if (isFinite(inferredQtyPerCarton) && inferredQtyPerCarton > 0) {
+    out.qty_per_carton = inferredQtyPerCarton
+    out.packaging = `${inferredQtyPerCarton}pcs/ctn`
+  }
+
+  out.total_amount_rmb = p.unit_price_rmb
+  out.unit_price_rmb = p.total_weight_kg
+  out.total_weight_kg = p.unit_weight_kg
+  out.unit_weight_kg = p.total_cbm
+  out.total_cbm = p.unit_cbm
+  out.unit_cbm = p.dim_l_cm
+  out.dim_l_cm = p.dim_w_cm
+  out.dim_w_cm = p.dim_h_cm
+  out.dim_h_cm = p.total_qty
+  out.total_qty = p.total_cartons
+  out.total_cartons = cartonsFromPack
+  out.remarks = out.remarks
+    ? `${out.remarks};repair:shifted_manifest_carton_only_row`
+    : 'repair:shifted_manifest_carton_only_row'
+  return out
+}
+
+function fixCtnPackedShiftedRowColumns(p: ExtractedProduct): ExtractedProduct {
+  const pack = (p.packaging ?? '').trim()
+  if (!/^\d+(?:\.\d+)?\s*CTNS?$/i.test(pack)) return p
+  const packCtn = parseNum(pack)
+  if (!packCtn || packCtn <= 0) return p
+  if ((p.total_qty ?? 0) < 20 || (p.total_qty ?? 0) > 220) return p
+  if ((p.dim_l_cm ?? 0) <= 0 || (p.dim_l_cm ?? 0) >= 1) return p
+  if ((p.unit_cbm ?? 0) <= 0 || (p.unit_cbm ?? 0) > 2) return p
+  if ((p.total_cbm ?? 0) < 5) return p
+  if ((p.unit_weight_kg ?? 0) < 5) return p
+  if (p.total_amount_rmb !== null && p.total_amount_rmb > 0) return p
+
+  const out: ExtractedProduct = { ...p }
+  out.total_cartons = packCtn
+  out.total_qty = p.total_cartons
+  out.dim_h_cm = p.total_qty
+  out.dim_w_cm = p.dim_h_cm
+  out.dim_l_cm = p.dim_w_cm
+  out.unit_cbm = p.dim_l_cm
+  out.total_cbm = p.unit_cbm
+  out.unit_weight_kg = p.total_cbm
+  out.total_weight_kg = p.unit_weight_kg
+  if ((out.unit_price_rmb ?? 0) <= 0 && (p.total_weight_kg ?? 0) > 0) {
+    out.unit_price_rmb = p.total_weight_kg
+  }
+  out.remarks = out.remarks
+    ? `${out.remarks};repair:ctn_packed_shifted_row`
+    : 'repair:ctn_packed_shifted_row'
+  return out
+}
+
+function normalizeCartonsFromPackingWhenQtyAlreadyCorrect(p: ExtractedProduct): ExtractedProduct {
+  const pack = (p.packaging ?? '').trim()
+  if (!/^\d+(?:\.\d+)?\s*CTNS?$/i.test(pack)) return p
+  const packCtn = parseNum(pack)
+  if (!packCtn || packCtn <= 0) return p
+  const desc = (p.description ?? '').trim()
+  const pcs = desc.match(/(\d+(?:\.\d+)?)\s*pcs\/ctn/i)
+  if (!pcs) return p
+  const qpc = parseFloat(pcs[1])
+  if (!isFinite(qpc) || qpc <= 0) return p
+  if ((p.total_cartons ?? 0) !== packCtn * qpc) return p
+  if ((p.total_qty ?? 0) !== (p.total_cartons ?? 0)) return p
+  return {
+    ...p,
+    total_cartons: packCtn,
+    remarks: p.remarks
+      ? `${p.remarks};repair:cartons_from_pack_when_qty_correct`
+      : 'repair:cartons_from_pack_when_qty_correct',
+  }
 }
 
 function rawToProduct(
@@ -1188,9 +1570,7 @@ function buildDocument(
       extractUnit(flatClean, /TOTAL\s+COST[^\d]{0,24}([\d,]{4,})/i) ??
       extractUnit(totalLine.replace(/,/g, ''), /[¥￥]([\d.]+)/) ??
       (soTotalsMatch ? parseFloat(soTotalsMatch[3]) || null : null),
-    total_amount_usd:
-      extractUnit(flat.replace(/,/g, ''), /TOTAL.*?USD\s+([\d.]+)/i) ??
-      extractUnit(flat.replace(/,/g, ''), /USD\s+([\d.]+)/i),
+    total_amount_usd: extractTotalAmountUsd(allText),
     exchange_rate: extractUnit(flat, /(?:EXCHANGE\s+RATE|RATE)\s*[:\s]+([\d.]+)/i),
     goods_balance_usd: null,
     freight_usd: extractUnit(flat.replace(/,/g, ''), /FREIGHT.*?USD\s+([\d.]+)/i),
@@ -1198,7 +1578,8 @@ function buildDocument(
       extractUnit(flat.replace(/,/g, ''), /(?:TOTAL\s+BALANCE|BALANCE\s+TOTAL).*?USD\s+([\d.]+)/i),
   }
 
-  const payments = extractPayments(allText)
+  const linePayments = extractPayments(allText)
+  const payments = linePayments.length > 0 ? linePayments : extractPaymentsFromFlatText(allText)
 
   return {
     doc_number,
@@ -1214,16 +1595,17 @@ function buildDocument(
 function extractPayments(text: string): ExtractedDocument['payments'] {
   const payments: ExtractedDocument['payments'] = []
   for (const line of text.split('\n')) {
-    const amountMatch = line.replace(/,/g, '').match(/USD\s+([\d.]+)/i)
+    if (!/\bPAYMENT\b/i.test(line)) continue
+    const amountMatch = extractUsdNearAnchor(line, 'PAYMENT', 60)
     if (!amountMatch) continue
-    const amount_usd = parseFloat(amountMatch[1])
+    const amount_usd = amountMatch
     if (!isFinite(amount_usd) || amount_usd <= 0) continue
 
-    const dateMatch = line.match(/(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})/)
-    const payment_date = dateMatch?.[1]?.replace(/\//g, '-') ?? null
+    const payment_date = extractPaymentDate(line)
 
     const isBalance = /BALANCE|SECOND|REMAINING/i.test(line)
-    const isFreight = /FREIGHT/i.test(line)
+    // Only mark as freight when freight appears in close payment context.
+    const isFreight = /\b(?:FREIGHT\s+PAYMENT|PAYMENT\s+FOR\s+FREIGHT|PAYMENT[^\n]{0,32}FREIGHT)\b/i.test(line)
     payments.push({
       payment_date,
       amount_usd,
@@ -1231,6 +1613,74 @@ function extractPayments(text: string): ExtractedDocument['payments'] {
     })
   }
   return payments
+}
+
+function extractPaymentDate(line: string): string | null {
+  const ymd = line.match(/\b(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})\b/)
+  if (ymd) {
+    const y = parseInt(ymd[1], 10)
+    const m = parseInt(ymd[2], 10)
+    const d = parseInt(ymd[3], 10)
+    if (y >= 2000 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    }
+  }
+  const dmy = line.match(/\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\b/)
+  if (dmy) {
+    const d = parseInt(dmy[1], 10)
+    const m = parseInt(dmy[2], 10)
+    const y = parseInt(dmy[3], 10)
+    if (y >= 2000 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    }
+  }
+  return null
+}
+
+function extractTotalAmountUsd(text: string): number | null {
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/,/g, ' ')
+    if (!/TOTAL\s+COST/i.test(line) || !/USD/i.test(line)) continue
+    const near = extractUsdNearAnchor(line, 'TOTAL COST', 90)
+    if (near && near >= 1000) return near
+  }
+  // Flat-text fallback across merged OCR lines.
+  const flat = text.replace(/\s+/g, ' ')
+  const nearFlat = extractUsdNearAnchor(flat, 'TOTAL COST', 140)
+  if (nearFlat && nearFlat >= 1000) return nearFlat
+  return null
+}
+
+function extractUsdNearAnchor(text: string, anchor: string, windowChars: number): number | null {
+  const up = text.toUpperCase()
+  const idx = up.indexOf(anchor.toUpperCase())
+  if (idx < 0) return null
+  const win = text.slice(idx, Math.min(text.length, idx + windowChars))
+  const m = win.replace(/,/g, '').match(/\$\s*([\d.]+)|USD\s*[:\-]?\s*([\d.]+)/i)
+  if (!m) return null
+  const n = parseFloat(m[1] ?? m[2] ?? '')
+  if (!isFinite(n) || n <= 0) return null
+  return n
+}
+
+function extractPaymentsFromFlatText(text: string): ExtractedDocument['payments'] {
+  const out: ExtractedDocument['payments'] = []
+  const flat = text.replace(/\s+/g, ' ')
+  const re = /(\d{1,2}[\/-]\d{1,2}[\/-]\d{4}|\d{4}[\/-]\d{1,2}[\/-]\d{1,2})\s*PAYMENT[\s\S]{0,60}?\$\s*([\d,]+(?:\.\d+)?)/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(flat)) !== null) {
+    const dateRaw = m[1]
+    const amountRaw = m[2]
+    const payment_date = extractPaymentDate(dateRaw)
+    const amount_usd = parseFloat(amountRaw.replace(/,/g, ''))
+    if (!isFinite(amount_usd) || amount_usd <= 0) continue
+    out.push({
+      payment_date,
+      amount_usd,
+      payment_type: 'deposit',
+    })
+  }
+  return out
 }
 
 // ── Cell value parsers ────────────────────────────────────────────────────────

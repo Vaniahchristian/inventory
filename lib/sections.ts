@@ -39,8 +39,8 @@ export function isSectionDividerProduct(product: Pick<Product, 'sku'>): boolean 
   )
 }
 
-/** Repacked / stuffed-container banner, e.g. "37-T-1 18 CTN GOODS STUFFED INTO THIS CONTAINER(REPACKED GOODS)". */
-export function isRepackagedSectionHeader(raw: string): boolean {
+/** Generic stuffed-container banner line. */
+export function isStuffedContainerHeader(raw: string): boolean {
   const u = raw.toUpperCase()
   const normalized = u.replace(/\s+/g, ' ').trim()
   const compact = normalized.replace(/[^A-Z0-9]/g, '')
@@ -50,11 +50,43 @@ export function isRepackagedSectionHeader(raw: string): boolean {
     u.includes('STUFFED INTO THIS CONTAINER') ||
     u.includes('STUFFED INTO THIS CO') ||
     compact.includes('GOODSHASBEENSTUFFEDINTOTHISCO') ||
-    compact.includes('GOODSHASBEENSTUFFEDINTOTHISCONTAINER') ||
+    compact.includes('GOODSHASBEENSTUFFEDINTOTHISCONTAINER')
+  )
+}
+
+/** Repacked-only banner, e.g. "... STUFFED INTO THIS CONTAINER(REPACKED GOODS)". */
+export function isRepackagedSectionHeader(raw: string): boolean {
+  const u = raw.toUpperCase()
+  if (!isStuffedContainerHeader(raw)) return false
+  return (
     u.includes('REPACKAGED GOODS') ||
     u.includes('REPACKED GOODS') ||
-    (u.includes('STUFFED INTO THIS CONTAINER') && /\bREPACK/.test(u))
+    /\bREPACK(?:ED|AGED)?\b/.test(u)
   )
+}
+
+/**
+ * Unknown section banner fallback:
+ * - looks like a section delimiter row (few non-empty cells, no row-level metrics),
+ * - but does not match known section detectors.
+ */
+export function isUnknownSectionBanner(raw: string): boolean {
+  const text = raw.replace(/\s+/g, ' ').trim()
+  if (!text) return false
+  if (isNewOrderSectionHeader(text)) return false
+  if (isBeforeGoodsHeader(text)) return false
+  if (isGoodsLeftHeader(text)) return false
+  if (isStuffedContainerHeader(text)) return false
+  if (isRepackagedSectionHeader(text)) return false
+
+  const upper = text.toUpperCase()
+  const wordCount = upper.split(' ').filter(Boolean).length
+  const hasMetricTokens = /\b(PCS\/CTN|CTNS?|CBM|KGS?|USD|RMB)\b/.test(upper)
+  const alphaHeavy = /[A-Z\u4E00-\u9FFF]/.test(upper)
+
+  if (!alphaHeavy) return false
+  if (hasMetricTokens) return false
+  return wordCount >= 2 && wordCount <= 18
 }
 
 /** Banner row "NEW ORDER" (possibly repeated across merged cells) — labels the main table block, not a product. */
