@@ -251,10 +251,11 @@ export async function extractWithReductoHtmlParser(
 
   const parseOutput = await parseWithReducto(fileBuffer, fileName, apiKey, tag)
 
-  const docType =
-    detectDocTypeFromFilename(fileName) !== 'unknown'
-      ? detectDocTypeFromFilename(fileName)
-      : detectDocType(parseOutput.text.split('\n').slice(0, 25))
+  const textDocType = detectDocType(parseOutput.text.split('\n').slice(0, 120))
+  const fileDocType = detectDocTypeFromFilename(fileName)
+  const docType = textDocType !== 'unknown'
+    ? textDocType
+    : (fileDocType !== 'unknown' ? fileDocType : 'container_manifest')
 
   const parseMode: ParseMode = options?.parseMode ?? 'inventory'
   const parseResult = parseReductoChunks(parseOutput.chunks, docType, { mode: parseMode })

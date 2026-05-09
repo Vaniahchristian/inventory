@@ -1,9 +1,17 @@
 export type DocType = 'sales_order' | 'container_manifest' | 'unknown'
 
 export function detectDocType(lines: string[]): DocType {
-  const header = lines.slice(0, 25).join(' ')
-  if (header.includes('销售单') || header.includes('销售日期')) return 'sales_order'
-  if (header.includes('CONTAINER NO') || header.includes('CLIENT DETAILS') || header.includes('SANCARGO')) return 'container_manifest'
+  const header = lines.slice(0, 120).join(' ')
+  const upper = header.toUpperCase()
+  // Sales / delivery-note style tables (even if title is 送货单, not 销售单)
+  const salesSignals =
+    /销售单|送货单/.test(header) ||
+    (upper.includes('DEL NO') && upper.includes('CUS NO')) ||
+    (upper.includes('U/P') && upper.includes('AMOUNT') && upper.includes('W.H')) ||
+    (upper.includes('ITEM NO') && upper.includes('TTL CBM') && upper.includes('TTL KGS')) ||
+    /仓位|送货地址|订货地址/.test(header)
+  if (salesSignals) return 'sales_order'
+  if (upper.includes('CONTAINER NO') || upper.includes('CLIENT DETAILS') || upper.includes('SANCARGO')) return 'container_manifest'
   return 'unknown'
 }
 

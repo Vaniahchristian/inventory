@@ -220,9 +220,11 @@ export async function POST(req: Request) {
 
   const linesRaw = text.split('\n').map(l => l.trim()).filter(Boolean)
   const lines = selectRelevantExtractionLines(linesRaw)
-  const docType = detectDocTypeFromFilename(fileName) !== 'unknown'
-    ? detectDocTypeFromFilename(fileName)
-    : detectDocType(lines)
+  const textDocType = detectDocType(lines)
+  const fileDocType = detectDocTypeFromFilename(fileName)
+  const docType = textDocType !== 'unknown'
+    ? textDocType
+    : (fileDocType !== 'unknown' ? fileDocType : 'container_manifest')
 
   console.log(`[extract][${debugId}] claude_text — doc_type: ${docType} lines_raw: ${linesRaw.length} lines_used: ${lines.length}`)
 
