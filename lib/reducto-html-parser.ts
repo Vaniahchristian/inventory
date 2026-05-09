@@ -30,6 +30,12 @@ import {
   isUnknownSectionBanner,
 } from './sections'
 import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from './manifest-section-fixer'
+import {
+  SALES_ORDER_MAX_LINE_AMOUNT,
+  SALES_ORDER_MAX_LINE_QTY,
+  SALES_ORDER_MAX_UNIT_PRICE,
+  sanitizeSalesOrderProductsPhysicalCaps,
+} from './sales-order-sanitize'
 
 type Section = ExtractedProduct['section']
 const BEFORE_GOODS_REMARK = 'carryover:before_goods'
@@ -194,6 +200,20 @@ function repairSalesOrderCartonOcrGarbage(
       return p
     }
 
+    const insaneQty = (p.total_qty ?? 0) > 500_000 || (p.total_qty ?? 0) < 0
+    const insaneQpc = (p.qty_per_carton ?? 0) > 20_000 || (p.qty_per_carton ?? 0) < 0
+    if (insaneQty || insaneQpc) {
+      return {
+        ...p,
+        total_qty: insaneQty ? null : p.total_qty,
+        qty_per_carton: insaneQpc ? null : p.qty_per_carton,
+        total_cartons: insaneQty || insaneQpc ? null : p.total_cartons,
+        remarks: p.remarks
+          ? `${p.remarks};repair:insane_qty_qpc_cleared`
+          : 'repair:insane_qty_qpc_cleared',
+      }
+    }
+
     const ctn = p.total_cartons
     const qpc = p.qty_per_carton
     const tq = p.total_qty
@@ -334,6 +354,7 @@ export function parseReductoChunks(
     docType
   )
   productsFixed = repairSalesOrderCartonOcrGarbage(productsFixed, document)
+  productsFixed = sanitizeSalesOrderProductsPhysicalCaps(productsFixed)
   return { products: productsFixed, document, tablesFound, rowsMapped, sectionSubtotals: allSectionSubtotals }
 }
 
@@ -920,6 +941,8 @@ function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): Extracted
       const window = nums.slice(start, start + 12)
       const [c, q, tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = window
       if (!(tq > 0 && up > 0 && am > 0)) continue
+      if (!(tq <= SALES_ORDER_MAX_LINE_QTY && up <= SALES_ORDER_MAX_UNIT_PRICE && am <= SALES_ORDER_MAX_LINE_AMOUNT))
+        continue
       if (!(q > 0 && q <= 200)) continue
       if (!(c > 0 && c <= 400)) continue
       if (!(ll > 0 && ww > 0 && hh > 0 && ll < 300 && ww < 300 && hh < 300)) continue
@@ -943,19 +966,51 @@ function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): Extracted
       firstTailMatchIdx = best.start
     } else {
       const tail = nums.slice(-12)
-      ;[ctn, qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
-      firstTailMatchIdx = numMatches.length - 12
+      const [, , tq0, up0, am0] = tail
+      if (
+        tq0 > 0 &&
+        tq0 <= SALES_ORDER_MAX_LINE_QTY &&
+        up0 > 0 &&
+        up0 <= SALES_ORDER_MAX_UNIT_PRICE &&
+        am0 > 0 &&
+        am0 <= SALES_ORDER_MAX_LINE_AMOUNT
+      ) {
+        ;[ctn, qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
+        firstTailMatchIdx = numMatches.length - 12
+      }
     }
   } else if (nums.length === 11) {
     // Missing CTN is common in this outlier table; keep it null and recover the rest.
     const tail = nums.slice(-11)
-    ;[qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
-    firstTailMatchIdx = numMatches.length - 11
+    const [q, tq, up, am] = tail
+    if (
+      tq > 0 &&
+      tq <= SALES_ORDER_MAX_LINE_QTY &&
+      up > 0 &&
+      up <= SALES_ORDER_MAX_UNIT_PRICE &&
+      am > 0 &&
+      am <= SALES_ORDER_MAX_LINE_AMOUNT &&
+      q > 0 &&
+      q <= 200
+    ) {
+      ;[qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
+      firstTailMatchIdx = numMatches.length - 11
+    }
   } else {
     // Last-ditch narrow recovery for badly collapsed rows: keep only critical metrics.
     const tail = nums.slice(-10)
-    ;[tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
-    firstTailMatchIdx = numMatches.length - 10
+    const [tq, up, am] = tail
+    if (
+      tq > 0 &&
+      tq <= SALES_ORDER_MAX_LINE_QTY &&
+      up > 0 &&
+      up <= SALES_ORDER_MAX_UNIT_PRICE &&
+      am > 0 &&
+      am <= SALES_ORDER_MAX_LINE_AMOUNT
+    ) {
+      ;[tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
+      firstTailMatchIdx = numMatches.length - 10
+    }
   }
 
   if (tQty === null || amount === null || unitPrice === null) return p
@@ -1009,7 +1064,7 @@ function normalizeSwappedTqtyAmtUnit(nums: number[]): number[] {
     const up = out[i + 2]
     if (
       tq > 0 &&
-      tq < 2_000_000 &&
+      tq <= 100_000 &&
       up > 0 &&
       up < 500 &&
       mid > 0 &&
@@ -1049,6 +1104,8 @@ function fixContinuationSalesMetricsFromDescription(p: ExtractedProduct): Extrac
   const scoreWindow12 = (window: number[], startIdx: number): number | null => {
     const [c, q, tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = window
     if (!(tq > 0 && up > 0 && am > 0)) return null
+    if (!(tq <= SALES_ORDER_MAX_LINE_QTY && up <= SALES_ORDER_MAX_UNIT_PRICE && am <= SALES_ORDER_MAX_LINE_AMOUNT))
+      return null
     if (!(q > 0 && q <= 200)) return null
     if (!(c > 0 && c <= maxCtn)) return null
     if (!(ll > 0 && ww > 0 && hh > 0 && ll < 300 && ww < 300 && hh < 300)) return null
@@ -1114,8 +1171,11 @@ function fixContinuationSalesMetricsFromDescription(p: ExtractedProduct): Extrac
     const [q, tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = tail
     if (
       tq > 0 &&
+      tq <= SALES_ORDER_MAX_LINE_QTY &&
       up > 0 &&
+      up <= SALES_ORDER_MAX_UNIT_PRICE &&
       am > 0 &&
+      am <= SALES_ORDER_MAX_LINE_AMOUNT &&
       q > 0 &&
       q <= 200 &&
       ll > 0 &&
@@ -1154,8 +1214,11 @@ function fixContinuationSalesMetricsFromDescription(p: ExtractedProduct): Extrac
     const [tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = tail
     if (
       tq > 0 &&
+      tq <= SALES_ORDER_MAX_LINE_QTY &&
       up > 0 &&
+      up <= SALES_ORDER_MAX_UNIT_PRICE &&
       am > 0 &&
+      am <= SALES_ORDER_MAX_LINE_AMOUNT &&
       ll > 0 &&
       ww > 0 &&
       hh > 0 &&

@@ -5,6 +5,7 @@ import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from '@/lib/m
 import type { SectionSubtotal } from '@/lib/reducto-html-parser'
 import { ValidationResult, validateExtraction } from './validator'
 import { parseFiniteNumber, parseFiniteInt } from './numeric-parse'
+import { sanitizeSalesOrderProductsPhysicalCaps } from './sales-order-sanitize'
 import { supabase } from './supabase'
 
 export interface InsertResult {
@@ -310,7 +311,7 @@ function normalizeSalesOrderProducts(
 ): ExtractedProduct[] {
   if (doc.document_type !== 'sales_order') return products
 
-  const out = products.map(p => ({ ...p }))
+  const out = sanitizeSalesOrderProductsPhysicalCaps(products.map(p => ({ ...p })))
   const normCode = (code: string | null | undefined): string => (code ?? '').toUpperCase().replace(/[^A-Z0-9-]/g, '')
   const codeStem = (code: string | null | undefined): string => {
     const c = normCode(code)
