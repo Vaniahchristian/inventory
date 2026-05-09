@@ -12,6 +12,7 @@
  */
 
 import type { ExtractedDocument, ExtractedProduct } from './claude-extractor'
+import { parseFiniteInt, parseFiniteNumber } from './numeric-parse'
 
 export function coerceProductArray(raw: unknown): ExtractedProduct[] {
   if (!Array.isArray(raw)) return []
@@ -21,7 +22,7 @@ export function coerceProductArray(raw: unknown): ExtractedProduct[] {
 export function coerceProduct(raw: unknown): ExtractedProduct {
   const p = isObj(raw) ? (raw as Record<string, unknown>) : {}
   return {
-    line_no: coerceInt(p['line_no']),
+    line_no: parseFiniteInt(p['line_no']),
     marks: coerceStr(p['marks']),
     shop: coerceStr(p['shop']),
     item_code: coerceStr(p['item_code']),
@@ -41,8 +42,8 @@ export function coerceProduct(raw: unknown): ExtractedProduct {
     total_weight_kg: coerceNum(p['total_weight_kg']),
     barcode: coerceStr(p['barcode']),
     warehouse: coerceStr(p['warehouse']),
-    box_no_start: coerceInt(p['box_no_start']),
-    box_no_end: coerceInt(p['box_no_end']),
+    box_no_start: parseFiniteInt(p['box_no_start']),
+    box_no_end: parseFiniteInt(p['box_no_end']),
     section: coerceSection(p['section']),
     remarks: coerceStr(p['remarks']),
   }
@@ -88,19 +89,12 @@ export function coerceDocument(raw: unknown): ExtractedDocument {
 
 function coerceNum(v: unknown): number | null {
   if (v === null || v === undefined || v === '') return null
-  if (typeof v === 'number') return isFinite(v) ? v : null
   if (typeof v === 'string') {
     const cleaned = v.replace(/[¥￥,%]/g, '').replace(/,/g, '').trim()
     if (cleaned === '' || cleaned === 'null' || cleaned === 'undefined') return null
-    const n = parseFloat(cleaned)
-    return isFinite(n) ? n : null
+    return parseFiniteNumber(cleaned)
   }
-  return null
-}
-
-function coerceInt(v: unknown): number | null {
-  const n = coerceNum(v)
-  return n !== null ? Math.round(n) : null
+  return parseFiniteNumber(v)
 }
 
 function coerceStr(v: unknown): string | null {

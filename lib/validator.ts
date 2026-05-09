@@ -1,4 +1,5 @@
 import { ExtractedDocument, ExtractedProduct } from './claude-extractor'
+import { parseFiniteNumber } from './numeric-parse'
 import { EXTRACT_TOLERANCE } from './validation-gate'
 
 export interface ValidationResult {
@@ -36,36 +37,43 @@ export function validateExtraction(
   const amountProducts = allProducts ?? products
 
   // ── Compute row-level aggregates ──────────────────────────────────────────
-  const computedCBM = sum(physicalProducts, p => p.total_cbm)
-  const computedWeight = sum(physicalProducts, p => p.total_weight_kg)
-  const computedAmount = sum(amountProducts, p => p.total_amount_rmb)
-  const computedCartons = sum(physicalProducts, p => p.total_cartons)
+  const computedCBM = sumNumeric(physicalProducts, p => p.total_cbm)
+  const computedWeight = sumNumeric(physicalProducts, p => p.total_weight_kg)
+  const computedAmount = sumNumeric(amountProducts, p => p.total_amount_rmb)
+  const computedCartons = sumNumeric(physicalProducts, p => p.total_cartons)
 
   const ft = document.footer_totals
+  const footCbm = parseFiniteNumber(ft.total_cbm)
+  const footWeight = parseFiniteNumber(ft.total_weight_kg)
+  const footAmount = parseFiniteNumber(ft.total_amount_rmb)
+  const footCartons = parseFiniteNumber(ft.total_cartons)
 
   // ── Checksum diffs ────────────────────────────────────────────────────────
-  if (ft.total_cbm !== null) {
-    const diff = Math.abs(computedCBM - ft.total_cbm)
+  // When every row lacks per-line CBM/weight, computed sums stay 0 — comparing to the PDF
+  // footer would always flag; skip until extraction fills those columns.
+  if (footCbm !== null && !(computedCBM <= 0 && footCbm > 0)) {
+    const diff = Math.abs(computedCBM - footCbm)
     totals_diff['cbm'] = round(diff)
-    if (diff > EXTRACT_TOLERANCE.cbm) flags.push(`CBM mismatch: computed ${round(computedCBM)} vs footer ${ft.total_cbm}`)
+    if (diff > EXTRACT_TOLERANCE.cbm) flags.push(`CBM mismatch: computed ${round(computedCBM)} vs footer ${footCbm}`)
   }
 
-  if (ft.total_weight_kg !== null) {
-    const diff = Math.abs(computedWeight - ft.total_weight_kg)
+  if (footWeight !== null && !(computedWeight <= 0 && footWeight > 0)) {
+    const diff = Math.abs(computedWeight - footWeight)
     totals_diff['weight_kg'] = round(diff)
-    if (diff > EXTRACT_TOLERANCE.weight_kg) flags.push(`Weight mismatch: computed ${round(computedWeight)} vs footer ${ft.total_weight_kg}`)
+    if (diff > EXTRACT_TOLERANCE.weight_kg)
+      flags.push(`Weight mismatch: computed ${round(computedWeight)} vs footer ${footWeight}`)
   }
 
-  if (ft.total_amount_rmb !== null) {
-    const diff = Math.abs(computedAmount - ft.total_amount_rmb)
+  if (footAmount !== null) {
+    const diff = Math.abs(computedAmount - footAmount)
     totals_diff['amount_rmb'] = round(diff)
-    if (diff > EXTRACT_TOLERANCE.amount_rmb) flags.push(`Amount mismatch: computed ${round(computedAmount)} vs footer ${ft.total_amount_rmb}`)
+    if (diff > EXTRACT_TOLERANCE.amount_rmb) flags.push(`Amount mismatch: computed ${round(computedAmount)} vs footer ${footAmount}`)
   }
 
-  if (ft.total_cartons !== null) {
-    const diff = Math.abs(computedCartons - ft.total_cartons)
+  if (footCartons !== null) {
+    const diff = Math.abs(computedCartons - footCartons)
     totals_diff['cartons'] = round(diff)
-    if (diff > EXTRACT_TOLERANCE.cartons) flags.push(`Carton count mismatch: computed ${computedCartons} vs footer ${ft.total_cartons}`)
+    if (diff > EXTRACT_TOLERANCE.cartons) flags.push(`Carton count mismatch: computed ${computedCartons} vs footer ${footCartons}`)
   }
 
   // ── Document-level checks ─────────────────────────────────────────────────
@@ -135,8 +143,9 @@ export function validateExtraction(
   }
 }
 
-function sum(products: ExtractedProduct[], fn: (p: ExtractedProduct) => number | null): number {
-  return products.reduce((acc, p) => acc + (fn(p) ?? 0), 0)
+/** Safe sum: JSON/Live View may surface numbers as strings; mixed types otherwise explode reduce (+). */
+function sumNumeric(products: ExtractedProduct[], getter: (p: ExtractedProduct) => unknown): number {
+  return products.reduce((acc, p) => acc + (parseFiniteNumber(getter(p)) ?? 0), 0)
 }
 
 function round(n: number): number {

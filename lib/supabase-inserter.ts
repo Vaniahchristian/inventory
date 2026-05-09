@@ -4,6 +4,7 @@ import { filterToInventoryProducts, normalizeSectionForStorage } from '@/lib/sec
 import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from '@/lib/manifest-section-fixer'
 import type { SectionSubtotal } from '@/lib/reducto-html-parser'
 import { ValidationResult, validateExtraction } from './validator'
+import { parseFiniteNumber, parseFiniteInt } from './numeric-parse'
 import { supabase } from './supabase'
 
 export interface InsertResult {
@@ -44,6 +45,27 @@ export async function insertToSupabase(
   const ft = doc.footer_totals
 
   // ── 1. Insert document record ─────────────────────────────────────────────
+  // Same logical extraction → same hash (e.g. Live View save twice). Unique index
+  // documents_file_hash_uidx requires replacing the prior row + cascaded children.
+  if (fileSha256) {
+    const { data: existingDoc, error: existingErr } = await supabase
+      .from('documents')
+      .select('id')
+      .eq('source_file_sha256', fileSha256)
+      .maybeSingle()
+
+    if (existingErr) {
+      throw new Error(`Document lookup failed: ${existingErr.message}`)
+    }
+    if (existingDoc?.id) {
+      const { error: delErr } = await supabase.from('documents').delete().eq('id', existingDoc.id)
+      if (delErr) {
+        throw new Error(`Could not replace existing document (duplicate hash): ${delErr.message}`)
+      }
+      console.log(`[supabase] replaced prior document ${existingDoc.id} (same source_file_sha256)`)
+    }
+  }
+
   const { data: documentRow, error: docError } = await supabase
     .from('documents')
     .insert({
@@ -71,12 +93,21 @@ export async function insertToSupabase(
   // ── 2. Insert document totals ─────────────────────────────────────────────
   // Physical totals (cartons/CBM/weight): footer covers shipped+repacked, not goods-left
   const physicalProducts = fullProducts.filter(p => (p.section ?? 'shipped') !== 'left_in_warehouse')
-  const computedCartons = physicalProducts.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
-  const computedQty = physicalProducts.reduce((s, p) => s + (p.total_qty ?? 0), 0)
-  const computedCBM = physicalProducts.reduce((s, p) => s + (p.total_cbm ?? 0), 0)
-  const computedWeight = physicalProducts.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
+  const computedCartons = physicalProducts.reduce(
+    (s, p) => s + (parseFiniteNumber(p.total_cartons) ?? 0),
+    0
+  )
+  const computedQty = physicalProducts.reduce((s, p) => s + (parseFiniteNumber(p.total_qty) ?? 0), 0)
+  const computedCBM = physicalProducts.reduce((s, p) => s + (parseFiniteNumber(p.total_cbm) ?? 0), 0)
+  const computedWeight = physicalProducts.reduce(
+    (s, p) => s + (parseFiniteNumber(p.total_weight_kg) ?? 0),
+    0
+  )
   // Amount: footer covers all sections including goods-left.
-  const computedAmount = fullProducts.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
+  const computedAmount = fullProducts.reduce(
+    (s, p) => s + (parseFiniteNumber(p.total_amount_rmb) ?? 0),
+    0
+  )
 
   // Per-section aggregates for comparison against PDF yellow-bar subtotals.
   // Physical metrics for left_in_warehouse are zeroed by design (not shipped), so only
@@ -85,10 +116,10 @@ export async function insertToSupabase(
   for (const p of fullProducts) {
     const sec = p.section ?? 'shipped'
     if (!sectionAggs[sec]) sectionAggs[sec] = { cartons: 0, cbm: 0, weight: 0, amount: 0 }
-    sectionAggs[sec].cartons += p.total_cartons ?? 0
-    sectionAggs[sec].cbm += p.total_cbm ?? 0
-    sectionAggs[sec].weight += p.total_weight_kg ?? 0
-    sectionAggs[sec].amount += p.total_amount_rmb ?? 0
+    sectionAggs[sec].cartons += parseFiniteNumber(p.total_cartons) ?? 0
+    sectionAggs[sec].cbm += parseFiniteNumber(p.total_cbm) ?? 0
+    sectionAggs[sec].weight += parseFiniteNumber(p.total_weight_kg) ?? 0
+    sectionAggs[sec].amount += parseFiniteNumber(p.total_amount_rmb) ?? 0
   }
 
   const sectionComparison: Record<string, object> = {}
@@ -120,11 +151,11 @@ export async function insertToSupabase(
 
   const { error: totalsError } = await supabase.from('document_totals').insert({
     document_id,
-    total_cartons: ft.total_cartons,
-    total_cbm: ft.total_cbm,
-    total_weight_kg: ft.total_weight_kg,
-    total_amount_rmb: ft.total_amount_rmb,
-    total_amount_usd: ft.total_amount_usd,
+    total_cartons: parseFiniteNumber(ft.total_cartons),
+    total_cbm: parseFiniteNumber(ft.total_cbm),
+    total_weight_kg: parseFiniteNumber(ft.total_weight_kg),
+    total_amount_rmb: parseFiniteNumber(ft.total_amount_rmb),
+    total_amount_usd: parseFiniteNumber(ft.total_amount_usd),
     computed_cartons: round(computedCartons),
     computed_quantity: round(computedQty),
     computed_cbm: round(computedCBM),
@@ -154,22 +185,22 @@ export async function insertToSupabase(
       description: p.description,
       shop: p.shop ?? null,
       packaging: p.packaging ?? null,
-      qty_per_carton: p.qty_per_carton,
-      total_cartons: p.total_cartons,
-      total_quantity: p.total_qty,
-      unit_price_rmb: p.unit_price_rmb,
-      total_amount_rmb: p.total_amount_rmb,
-      dim_l_cm: p.dim_l_cm,
-      dim_w_cm: p.dim_w_cm,
-      dim_h_cm: p.dim_h_cm,
-      unit_cbm: p.unit_cbm,
-      total_cbm: p.total_cbm,
-      unit_weight_kg: p.unit_weight_kg,
-      total_weight_kg: p.total_weight_kg,
+      qty_per_carton: parseFiniteNumber(p.qty_per_carton),
+      total_cartons: parseFiniteNumber(p.total_cartons),
+      total_quantity: parseFiniteNumber(p.total_qty),
+      unit_price_rmb: parseFiniteNumber(p.unit_price_rmb),
+      total_amount_rmb: parseFiniteNumber(p.total_amount_rmb),
+      dim_l_cm: parseFiniteNumber(p.dim_l_cm),
+      dim_w_cm: parseFiniteNumber(p.dim_w_cm),
+      dim_h_cm: parseFiniteNumber(p.dim_h_cm),
+      unit_cbm: parseFiniteNumber(p.unit_cbm),
+      total_cbm: parseFiniteNumber(p.total_cbm),
+      unit_weight_kg: parseFiniteNumber(p.unit_weight_kg),
+      total_weight_kg: parseFiniteNumber(p.total_weight_kg),
       warehouse: p.warehouse ?? null,
       barcode: p.barcode ?? null,
-      box_no_start: p.box_no_start ?? null,
-      box_no_end: p.box_no_end ?? null,
+      box_no_start: parseFiniteInt(p.box_no_start),
+      box_no_end: parseFiniteInt(p.box_no_end),
       section: normalizeSectionForStorage(p.section, p.remarks),
       remarks: p.remarks ?? null,
       extraction_confidence: rv?.confidence ?? 80,
@@ -191,7 +222,7 @@ export async function insertToSupabase(
     const paymentRows = doc.payments.map(p => ({
       document_id,
       payment_date: p.payment_date ?? null,
-      amount_usd: p.amount_usd,
+      amount_usd: parseFiniteNumber(p.amount_usd),
       payment_type: p.payment_type ?? 'other',
     }))
 
@@ -406,7 +437,7 @@ function normalizeSalesOrderProducts(
   const footerCartons = doc.footer_totals.total_cartons ?? null
   if (footerCartons === null || footerCartons <= 0) return out
 
-  let computedCartons = out.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
+  const computedCartons = out.reduce((s, p) => s + (parseFiniteNumber(p.total_cartons) ?? 0), 0)
   let overflow = computedCartons - footerCartons
   if (overflow <= 0) return out
 

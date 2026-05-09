@@ -13,7 +13,14 @@ import type { ExtractedDocument, ExtractedProduct } from './claude-extractor'
 import type { DocType } from './prompts'
 import { expandHtmlTable } from './html-table-parser'
 import { resolveColumn, type ProductField } from './column-map'
-import { FULL_EXTRACT_ITEM_CODE, SECTION_SUBTOTAL_ITEM_CODE, FOOTER_ITEM_CODE } from './full-extract'
+import {
+  FULL_EXTRACT_ITEM_CODE,
+  SECTION_SUBTOTAL_ITEM_CODE,
+  FOOTER_ITEM_CODE,
+  isFooterBanner,
+  isFullExtractBanner,
+  isSubtotalBanner,
+} from './full-extract'
 import {
   isBeforeGoodsHeader,
   isGoodsLeftHeader,
@@ -171,6 +178,76 @@ export interface HtmlParseResult {
 }
 
 /**
+ * Reducto often merges barcode fragments or stray digits into the CTN cell (e.g. 515255512,
+ * 33555551). When qty and qty/ctn are plausible, recover cartons as round(tqty / qpc).
+ */
+function repairSalesOrderCartonOcrGarbage(
+  products: ExtractedProduct[],
+  doc: ExtractedDocument
+): ExtractedProduct[] {
+  if (doc.document_type !== 'sales_order') return products
+
+  const footerCtn = doc.footer_totals.total_cartons
+
+  return products.map(p => {
+    if (isFullExtractBanner(p) || isSubtotalBanner(p) || isFooterBanner(p)) {
+      return p
+    }
+
+    const ctn = p.total_cartons
+    const qpc = p.qty_per_carton
+    const tq = p.total_qty
+
+    if (ctn === null || ctn <= 0) return p
+
+    let inferred: number | null = null
+    if (qpc !== null && qpc > 0 && qpc <= 8000 && tq !== null && tq > 0) {
+      const r = tq / qpc
+      if (r > 0 && r < 1e6 && Math.abs(r - Math.round(r)) <= 0.051) {
+        inferred = Math.round(r)
+      }
+    }
+
+    const wayAboveFooter = footerCtn !== null && footerCtn > 0 && ctn > footerCtn * 50
+    const sixDigitGarbage = ctn >= 100_000
+    /** OCR glued extra digits into CTN but T.QTY ÷ QTY/CTN is a clean integer (true carton count). */
+    const implausibleVsInferred =
+      inferred !== null &&
+      inferred > 0 &&
+      ((ctn >= 500 && ctn > inferred * 12) ||
+        (ctn >= 2500 && Math.abs(ctn - inferred) > Math.max(100, inferred * 6)))
+
+    const shouldUseInferred =
+      inferred !== null &&
+      inferred > 0 &&
+      (footerCtn === null || inferred <= Math.max(footerCtn * 3, 8000)) &&
+      (sixDigitGarbage || wayAboveFooter || implausibleVsInferred)
+
+    if (shouldUseInferred) {
+      return {
+        ...p,
+        total_cartons: inferred,
+        remarks: p.remarks
+          ? `${p.remarks};repair:ctn_from_tqty_qpc`
+          : 'repair:ctn_from_tqty_qpc',
+      }
+    }
+
+    if (sixDigitGarbage || wayAboveFooter) {
+      return {
+        ...p,
+        total_cartons: null,
+        remarks: p.remarks
+          ? `${p.remarks};repair:ctn_garbage_cleared`
+          : 'repair:ctn_garbage_cleared',
+      }
+    }
+
+    return p
+  })
+}
+
+/**
  * Primary entry point. Processes chunks sequentially, tracking section
  * transitions and MARKS carry-across so multi-table/multi-page PDFs
  * are handled correctly.
@@ -252,10 +329,11 @@ export function parseReductoChunks(
   const allChunksText = chunkPlainParts.join('\n')
   const document = buildDocument(headerTexts, footerTexts, docType, allChunksText)
   const productsWithMag512Outlier = appendMag512PricedOutlierRows(products, allChunksText, docType)
-  const productsFixed = dedupeShippedCartonCounts(
+  let productsFixed = dedupeShippedCartonCounts(
     fixManifestSectionContinuity(productsWithMag512Outlier, docType),
     docType
   )
+  productsFixed = repairSalesOrderCartonOcrGarbage(productsFixed, document)
   return { products: productsFixed, document, tablesFound, rowsMapped, sectionSubtotals: allSectionSubtotals }
 }
 
@@ -615,7 +693,9 @@ function parseSalesOrderGridPositional(
 
     const product = parseSalesOrderRowPositional(row, defaultSection, lineNo, inheritedMarks)
     if (product) {
-      products.push(product)
+      products.push(
+        fixContinuationSalesMetricsFromDescription(fixCollapsedSalesMetricsFromDescription(product))
+      )
       lineNo++
     }
   }
@@ -810,7 +890,8 @@ function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): Extracted
   if (!severeMisalign) return p
   if (numMatches.length < 10) return p
 
-  const nums = numMatches.map(m => Number(m[0]))
+  let nums = numMatches.map(m => Number(m[0]))
+  nums = normalizeSwappedTqtyAmtUnit(nums)
   let ctn: number | null = null
   let qtyPer: number | null = null
   let tQty: number | null = null
@@ -904,6 +985,246 @@ function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): Extracted
     total_weight_kg: (p.total_weight_kg ?? null) === null && (tKgs !== null && tKgs > 0) ? tKgs : p.total_weight_kg,
     warehouse: p.warehouse ?? (warehouseMatch ? warehouseMatch[1].replace(/\s+/g, ' ').trim() : null),
     remarks: p.remarks ? `${p.remarks};repair:collapsed_sales_metrics` : 'repair:collapsed_sales_metrics',
+  }
+}
+
+/** Pull warehouse token from anywhere in the cell (continuation rows omit it from the prefix). */
+function extractSalesWarehouseToken(desc: string): string | null {
+  const m = desc.match(
+    /((?:浙江|东阳|浦江)\s*仓(?:\s*(?:PCS|SET|DCS|PCS\/SE|PS))?|\d+\s*仓|刀叉勺)/i
+  )
+  return m ? m[1].replace(/\s+/g, ' ').trim() : null
+}
+
+/**
+ * Reducto flattened rows sometimes emit **tqty, AMOUNT, unitPrice** when our templates expect
+ * **tqty, unitPrice, AMOUNT** (because AMOUNT is wider / middle column in the PDF).
+ * When `tqty * unitPrice === amount`, rewrite the triple in place so sliding-window recovery works.
+ */
+function normalizeSwappedTqtyAmtUnit(nums: number[]): number[] {
+  const out = [...nums]
+  for (let i = 0; i <= out.length - 3; i++) {
+    const tq = out[i]
+    const mid = out[i + 1]
+    const up = out[i + 2]
+    if (
+      tq > 0 &&
+      tq < 2_000_000 &&
+      up > 0 &&
+      up < 500 &&
+      mid > 0 &&
+      mid < 10_000_000 &&
+      Math.abs(tq * up - mid) <= Math.max(2, mid * 0.06)
+    ) {
+      out[i + 1] = up
+      out[i + 2] = mid
+      break
+    }
+  }
+  return out
+}
+
+/**
+ * Second-pass sales outlier: continuation / narrow tables often put the entire metric tail inside
+ * `description` while `fixCollapsedSalesMetricsFromDescription` only scans *before* the first warehouse
+ * token (or bails when that prefix has fewer than 10 numbers). Parse **full** description numbers with
+ * the same 12/11/10 tail semantics and only fill still-null numeric fields.
+ */
+function fixContinuationSalesMetricsFromDescription(p: ExtractedProduct): ExtractedProduct {
+  if (!p.description?.trim()) return p
+  if (isFullExtractBanner(p) || isSubtotalBanner(p) || isFooterBanner(p)) return p
+
+  /** Primary failure mode for this outlier: money/qty still stuck in the description blob. */
+  const missingQtyOrAmount = p.total_amount_rmb == null || p.total_qty == null
+  if (!missingQtyOrAmount) return p
+
+  const desc = p.description.replace(/\s+/g, ' ').trim()
+  const numMatches = [...desc.matchAll(/\d+(?:\.\d+)?/g)]
+  let nums = numMatches.map(m => Number(m[0]))
+  nums = normalizeSwappedTqtyAmtUnit(nums)
+  if (nums.length < 10) return p
+
+  const maxCtn = 600
+
+  const scoreWindow12 = (window: number[], startIdx: number): number | null => {
+    const [c, q, tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = window
+    if (!(tq > 0 && up > 0 && am > 0)) return null
+    if (!(q > 0 && q <= 200)) return null
+    if (!(c > 0 && c <= maxCtn)) return null
+    if (!(ll > 0 && ww > 0 && hh > 0 && ll < 300 && ww < 300 && hh < 300)) return null
+    if (!(ucbm > 0 && ucbm < 5 && uw > 0 && uw < 500 && tcbm > 0 && tcbm < 30 && tk > 0 && tk < 5000))
+      return null
+    const amountDelta = Math.abs(tq * up - am)
+    if (amountDelta > Math.max(2, am * 0.06)) return null
+    const inferredCtn = tq / q
+    const ctnDelta = Math.abs(c - inferredCtn)
+    const nearInteger = Math.abs(inferredCtn - Math.round(inferredCtn))
+    return 1000 - amountDelta * 10 - ctnDelta * 20 - nearInteger * 5 - startIdx * 0.1
+  }
+
+  let ctn: number | null = null
+  let qtyPer: number | null = null
+  let tQty: number | null = null
+  let unitPrice: number | null = null
+  let amount: number | null = null
+  let l: number | null = null
+  let w: number | null = null
+  let h: number | null = null
+  let unitCbm: number | null = null
+  let unitW: number | null = null
+  let tCbm: number | null = null
+  let tKgs: number | null = null
+  let firstTailMatchIdx = numMatches.length
+
+  if (nums.length >= 12) {
+    let best: { start: number; score: number; values: number[] } | null = null
+    for (let start = 0; start <= nums.length - 12; start++) {
+      const window = nums.slice(start, start + 12)
+      const sc = scoreWindow12(window, start)
+      if (sc === null) continue
+      if (!best || sc > best.score) best = { start, score: sc, values: window }
+    }
+    if (!best) {
+      const start = nums.length - 12
+      const tail = nums.slice(-12)
+      const sc = scoreWindow12(tail, start)
+      if (sc !== null) best = { start, score: sc, values: tail }
+    }
+    if (best) {
+      ;[ctn, qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = best.values as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+      ]
+      firstTailMatchIdx = best.start
+    }
+  }
+
+  if (tQty === null && nums.length >= 11) {
+    const tail = nums.slice(-11)
+    const [q, tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = tail
+    if (
+      tq > 0 &&
+      up > 0 &&
+      am > 0 &&
+      q > 0 &&
+      q <= 200 &&
+      ll > 0 &&
+      ww > 0 &&
+      hh > 0 &&
+      ll < 300 &&
+      ww < 300 &&
+      hh < 300 &&
+      ucbm > 0 &&
+      ucbm < 5 &&
+      uw > 0 &&
+      uw < 500 &&
+      tcbm > 0 &&
+      tcbm < 30 &&
+      tk > 0 &&
+      tk < 5000 &&
+      Math.abs(tq * up - am) <= Math.max(2, am * 0.06)
+    ) {
+      qtyPer = q
+      tQty = tq
+      unitPrice = up
+      amount = am
+      l = ll
+      w = ww
+      h = hh
+      unitCbm = ucbm
+      unitW = uw
+      tCbm = tcbm
+      tKgs = tk
+      firstTailMatchIdx = numMatches.length - 11
+    }
+  }
+
+  if (tQty === null && nums.length >= 10) {
+    const tail = nums.slice(-10)
+    const [tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = tail
+    if (
+      tq > 0 &&
+      up > 0 &&
+      am > 0 &&
+      ll > 0 &&
+      ww > 0 &&
+      hh > 0 &&
+      ll < 300 &&
+      ww < 300 &&
+      hh < 300 &&
+      ucbm > 0 &&
+      ucbm < 5 &&
+      uw > 0 &&
+      uw < 500 &&
+      tcbm > 0 &&
+      tcbm < 30 &&
+      tk > 0 &&
+      tk < 5000 &&
+      Math.abs(tq * up - am) <= Math.max(2, am * 0.06)
+    ) {
+      tQty = tq
+      unitPrice = up
+      amount = am
+      l = ll
+      w = ww
+      h = hh
+      unitCbm = ucbm
+      unitW = uw
+      tCbm = tcbm
+      tKgs = tk
+      firstTailMatchIdx = numMatches.length - 10
+    }
+  }
+
+  if (tQty === null || amount === null || unitPrice === null) return p
+  if (!isFinite(tQty) || !isFinite(amount) || !isFinite(unitPrice) || tQty <= 0 || amount <= 0 || unitPrice <= 0)
+    return p
+  if (ctn !== null && tQty < ctn) return p
+
+  const firstTailIdx = numMatches[firstTailMatchIdx]?.index ?? 0
+  const recoveredDesc = desc.slice(0, firstTailIdx).trim() || p.description
+  const warehouseToken = extractSalesWarehouseToken(desc)
+
+  return {
+    ...p,
+    description: recoveredDesc,
+    qty_per_carton:
+      (p.qty_per_carton ?? null) === null && qtyPer !== null && qtyPer > 0 ? qtyPer : p.qty_per_carton,
+    packaging:
+      (p.packaging ?? null) === null && qtyPer !== null && qtyPer > 0 ? `${qtyPer}pcs` : p.packaging,
+    total_cartons:
+      ((p.total_cartons ?? null) === null ||
+        ((p.total_qty ?? 0) > 0 && (p.total_cartons ?? 0) > (p.total_qty ?? 0))) &&
+      ctn !== null &&
+      ctn > 0
+        ? ctn
+        : p.total_cartons,
+    total_qty: (p.total_qty ?? null) === null ? tQty : p.total_qty,
+    unit_price_rmb: (p.unit_price_rmb ?? null) === null ? unitPrice : p.unit_price_rmb,
+    total_amount_rmb: (p.total_amount_rmb ?? null) === null ? amount : p.total_amount_rmb,
+    dim_l_cm: (p.dim_l_cm ?? null) === null && l !== null && l > 0 ? l : p.dim_l_cm,
+    dim_w_cm: (p.dim_w_cm ?? null) === null && w !== null && w > 0 ? w : p.dim_w_cm,
+    dim_h_cm: (p.dim_h_cm ?? null) === null && h !== null && h > 0 ? h : p.dim_h_cm,
+    unit_cbm: (p.unit_cbm ?? null) === null && unitCbm !== null && unitCbm > 0 ? unitCbm : p.unit_cbm,
+    unit_weight_kg:
+      (p.unit_weight_kg ?? null) === null && unitW !== null && unitW > 0 ? unitW : p.unit_weight_kg,
+    total_cbm: (p.total_cbm ?? null) === null && tCbm !== null && tCbm > 0 ? tCbm : p.total_cbm,
+    total_weight_kg:
+      (p.total_weight_kg ?? null) === null && tKgs !== null && tKgs > 0 ? tKgs : p.total_weight_kg,
+    warehouse: p.warehouse ?? warehouseToken,
+    remarks: p.remarks
+      ? `${p.remarks};repair:continuation_sales_metrics`
+      : 'repair:continuation_sales_metrics',
   }
 }
 
@@ -1183,14 +1504,12 @@ function recoverSalesOrderFlatRow(
   let desc = m[4].trim()
   if (!item || !desc) return null
 
-  // Drop trailing numeric bundle/barcode tail but keep human-readable description.
-  desc = desc
-    .replace(/\s+\d{8,}\s*[\u4e00-\u9fffA-Za-z]{0,12}\s*$/, '')
-    .replace(/\s+(?:\d+(?:\.\d+)?\s*){7,}$/, '')
-    .trim()
+  // Only strip obvious barcode suffixes — do NOT strip long numeric metric tails here;
+  // those are recovered by collapsed/continuation repairs (stripping first made rows unsalvageable).
+  desc = desc.replace(/\s+\d{8,}\s*[\u4e00-\u9fffA-Za-z]{0,12}\s*$/, '').trim()
   if (!desc) return null
 
-  return {
+  let product: ExtractedProduct = {
     line_no: lineNo,
     marks: marks || inheritedMarks,
     shop: null,
@@ -1216,6 +1535,9 @@ function recoverSalesOrderFlatRow(
     section,
     remarks: 'full_extract:flattened_sales_order_row',
   }
+  product = fixCollapsedSalesMetricsFromDescription(product)
+  product = fixContinuationSalesMetricsFromDescription(product)
+  return product
 }
 
 function parseGridToProducts(
@@ -1423,6 +1745,7 @@ function parseGridToProducts(
     let product = rawToProduct(raw, currentSection, lineNo, prevMarks)
     if (docType === 'sales_order') {
       product = fixCollapsedSalesMetricsFromDescription(product)
+      product = fixContinuationSalesMetricsFromDescription(product)
     }
     if (docType === 'container_manifest' || docType === 'unknown') {
       product = fixShiftedManifestRowColumns(product)
