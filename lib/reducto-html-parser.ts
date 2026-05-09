@@ -757,47 +757,114 @@ function fixSparseQtyInDimRow(p: ExtractedProduct): ExtractedProduct {
  * Recover only when core numeric fields are all missing to avoid altering healthy rows.
  */
 function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): ExtractedProduct {
-  if ((p.total_cartons ?? null) !== null) return p
-  if ((p.total_qty ?? null) !== null) return p
-  if ((p.total_amount_rmb ?? null) !== null) return p
+  const coreMissing =
+    (p.total_cartons ?? null) === null &&
+    (p.total_qty ?? null) === null &&
+    (p.total_amount_rmb ?? null) === null
+  if (!coreMissing) return p
   if (!p.description) return p
 
   const desc = p.description.replace(/\s+/g, ' ').trim()
   if (!desc) return p
 
-  const warehouseMatch = desc.match(/(浙江仓|东阳仓|浦江仓|\d+仓)/)
-  if (!warehouseMatch || warehouseMatch.index === undefined) return p
+  const warehouseMatch = desc.match(/((?:浙江|东阳|浦江)\s*仓|\d+\s*仓|刀叉勺)/)
+  const warehouseIdx = warehouseMatch?.index ?? desc.length
 
-  const beforeWarehouse = desc.slice(0, warehouseMatch.index).trim()
+  const beforeWarehouse = desc.slice(0, warehouseIdx).trim()
   const numMatches = [...beforeWarehouse.matchAll(/\d+(?:\.\d+)?/g)]
-  if (numMatches.length < 12) return p
+  if (numMatches.length < 10) return p
 
-  const tail12 = numMatches.slice(-12).map(m => Number(m[0]))
-  const [ctn, qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail12
-  if (!isFinite(ctn) || !isFinite(tQty) || !isFinite(amount) || ctn <= 0 || tQty <= 0 || amount <= 0) return p
-  if (!isFinite(unitPrice) || unitPrice <= 0) return p
-  if (tQty < ctn) return p
+  const nums = numMatches.map(m => Number(m[0]))
+  let ctn: number | null = null
+  let qtyPer: number | null = null
+  let tQty: number | null = null
+  let unitPrice: number | null = null
+  let amount: number | null = null
+  let l: number | null = null
+  let w: number | null = null
+  let h: number | null = null
+  let unitCbm: number | null = null
+  let unitW: number | null = null
+  let tCbm: number | null = null
+  let tKgs: number | null = null
+  let firstTailMatchIdx = numMatches.length
 
-  const firstTailIdx = numMatches[numMatches.length - 12]?.index ?? beforeWarehouse.length
+  if (nums.length >= 12) {
+    // Pick best 12-number window to avoid noisy prefixes (e.g. "12.7cm 304# ...").
+    let best:
+      | {
+          start: number
+          score: number
+          values: [number, number, number, number, number, number, number, number, number, number, number, number]
+        }
+      | null = null
+
+    for (let start = 0; start <= nums.length - 12; start++) {
+      const window = nums.slice(start, start + 12)
+      const [c, q, tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] = window
+      if (!(tq > 0 && up > 0 && am > 0)) continue
+      if (!(q > 0 && q <= 200)) continue
+      if (!(c > 0 && c <= 400)) continue
+      if (!(ll > 0 && ww > 0 && hh > 0 && ll < 300 && ww < 300 && hh < 300)) continue
+      if (!(ucbm > 0 && ucbm < 5 && uw > 0 && uw < 500 && tcbm > 0 && tcbm < 30 && tk > 0 && tk < 5000)) continue
+
+      const amountDelta = Math.abs(tq * up - am)
+      if (amountDelta > Math.max(2, am * 0.06)) continue
+
+      const inferredCtn = tq / q
+      const ctnDelta = Math.abs(c - inferredCtn)
+      const nearInteger = Math.abs(inferredCtn - Math.round(inferredCtn))
+      const score = 1000 - amountDelta * 10 - ctnDelta * 20 - nearInteger * 5 - start * 0.1
+
+      if (!best || score > best.score) {
+        best = { start, score, values: [c, q, tq, up, am, ll, ww, hh, ucbm, uw, tcbm, tk] }
+      }
+    }
+
+    if (best) {
+      ;[ctn, qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = best.values
+      firstTailMatchIdx = best.start
+    } else {
+      const tail = nums.slice(-12)
+      ;[ctn, qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
+      firstTailMatchIdx = numMatches.length - 12
+    }
+  } else if (nums.length === 11) {
+    // Missing CTN is common in this outlier table; keep it null and recover the rest.
+    const tail = nums.slice(-11)
+    ;[qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
+    firstTailMatchIdx = numMatches.length - 11
+  } else {
+    // Last-ditch narrow recovery for badly collapsed rows: keep only critical metrics.
+    const tail = nums.slice(-10)
+    ;[tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail
+    firstTailMatchIdx = numMatches.length - 10
+  }
+
+  if (tQty === null || amount === null || unitPrice === null) return p
+  if (!isFinite(tQty) || !isFinite(amount) || !isFinite(unitPrice) || tQty <= 0 || amount <= 0 || unitPrice <= 0) return p
+  if (ctn !== null && tQty < ctn) return p
+
+  const firstTailIdx = numMatches[firstTailMatchIdx]?.index ?? beforeWarehouse.length
   const recoveredDesc = beforeWarehouse.slice(0, firstTailIdx).trim() || p.description
 
   return {
     ...p,
     description: recoveredDesc,
-    qty_per_carton: qtyPer > 0 ? qtyPer : p.qty_per_carton,
-    packaging: qtyPer > 0 ? `${qtyPer}pcs` : p.packaging,
-    total_cartons: ctn,
+    qty_per_carton: (qtyPer !== null && qtyPer > 0) ? qtyPer : p.qty_per_carton,
+    packaging: (qtyPer !== null && qtyPer > 0) ? `${qtyPer}pcs` : p.packaging,
+    total_cartons: (ctn !== null && ctn > 0) ? ctn : p.total_cartons,
     total_qty: tQty,
     unit_price_rmb: unitPrice,
     total_amount_rmb: amount,
-    dim_l_cm: l > 0 ? l : p.dim_l_cm,
-    dim_w_cm: w > 0 ? w : p.dim_w_cm,
-    dim_h_cm: h > 0 ? h : p.dim_h_cm,
-    unit_cbm: unitCbm > 0 ? unitCbm : p.unit_cbm,
-    unit_weight_kg: unitW > 0 ? unitW : p.unit_weight_kg,
-    total_cbm: tCbm > 0 ? tCbm : p.total_cbm,
-    total_weight_kg: tKgs > 0 ? tKgs : p.total_weight_kg,
-    warehouse: p.warehouse ?? warehouseMatch[1],
+    dim_l_cm: (l !== null && l > 0) ? l : p.dim_l_cm,
+    dim_w_cm: (w !== null && w > 0) ? w : p.dim_w_cm,
+    dim_h_cm: (h !== null && h > 0) ? h : p.dim_h_cm,
+    unit_cbm: (unitCbm !== null && unitCbm > 0) ? unitCbm : p.unit_cbm,
+    unit_weight_kg: (unitW !== null && unitW > 0) ? unitW : p.unit_weight_kg,
+    total_cbm: (tCbm !== null && tCbm > 0) ? tCbm : p.total_cbm,
+    total_weight_kg: (tKgs !== null && tKgs > 0) ? tKgs : p.total_weight_kg,
+    warehouse: p.warehouse ?? (warehouseMatch ? warehouseMatch[1].replace(/\s+/g, '') : null),
     remarks: p.remarks ? `${p.remarks};repair:collapsed_sales_metrics` : 'repair:collapsed_sales_metrics',
   }
 }
