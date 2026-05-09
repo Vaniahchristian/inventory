@@ -64,6 +64,7 @@ export const SALES_ORDER_COLUMNS: Record<string, ProductField | 'skip'> = {
   'NO. 序号': 'line_no',
   'DATE': 'skip', '订单日期': 'skip', 'DATE 订单日期': 'skip',
   'ORD NO': 'marks', 'ORD NO.': 'marks', '销售单号': 'marks', 'ORD NO. 销售单号': 'marks',
+  'DEL NO': 'marks', 'DEL NO.': 'marks', '送货单号': 'marks', 'DEL NO. 送货单号': 'marks',
   'CUS NO': 'skip', 'CUS NO.': 'skip', '客户货号': 'skip', 'CUS NO. 客户货号': 'skip',
   'ITEM NO': 'item_code', 'ITEM NO.': 'item_code', 'ITEM NO. 产品货号': 'item_code',
   '产品货号': 'item_code', 'ITEM CODE': 'item_code', 'SKU': 'item_code',
@@ -116,6 +117,7 @@ export function normaliseHeader(raw: string): string {
     .replace(/\bUNIT\s+PRICE\s*\(/g, 'UNIT PRICE (')
     .replace(/\bT\.AMOUNT\s*\(/g, 'T.AMOUNT (')
     .replace(/\bORD\s*NO\.?\b/g, 'ORD NO')
+    .replace(/\bDEL\s*NO\.?\b/g, 'DEL NO')
     .replace(/\bCUS\s*NO\.?\b/g, 'CUS NO')
     .replace(/\bITEM\s*NO\.?\b/g, 'ITEM NO')
     .replace(/\bG\.W\.?\b/g, 'G.W')
@@ -134,7 +136,7 @@ export function resolveColumn(
 
   if (docType === 'sales_order') {
     if (key.includes('序号') || /^NO\.?$/.test(key) || key.startsWith('NO ')) return 'line_no'
-    if (key.includes('ORD NO') || key.includes('销售单号')) return 'marks'
+    if (key.includes('ORD NO') || key.includes('DEL NO') || key.includes('销售单号') || key.includes('送货单号')) return 'marks'
     if (key.includes('ITEM NO') || key.includes('产品货号') || key.includes('ITEM CODE')) return 'item_code'
     if (key.includes('DES') || key.includes('描述')) return 'description'
     if (key.includes('CTN') || key.includes('总箱数')) return 'total_cartons'
