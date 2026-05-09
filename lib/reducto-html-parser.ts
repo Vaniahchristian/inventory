@@ -757,17 +757,28 @@ function fixSparseQtyInDimRow(p: ExtractedProduct): ExtractedProduct {
  * Recover only when core numeric fields are all missing to avoid altering healthy rows.
  */
 function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): ExtractedProduct {
-  const coreMissing =
-    (p.total_cartons ?? null) === null &&
-    (p.total_qty ?? null) === null &&
-    (p.total_amount_rmb ?? null) === null
-  if (!coreMissing) return p
+  const fieldsToCheck = [
+    p.total_cartons,
+    p.qty_per_carton,
+    p.total_qty,
+    p.unit_price_rmb,
+    p.total_amount_rmb,
+    p.dim_l_cm,
+    p.dim_w_cm,
+    p.dim_h_cm,
+    p.total_cbm,
+    p.total_weight_kg,
+    p.warehouse ? 1 : null,
+  ]
+  const missingCount = fieldsToCheck.filter(v => v === null || v === undefined).length
+  const severeMisalign = missingCount >= 4
+  if (!severeMisalign) return p
   if (!p.description) return p
 
   const desc = p.description.replace(/\s+/g, ' ').trim()
   if (!desc) return p
 
-  const warehouseMatch = desc.match(/((?:浙江|东阳|浦江)\s*仓|\d+\s*仓|刀叉勺)/)
+  const warehouseMatch = desc.match(/((?:浙江|东阳|浦江)\s*仓(?:\s*(?:PCS|SET|DCS|PCS\/SE|PS))?|\d+\s*仓|刀叉勺)/i)
   const warehouseIdx = warehouseMatch?.index ?? desc.length
 
   const beforeWarehouse = desc.slice(0, warehouseIdx).trim()
@@ -851,20 +862,22 @@ function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): Extracted
   return {
     ...p,
     description: recoveredDesc,
-    qty_per_carton: (qtyPer !== null && qtyPer > 0) ? qtyPer : p.qty_per_carton,
-    packaging: (qtyPer !== null && qtyPer > 0) ? `${qtyPer}pcs` : p.packaging,
-    total_cartons: (ctn !== null && ctn > 0) ? ctn : p.total_cartons,
-    total_qty: tQty,
-    unit_price_rmb: unitPrice,
-    total_amount_rmb: amount,
-    dim_l_cm: (l !== null && l > 0) ? l : p.dim_l_cm,
-    dim_w_cm: (w !== null && w > 0) ? w : p.dim_w_cm,
-    dim_h_cm: (h !== null && h > 0) ? h : p.dim_h_cm,
+    qty_per_carton: (p.qty_per_carton ?? null) === null && (qtyPer !== null && qtyPer > 0) ? qtyPer : p.qty_per_carton,
+    packaging: (p.packaging ?? null) === null && (qtyPer !== null && qtyPer > 0) ? `${qtyPer}pcs` : p.packaging,
+    total_cartons: ((p.total_cartons ?? null) === null || ((p.total_qty ?? 0) > 0 && (p.total_cartons ?? 0) > (p.total_qty ?? 0)))
+      ? ((ctn !== null && ctn > 0) ? ctn : p.total_cartons)
+      : p.total_cartons,
+    total_qty: (p.total_qty ?? null) === null ? tQty : p.total_qty,
+    unit_price_rmb: (p.unit_price_rmb ?? null) === null ? unitPrice : p.unit_price_rmb,
+    total_amount_rmb: (p.total_amount_rmb ?? null) === null ? amount : p.total_amount_rmb,
+    dim_l_cm: (p.dim_l_cm ?? null) === null && (l !== null && l > 0) ? l : p.dim_l_cm,
+    dim_w_cm: (p.dim_w_cm ?? null) === null && (w !== null && w > 0) ? w : p.dim_w_cm,
+    dim_h_cm: (p.dim_h_cm ?? null) === null && (h !== null && h > 0) ? h : p.dim_h_cm,
     unit_cbm: (unitCbm !== null && unitCbm > 0) ? unitCbm : p.unit_cbm,
-    unit_weight_kg: (unitW !== null && unitW > 0) ? unitW : p.unit_weight_kg,
-    total_cbm: (tCbm !== null && tCbm > 0) ? tCbm : p.total_cbm,
-    total_weight_kg: (tKgs !== null && tKgs > 0) ? tKgs : p.total_weight_kg,
-    warehouse: p.warehouse ?? (warehouseMatch ? warehouseMatch[1].replace(/\s+/g, '') : null),
+    unit_weight_kg: (p.unit_weight_kg ?? null) === null && (unitW !== null && unitW > 0) ? unitW : p.unit_weight_kg,
+    total_cbm: (p.total_cbm ?? null) === null && (tCbm !== null && tCbm > 0) ? tCbm : p.total_cbm,
+    total_weight_kg: (p.total_weight_kg ?? null) === null && (tKgs !== null && tKgs > 0) ? tKgs : p.total_weight_kg,
+    warehouse: p.warehouse ?? (warehouseMatch ? warehouseMatch[1].replace(/\s+/g, ' ').trim() : null),
     remarks: p.remarks ? `${p.remarks};repair:collapsed_sales_metrics` : 'repair:collapsed_sales_metrics',
   }
 }
