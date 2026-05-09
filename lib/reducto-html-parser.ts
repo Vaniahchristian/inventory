@@ -646,7 +646,17 @@ function mergeFieldParts(a: string, b: string): string {
 //   When the header uses colspan=N on description but a data row only provides N-M
 //   description cells, subsequent columns shift left by M.
 //   Pad with M empty strings after the first description slot to re-align.
-function normalizeRowToColMap(row: string[], colMap: Map<number, ProductField | 'skip'>): string[] {
+function looksLikeSalesWarehouseCell(cell: string): boolean {
+  const t = (cell ?? '').trim()
+  if (!t) return false
+  return /仓|WAREHOUSE/i.test(t) || /^\d+仓$/.test(t)
+}
+
+function normalizeRowToColMap(
+  row: string[],
+  colMap: Map<number, ProductField | 'skip'>,
+  docType?: DocType
+): string[] {
   if (colMap.size === 0) return row
   const maxIdx = Math.max(...colMap.keys())
   const overflow = row.length - (maxIdx + 1)
@@ -657,6 +667,13 @@ function normalizeRowToColMap(row: string[], colMap: Map<number, ProductField | 
   }
 
   if (overflow > 0) {
+    // Sales-order outlier guard:
+    // Some PDFs append extra trailing columns (Unit/品名/MATERIAL) that are intentionally unmapped.
+    // In those cases, overflow is at the right tail and must NOT be merged into description,
+    // otherwise numeric columns shift and totals become misaligned.
+    if (docType === 'sales_order' && looksLikeSalesWarehouseCell(row[maxIdx] ?? '')) {
+      return row
+    }
     if (descIdx < 0) return row
     if (colMap.get(descIdx + 1) === 'description') return row
     const normalized = [...row]
@@ -731,6 +748,57 @@ function fixSparseQtyInDimRow(p: ExtractedProduct): ExtractedProduct {
     total_qty: impliedQty,
     dim_h_cm: null,
     remarks: p.remarks ? `${p.remarks};repair:sparse_qty_in_dim` : 'repair:sparse_qty_in_dim',
+  }
+}
+
+/**
+ * Sales-order outlier recovery:
+ * Some rows collapse CTN/QTY/AMOUNT/dimensions/weights into the description string while keeping item_code.
+ * Recover only when core numeric fields are all missing to avoid altering healthy rows.
+ */
+function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): ExtractedProduct {
+  if ((p.total_cartons ?? null) !== null) return p
+  if ((p.total_qty ?? null) !== null) return p
+  if ((p.total_amount_rmb ?? null) !== null) return p
+  if (!p.description) return p
+
+  const desc = p.description.replace(/\s+/g, ' ').trim()
+  if (!desc) return p
+
+  const warehouseMatch = desc.match(/(浙江仓|东阳仓|浦江仓|\d+仓)/)
+  if (!warehouseMatch || warehouseMatch.index === undefined) return p
+
+  const beforeWarehouse = desc.slice(0, warehouseMatch.index).trim()
+  const numMatches = [...beforeWarehouse.matchAll(/\d+(?:\.\d+)?/g)]
+  if (numMatches.length < 12) return p
+
+  const tail12 = numMatches.slice(-12).map(m => Number(m[0]))
+  const [ctn, qtyPer, tQty, unitPrice, amount, l, w, h, unitCbm, unitW, tCbm, tKgs] = tail12
+  if (!isFinite(ctn) || !isFinite(tQty) || !isFinite(amount) || ctn <= 0 || tQty <= 0 || amount <= 0) return p
+  if (!isFinite(unitPrice) || unitPrice <= 0) return p
+  if (tQty < ctn) return p
+
+  const firstTailIdx = numMatches[numMatches.length - 12]?.index ?? beforeWarehouse.length
+  const recoveredDesc = beforeWarehouse.slice(0, firstTailIdx).trim() || p.description
+
+  return {
+    ...p,
+    description: recoveredDesc,
+    qty_per_carton: qtyPer > 0 ? qtyPer : p.qty_per_carton,
+    packaging: qtyPer > 0 ? `${qtyPer}pcs` : p.packaging,
+    total_cartons: ctn,
+    total_qty: tQty,
+    unit_price_rmb: unitPrice,
+    total_amount_rmb: amount,
+    dim_l_cm: l > 0 ? l : p.dim_l_cm,
+    dim_w_cm: w > 0 ? w : p.dim_w_cm,
+    dim_h_cm: h > 0 ? h : p.dim_h_cm,
+    unit_cbm: unitCbm > 0 ? unitCbm : p.unit_cbm,
+    unit_weight_kg: unitW > 0 ? unitW : p.unit_weight_kg,
+    total_cbm: tCbm > 0 ? tCbm : p.total_cbm,
+    total_weight_kg: tKgs > 0 ? tKgs : p.total_weight_kg,
+    warehouse: p.warehouse ?? warehouseMatch[1],
+    remarks: p.remarks ? `${p.remarks};repair:collapsed_sales_metrics` : 'repair:collapsed_sales_metrics',
   }
 }
 
@@ -1192,7 +1260,7 @@ function parseGridToProducts(
     // Build raw field map — normalize row length first.
     // Handles both overflow (extra desc cells) and underflow (missing desc cells when header
     // uses colspan, as in 新多 MAG-510-3 where colspan=3 header gets only 2 desc cells).
-    const raw = buildRawFromRow(normalizeRowToColMap(row, colMap), colMap)
+    const raw = buildRawFromRow(normalizeRowToColMap(row, colMap, docType), colMap)
 
     // Yellow / rolled section subtotal bars (CTNS+CBM+KGS+¥).
     // Capture their values for section-level reconciliation before skipping/emitting.
@@ -1248,6 +1316,9 @@ function parseGridToProducts(
     }
 
     let product = rawToProduct(raw, currentSection, lineNo, prevMarks)
+    if (docType === 'sales_order') {
+      product = fixCollapsedSalesMetricsFromDescription(product)
+    }
     if (docType === 'container_manifest' || docType === 'unknown') {
       product = fixShiftedManifestRowColumns(product)
       product = fixShiftedManifestPartsRowColumns(product)
