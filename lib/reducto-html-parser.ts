@@ -652,6 +652,21 @@ function looksLikeSalesWarehouseCell(cell: string): boolean {
   return /仓|WAREHOUSE/i.test(t) || /^\d+仓$/.test(t)
 }
 
+function looksLikeSalesUnitCell(cell: string): boolean {
+  const t = (cell ?? '').trim()
+  if (!t) return false
+  return /^(PCS|SET|DCS|PS|PCS\/SE)$/i.test(t)
+}
+
+function looksLikeSalesTailMetaCell(cell: string): boolean {
+  const t = (cell ?? '').trim()
+  if (!t) return false
+  if (looksLikeSalesWarehouseCell(t) || looksLikeSalesUnitCell(t)) return true
+  // trailing Unit/品名/材质 fragments should not be folded into description
+  if (/[\u4e00-\u9fff]/.test(t)) return true
+  return false
+}
+
 function normalizeRowToColMap(
   row: string[],
   colMap: Map<number, ProductField | 'skip'>,
@@ -671,8 +686,16 @@ function normalizeRowToColMap(
     // Some PDFs append extra trailing columns (Unit/品名/MATERIAL) that are intentionally unmapped.
     // In those cases, overflow is at the right tail and must NOT be merged into description,
     // otherwise numeric columns shift and totals become misaligned.
-    if (docType === 'sales_order' && looksLikeSalesWarehouseCell(row[maxIdx] ?? '')) {
-      return row
+    if (docType === 'sales_order') {
+      // Guard 1: warehouse marker may appear at maxIdx in common layouts.
+      if (looksLikeSalesWarehouseCell(row[maxIdx] ?? '')) return row
+      // Guard 2: some tables carry warehouse/unit/name/material in trailing overflow cells.
+      const trailing = row.slice(maxIdx + 1)
+      if (trailing.some(looksLikeSalesTailMetaCell)) return row
+      // Guard 3: if row already contains explicit warehouse/unit tokens near the tail,
+      // the overflow is usually unmapped tail metadata, not description split cells.
+      const tailWindow = row.slice(Math.max(0, row.length - 6))
+      if (tailWindow.some(looksLikeSalesTailMetaCell)) return row
     }
     if (descIdx < 0) return row
     if (colMap.get(descIdx + 1) === 'description') return row
@@ -757,6 +780,15 @@ function fixSparseQtyInDimRow(p: ExtractedProduct): ExtractedProduct {
  * Recover only when core numeric fields are all missing to avoid altering healthy rows.
  */
 function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): ExtractedProduct {
+  if (!p.description) return p
+  const desc = p.description.replace(/\s+/g, ' ').trim()
+  if (!desc) return p
+
+  const warehouseMatch = desc.match(/((?:浙江|东阳|浦江)\s*仓(?:\s*(?:PCS|SET|DCS|PCS\/SE|PS))?|\d+\s*仓|刀叉勺)/i)
+  const warehouseIdx = warehouseMatch?.index ?? desc.length
+  const beforeWarehouse = desc.slice(0, warehouseIdx).trim()
+  const numMatches = [...beforeWarehouse.matchAll(/\d+(?:\.\d+)?/g)]
+
   const fieldsToCheck = [
     p.total_cartons,
     p.qty_per_carton,
@@ -771,18 +803,19 @@ function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): Extracted
     p.warehouse ? 1 : null,
   ]
   const missingCount = fieldsToCheck.filter(v => v === null || v === undefined).length
-  const severeMisalign = missingCount >= 4
+  const collapsedTailSignature = !!warehouseMatch && numMatches.length >= 10
+  const severeMisalign =
+    missingCount >= 4 ||
+    (collapsedTailSignature && (
+      p.total_cartons === null ||
+      p.qty_per_carton === null ||
+      p.total_qty === null ||
+      p.total_amount_rmb === null ||
+      p.total_cbm === null ||
+      p.total_weight_kg === null ||
+      p.warehouse === null
+    ))
   if (!severeMisalign) return p
-  if (!p.description) return p
-
-  const desc = p.description.replace(/\s+/g, ' ').trim()
-  if (!desc) return p
-
-  const warehouseMatch = desc.match(/((?:浙江|东阳|浦江)\s*仓(?:\s*(?:PCS|SET|DCS|PCS\/SE|PS))?|\d+\s*仓|刀叉勺)/i)
-  const warehouseIdx = warehouseMatch?.index ?? desc.length
-
-  const beforeWarehouse = desc.slice(0, warehouseIdx).trim()
-  const numMatches = [...beforeWarehouse.matchAll(/\d+(?:\.\d+)?/g)]
   if (numMatches.length < 10) return p
 
   const nums = numMatches.map(m => Number(m[0]))
