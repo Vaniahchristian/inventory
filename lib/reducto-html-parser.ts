@@ -806,15 +806,7 @@ function fixCollapsedSalesMetricsFromDescription(p: ExtractedProduct): Extracted
   const collapsedTailSignature = !!warehouseMatch && numMatches.length >= 10
   const severeMisalign =
     missingCount >= 4 ||
-    (collapsedTailSignature && (
-      p.total_cartons === null ||
-      p.qty_per_carton === null ||
-      p.total_qty === null ||
-      p.total_amount_rmb === null ||
-      p.total_cbm === null ||
-      p.total_weight_kg === null ||
-      p.warehouse === null
-    ))
+    collapsedTailSignature
   if (!severeMisalign) return p
   if (numMatches.length < 10) return p
 
