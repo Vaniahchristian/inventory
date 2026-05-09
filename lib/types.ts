@@ -140,7 +140,7 @@ export type DocumentItem = {
   barcode: string | null
   box_no_start: number | null
   box_no_end: number | null
-  section: 'shipped' | 'left_in_warehouse' | 'repacked'
+  section: string
   remarks: string | null
   validation_flags: string[]
   created_at: string
@@ -150,5 +150,6 @@ export type DocumentItem = {
     container_no: string | null
     document_date: string | null
     doc_number: string | null
+    created_at?: string | null
   } | null
 }

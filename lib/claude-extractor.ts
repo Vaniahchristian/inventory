@@ -54,7 +54,7 @@ export interface ExtractedProduct {
   warehouse: string | null
   box_no_start: number | null
   box_no_end: number | null
-  section: 'shipped' | 'left_in_warehouse' | 'repacked'
+  section: string
   remarks: string | null
 }
 

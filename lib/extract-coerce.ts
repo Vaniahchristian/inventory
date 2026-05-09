@@ -113,8 +113,7 @@ function coerceStr(v: unknown): string | null {
 }
 
 function coerceSection(v: unknown): ExtractedProduct['section'] {
-  if (v === 'left_in_warehouse' || v === 'repacked') return v
-  return 'shipped'
+  return coerceStr(v) ?? 'shipped'
 }
 
 function coerceDocType(v: unknown): ExtractedDocument['document_type'] {

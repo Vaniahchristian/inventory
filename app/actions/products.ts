@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase'
 import type { ImportMeta, ProductDocumentRef } from '@/lib/types'
 import type { DocumentItemsListFilters, DocumentItemsPageStats } from '@/lib/products-list'
 import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle, makeStageTotalSku } from '@/lib/sections'
+import { normalizeSectionForStorage } from '@/lib/sections'
 import Anthropic from '@anthropic-ai/sdk'
 import { callLlm } from '@/lib/llm-client'
 
@@ -87,7 +88,7 @@ const DOCUMENT_ITEM_SELECT = [
   'section',
   'remarks',
   'created_at',
-  'documents(source_file_name, client_id, container_no, document_date, doc_number)',
+  'documents(source_file_name, client_id, container_no, document_date, doc_number, created_at)',
 ].join(', ')
 
 function escapeIlikePattern(raw: string): string {
@@ -125,6 +126,11 @@ function applyDocumentItemsListFilters(qb: any, filters: DocumentItemsListFilter
   return q
 }
 
+/** Manifest/PDF reading order: ascending extraction line, stable tie-breaker. */
+function applyDocumentItemsListOrdering(qb: any): any {
+  return qb.order('line_no', { ascending: true }).order('id', { ascending: true })
+}
+
 function parseAggregateSum(row: Record<string, unknown> | null, key: string): number {
   if (!row) return 0
   const v = row[key]
@@ -146,13 +152,11 @@ export async function getDocumentItemsPaged(opts: {
   const from = (safePage - 1) * pageSize
   const to = from + pageSize - 1
 
-  let qb = applyDocumentItemsListFilters(
-    supabase
-      .from('document_items')
-      .select(DOCUMENT_ITEM_SELECT)
-      .order('created_at', { ascending: false })
-      .order('line_no', { ascending: true }),
-    filters
+  let qb = applyDocumentItemsListOrdering(
+    applyDocumentItemsListFilters(
+      supabase.from('document_items').select(DOCUMENT_ITEM_SELECT),
+      filters
+    )
   )
 
   const res = (await withSupabaseRetry(() => qb.range(from, to), 'getDocumentItemsPaged')) as {
@@ -164,13 +168,8 @@ export async function getDocumentItemsPaged(opts: {
 }
 
 export async function getDocumentItemsForList(filters: DocumentItemsListFilters): Promise<import('@/lib/types').DocumentItem[]> {
-  const qb = applyDocumentItemsListFilters(
-    supabase
-      .from('document_items')
-      .select(DOCUMENT_ITEM_SELECT)
-      .order('created_at', { ascending: false })
-      .order('line_no', { ascending: true }),
-    filters
+  const qb = applyDocumentItemsListOrdering(
+    applyDocumentItemsListFilters(supabase.from('document_items').select(DOCUMENT_ITEM_SELECT), filters)
   )
   const res = (await withSupabaseRetry(() => qb, 'getDocumentItemsForList')) as {
     data: unknown
@@ -266,12 +265,9 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
  * Footer / financial-summary rows for the Products table (not paginated with main grid).
  */
 export async function getDocumentFooterRowsForList(filters: DocumentItemsListFilters): Promise<import('@/lib/types').DocumentItem[]> {
-  let qb = supabase
-    .from('document_items')
-    .select(DOCUMENT_ITEM_SELECT)
-    .or(buildDocumentFooterOrFilter())
-    .order('created_at', { ascending: false })
-    .limit(400)
+  let qb = applyDocumentItemsListOrdering(
+    supabase.from('document_items').select(DOCUMENT_ITEM_SELECT).or(buildDocumentFooterOrFilter())
+  ).limit(400)
 
   if (filters.documentId) qb = qb.eq('document_id', filters.documentId)
 
@@ -323,6 +319,8 @@ type MappedRow = {
   document_date?: string | null
   selling_price: number
   reorder_level: number
+  section?: string
+  section_label?: string | null
 }
 
 type LlmCandidate = {
@@ -1037,12 +1035,7 @@ export async function deleteAllProducts(options?: { sourceDocumentId?: string | 
 
 export async function getDocumentItems() {
   const { data, error } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .select(DOCUMENT_ITEM_SELECT)
-        .order('created_at', { ascending: false })
-        .order('line_no', { ascending: true }),
+    () => supabase.from('document_items').select(DOCUMENT_ITEM_SELECT).order('line_no', { ascending: true }).order('id', { ascending: true }),
     'getDocumentItems'
   )
   if (error) throw new Error(`Failed to fetch document items: ${error.message}`)
@@ -1056,8 +1049,8 @@ export async function getShippedDocumentItems() {
         .from('document_items')
         .select(DOCUMENT_ITEM_SELECT)
         .eq('section', 'shipped')
-        .order('created_at', { ascending: false })
-        .order('line_no', { ascending: true }),
+        .order('line_no', { ascending: true })
+        .order('id', { ascending: true }),
     'getShippedDocumentItems'
   )
   if (error) throw new Error(`Failed to fetch shipped document items: ${error.message}`)
@@ -1143,7 +1136,7 @@ export async function deleteDocumentFooterItems(documentId?: string | null): Pro
 
 /** Deletes all document_items rows for a given section, optionally scoped to one document. */
 export async function deleteDocumentItemsBySection(
-  section: 'shipped' | 'left_in_warehouse' | 'repacked',
+  section: string,
   documentId?: string | null
 ): Promise<void> {
   let query = supabase.from('document_items').delete().eq('section', section)
@@ -1290,6 +1283,11 @@ async function saveNormalizedDocument(payload: {
     const lines = itemRows.map(({ row, idx }) => {
       const qtyPerCarton =
         (row.cartons ?? 0) > 0 && row.quantity > 0 ? +(row.quantity / (row.cartons ?? 1)).toFixed(4) : null
+      const sectionLabelRemark =
+        row.section_label && row.section_label.trim()
+          ? `section_label:${encodeURIComponent(row.section_label.trim())}`
+          : null
+      const remarksCombined = [row.remarks ?? null, sectionLabelRemark].filter(Boolean).join(';') || null
       return {
         document_id: document.id,
         line_no: idx + 1,
@@ -1312,10 +1310,11 @@ async function saveNormalizedDocument(payload: {
         dim_h_cm: row.dim_h_cm ?? null,
         warehouse: row.warehouse ?? null,
         barcode: row.barcode ?? null,
-        remarks: row.remarks ?? null,
+        remarks: remarksCombined,
         code: row.code ?? null,
         photo: row.photo ?? null,
         photo2: row.photo2 ?? null,
+        section: normalizeSectionForStorage(row.section, remarksCombined),
         extraction_confidence: 85,
         validation_flags: computeValidationFlags(row, {
           requirePacking: payload.importMeta?.document_type !== 'sales_order',
@@ -1465,6 +1464,14 @@ function parseUnit(packing: string): string {
 
 function parseWeight(w: string | null | undefined): number {
   return parseFloat((w ?? '0').replace(/[^\d.]/g, '')) || 0
+}
+
+function parseSection(value: unknown): string {
+  const s = str(value).toLowerCase()
+  if (s === 'left_in_warehouse') return 'left_in_warehouse'
+  if (s === 'repacked') return 'repacked'
+  if (s) return s
+  return 'shipped'
 }
 
 function firstNumeric(
@@ -2006,6 +2013,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         total_weight,
         cost_price,
         total_amount_rmb,
+        section: parseSection(r['__section']),
+        section_label: str(r['__section_label']) || null,
         selling_price: 0,
         reorder_level: 0,
       }
@@ -2106,6 +2115,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         customer_no: str(r['CUS NO.'] ?? r['customer_no'] ?? '') || null,
         delivery_address: str(r['送货地址'] ?? r['delivery_address'] ?? '') || null,
         document_date: documentDate,
+        section: parseSection(r['__section']),
+        section_label: str(r['__section_label']) || null,
         selling_price: num(r['selling_price'] ?? r['Selling Price']),
         reorder_level: intOrNull(r['reorder_level'] ?? r['Reorder Level']) ?? 0,
       }
@@ -2131,6 +2142,8 @@ export async function importProducts(rows: Record<string, unknown>[], importMeta
         total_weight: null,
         cost_price: num(r['cost_price'] ?? r['Cost Price']),
         total_amount_rmb: null,
+        section: parseSection(r['__section']),
+        section_label: str(r['__section_label']) || null,
         selling_price: num(r['selling_price'] ?? r['Selling Price']),
         reorder_level: intOrNull(r['reorder_level'] ?? r['Reorder Level']) ?? 0,
       })

@@ -26,6 +26,7 @@ import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from './manif
 
 type Section = ExtractedProduct['section']
 const BEFORE_GOODS_REMARK = 'carryover:before_goods'
+const SECTION_LABEL_REMARK_PREFIX = 'section_label:'
 
 /** `inventory` skips banners/subtotals (default). `full` emits every table row + non-table text as editable lines. */
 export type ParseMode = 'inventory' | 'full'
@@ -68,13 +69,93 @@ function syntheticFullExtractRow(
   }
 }
 
+function encodeSectionLabelRemark(label: string): string {
+  return `${SECTION_LABEL_REMARK_PREFIX}${encodeURIComponent(normalizeSectionLabelText(label))}`
+}
+
+function normalizeDynamicSectionKey(label: string): string {
+  const canonical = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return canonical || 'shipped'
+}
+
+function normalizeSectionLabelText(label: string): string {
+  const cleaned = label.replace(/\s+/g, ' ').trim()
+  if (!cleaned) return ''
+
+  const upper = cleaned.toUpperCase()
+  if (/\bNEW\s+ORDERS?\b/.test(upper)) return 'NEW ORDERS'
+  if (/\bGOODS\s+LEFT\s+IN\s+SANCARGO\b/.test(upper)) return 'GOODS LEFT IN SANCARGO WAREHOUSE'
+  if (/\bBEFORE\s+GOODS\b/.test(upper)) {
+    const m = cleaned.match(/BEFORE\s+GOODS(?:\s+[A-Z0-9-]+)?/i)
+    return m ? m[0].replace(/\s+/g, ' ').trim().toUpperCase() : 'BEFORE GOODS'
+  }
+  if (/\bGOODS\s+STUFFED\s+INTO\s+THIS\s+CO(?:NTAINER)?\b/i.test(cleaned)) {
+    const m = cleaned.match(/([A-Z0-9-]+\s+\d+\s*CTN\S*)\s+GOODS\s+STUFFED\s+INTO\s+THIS\s+CO(?:NTAINER)?/i)
+    if (m) return `${m[1].replace(/\s+/g, ' ').trim()} GOODS STUFFED INTO THIS CONTAINER`
+    return 'GOODS STUFFED INTO THIS CONTAINER'
+  }
+
+  const tokens = cleaned.split(' ')
+  const n = tokens.length
+  if (n < 6) return cleaned
+
+  // Collapse pathological OCR repetition where a banner phrase is repeated many times:
+  // "BEFORE GOODS MAG-4 BEFORE GOODS MAG-4 ..."
+  for (let p = 2; p <= Math.floor(n / 2); p++) {
+    if (n % p !== 0) continue
+    const first = tokens.slice(0, p).join(' ')
+    let repeated = true
+    for (let i = p; i < n; i += p) {
+      if (tokens.slice(i, i + p).join(' ') !== first) {
+        repeated = false
+        break
+      }
+    }
+    if (repeated) return first
+  }
+
+  // Fallback: collapse consecutive duplicate tokens (OCR repeats).
+  const compactTokens: string[] = []
+  for (const t of tokens) {
+    if (compactTokens.length === 0 || compactTokens[compactTokens.length - 1] !== t) compactTokens.push(t)
+  }
+  return compactTokens.join(' ')
+}
+
+/** Never persist OCR-collapsed product rows as section banners (MAG-512… ¥ … CBM …). */
+function isProductLikeSectionLabelForRemark(label: string): boolean {
+  const s = normalizeSectionLabelText(label)
+  if (!s) return false
+  if (/¥|￥/.test(s) && (/\bCBM\b|\bKGS\b/i.test(s) || /\d+\s*-\s*\d+\s*$/.test(s.trim()))) return true
+  if (s.length >= 82) return true
+  if (/MAG-\d{3}-\d+|MS-\d{3}-\d+/i.test(s) && (/¥|￥/.test(s) || /\b\d+\.?\d*\s*CBM\b/i.test(s))) return true
+  return false
+}
+
+function withSectionLabelRemark(
+  p: ExtractedProduct,
+  sectionLabel: string | null
+): ExtractedProduct {
+  if (!sectionLabel || isProductLikeSectionLabelForRemark(sectionLabel)) return p
+  const encoded = encodeSectionLabelRemark(sectionLabel)
+  const remarks = p.remarks ?? ''
+  if (remarks.includes(encoded)) return p
+  return {
+    ...p,
+    remarks: remarks ? `${remarks};${encoded}` : encoded,
+  }
+}
+
 export interface ReductoChunkInput {
   content: string
   blocks?: Array<{ type?: string; content?: string; confidence?: string }>
 }
 
 export interface SectionSubtotal {
-  section: 'shipped' | 'left_in_warehouse' | 'repacked'
+  section: string
   total_cartons: number | null
   total_cbm: number | null
   total_weight_kg: number | null
@@ -1019,6 +1100,7 @@ function parseGridToProducts(
   if (includeNextAsHeader) dataStartRow = headerRowIdx + 2
 
   let currentSection: Section = defaultSection
+  let currentSectionLabel: string | null = null
   let inBeforeGoodsBlock = false
   const products: ExtractedProduct[] = []
   const sectionSubtotals: SectionSubtotal[] = []
@@ -1036,6 +1118,7 @@ function parseGridToProducts(
     if (isNewOrderSectionHeader(rowText)) {
       // Explicit NEW ORDER/NEW ORDERS header starts the shipped block.
       currentSection = 'shipped'
+      currentSectionLabel = rowText.replace(/\s+/g, ' ').trim()
       inBeforeGoodsBlock = false
       prevMarks = null
       if (parseMode === 'full') {
@@ -1047,6 +1130,7 @@ function parseGridToProducts(
     }
     if (isBeforeGoodsHeader(rowText)) {
       currentSection = 'left_in_warehouse'
+      currentSectionLabel = rowText.replace(/\s+/g, ' ').trim()
       inBeforeGoodsBlock = true
       prevMarks = null
       if (parseMode === 'full') {
@@ -1056,6 +1140,7 @@ function parseGridToProducts(
     }
     if (isGoodsLeftHeader(rowText)) {
       currentSection = 'left_in_warehouse'
+      currentSectionLabel = rowText.replace(/\s+/g, ' ').trim()
       inBeforeGoodsBlock = false
       prevMarks = null
       if (parseMode === 'full') {
@@ -1065,6 +1150,7 @@ function parseGridToProducts(
     }
     if (isRepackagedSectionHeader(rowText)) {
       currentSection = 'repacked'
+      currentSectionLabel = rowText.replace(/\s+/g, ' ').trim()
       inBeforeGoodsBlock = false
       prevMarks = null
       if (parseMode === 'full') {
@@ -1074,6 +1160,7 @@ function parseGridToProducts(
     }
     if (isStuffedContainerHeader(rowText)) {
       currentSection = 'shipped'
+      currentSectionLabel = rowText.replace(/\s+/g, ' ').trim()
       inBeforeGoodsBlock = false
       prevMarks = null
       if (parseMode === 'full') {
@@ -1083,6 +1170,9 @@ function parseGridToProducts(
     }
     // Unknown section banners should not become product rows or silently force bad section flips.
     if (isUnknownSectionBanner(rowText)) {
+      const bannerLabel = rowText.replace(/\s+/g, ' ').trim()
+      currentSectionLabel = bannerLabel
+      currentSection = normalizeDynamicSectionKey(bannerLabel)
       prevMarks = null
       if (parseMode === 'full') {
         products.push(syntheticFullExtractRow(lineNo++, rowText, currentSection, 'full_extract:unknown_section_banner'))
@@ -1175,6 +1265,7 @@ function parseGridToProducts(
         : BEFORE_GOODS_REMARK
       product = fixBeforeGoodsCarryoverAmount(product, products)
     }
+    product = withSectionLabelRemark(product, currentSectionLabel)
     if (product.marks) prevMarks = product.marks
 
     products.push(product)

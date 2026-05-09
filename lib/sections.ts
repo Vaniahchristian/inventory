@@ -3,7 +3,8 @@ import type { Product } from '@/lib/types'
 
 /** Ship-to-inventory rows only: exclude GOODS LEFT IN SANCARGO and REPACKED GOODS sections. */
 export function shouldPublishExtractedProduct(section: ExtractedProduct['section'] | undefined): boolean {
-  return (section ?? 'shipped') === 'shipped'
+  const s = (section ?? 'shipped').toLowerCase()
+  return s !== 'left_in_warehouse' && s !== 'repacked'
 }
 
 export function filterToInventoryProducts(products: ExtractedProduct[]): ExtractedProduct[] {
@@ -78,6 +79,9 @@ export function isUnknownSectionBanner(raw: string): boolean {
   if (isGoodsLeftHeader(text)) return false
   if (isStuffedContainerHeader(text)) return false
   if (isRepackagedSectionHeader(text)) return false
+  // Collapsed table row / pricing line mistaken for a banner (e.g. MAG-512… ¥ … 295-366).
+  if (/¥|￥/.test(text) && (/\bCBM\b|\bKGS\b/i.test(text) || /\d+\s*-\s*\d+\s*$/.test(text))) return false
+  if (/MAG-\d{3}-\d+|MS-\d{3}-\d+/i.test(text) && (/¥|￥/.test(text) || /\bCBM\b|\bKGS\b/i.test(text))) return false
 
   const upper = text.toUpperCase()
   const wordCount = upper.split(' ').filter(Boolean).length
@@ -146,4 +150,39 @@ export function isValidStageSectionTitle(title: string): boolean {
   const t = title.replace(/\s+/g, ' ').trim().toUpperCase()
   if (t.length < 12 || t.length > 180) return false
   return t.includes('GOODS STUFFED INTO THIS CONTAINER')
+}
+
+function parseSectionLabelFromRemarks(remarks: string | null | undefined): string | null {
+  const raw = (remarks ?? '').split(';').map(s => s.trim()).find(s => s.startsWith('section_label:'))
+  if (!raw) return null
+  const encoded = raw.slice('section_label:'.length)
+  try {
+    const decoded = decodeURIComponent(encoded).trim()
+    return decoded || null
+  } catch {
+    return encoded || null
+  }
+}
+
+/**
+ * Database constraint on document_items.section currently allows only:
+ * shipped | left_in_warehouse | repacked.
+ * Keep dynamic labels in remarks, but normalize stored section to one
+ * of the allowed values to avoid insert failures.
+ */
+export function normalizeSectionForStorage(
+  section: string | null | undefined,
+  remarks?: string | null
+): 'shipped' | 'left_in_warehouse' | 'repacked' {
+  const s = (section ?? '').trim().toLowerCase()
+  if (s === 'shipped' || s === 'left_in_warehouse' || s === 'repacked') return s
+
+  const label = ((parseSectionLabelFromRemarks(remarks) ?? '') + ' ' + (remarks ?? '')).toLowerCase()
+  if (label.includes('before goods') || label.includes('goods left') || label.includes('warehouse')) {
+    return 'left_in_warehouse'
+  }
+  if (label.includes('repacked') || label.includes('stuffed into this container')) {
+    return 'repacked'
+  }
+  return 'shipped'
 }

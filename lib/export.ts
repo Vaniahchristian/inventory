@@ -29,11 +29,12 @@ export interface PdfExtractResult {
  *   2. POST file + fallback_text to /api/extract
  *        → server uses Reducto if configured (2–5 s, handles merged cells)
  *        → falls back to pdfjs text → Claude if Reducto is not set
- *   3. Return structured result directly (no job queue, no Realtime)
+ *   3. Return structured r esult directly (no job queue, no Realtime)
  */
 export async function importPdfDirect(
   file: File,
-  onProgress?: (pct: number, stage: string) => void
+  onProgress?: (pct: number, stage: string) => void,
+  options?: { fullExtract?: boolean }
 ): Promise<PdfExtractResult> {
   onProgress?.(5, 'Reading PDF…')
   const { text: fallbackText, pageCount } = await extractPdfText(file)
@@ -48,6 +49,9 @@ export async function importPdfDirect(
   formData.append('file', file, file.name)
   formData.append('file_name', file.name)
   formData.append('fallback_text', fallbackText)
+  if (options?.fullExtract) {
+    formData.append('full_extract', 'true')
+  }
 
   const res = await fetch('/api/extract', {
     method: 'POST',

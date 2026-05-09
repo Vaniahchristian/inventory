@@ -34,6 +34,7 @@ import {
   importProducts,
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
+import { isFullExtractBanner, isSubtotalBanner, isFooterBanner } from '@/lib/full-extract'
 import type { DocumentItemsPageStats } from '@/lib/products-list'
 import { importPdfDirect } from '@/lib/export'
 import { useImportStore } from '@/lib/import-store'
@@ -87,6 +88,25 @@ function boxLabel(start: number | null, end: number | null): string {
   return String(start)
 }
 
+function documentCreatedAtForSort(p: DocumentItem): string {
+  const d = p.documents
+  if (d && typeof d === 'object' && typeof (d as { created_at?: string }).created_at === 'string')
+    return (d as { created_at: string }).created_at
+  return p.created_at ?? ''
+}
+
+/** PDF/manifest flow: newest parent document first when listing multiple imports, then extraction line_no. */
+function comparePdfManifestOrder(a: DocumentItem, b: DocumentItem): number {
+  const da = documentCreatedAtForSort(a)
+  const db = documentCreatedAtForSort(b)
+  if (da !== db) return db.localeCompare(da)
+  if (a.document_id !== b.document_id) return a.document_id.localeCompare(b.document_id)
+  const la = a.line_no ?? 999999
+  const lb = b.line_no ?? 999999
+  if (la !== lb) return la - lb
+  return a.id.localeCompare(b.id)
+}
+
 /** Detects financial summary / footer rows saved in older imports (now filtered at parse time). */
 function isFooterLikeItem(p: DocumentItem): boolean {
   const combined = [p.marks ?? '', p.description ?? '', p.item_code ?? '', p.shop ?? '']
@@ -133,6 +153,19 @@ function isCarryoverBeforeGoodsItem(p: DocumentItem): boolean {
   return (p.remarks ?? '').toLowerCase().includes('carryover:before_goods')
 }
 
+function sectionSubtotalSignature(p: DocumentItem): string {
+  return [
+    p.marks ?? '',
+    p.item_code ?? '',
+    p.description ?? '',
+    p.packaging ?? '',
+  ]
+    .join('|')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase()
+}
+
 function rowMatchesSearch(p: DocumentItem, qLower: string): boolean {
   if (!qLower) return true
   const docName =
@@ -162,10 +195,88 @@ const SECTION_SUBTOTAL_STYLE: Record<DocumentItem['section'], string> = {
   repacked: 'bg-violet-200 border-t-2 border-violet-500 font-semibold',
 }
 
+function sectionSubtotalStyle(section: string): string {
+  if (section === 'shipped') return SECTION_SUBTOTAL_STYLE.shipped
+  if (section === 'left_in_warehouse') return SECTION_SUBTOTAL_STYLE.left_in_warehouse
+  if (section === 'repacked') return SECTION_SUBTOTAL_STYLE.repacked
+  return 'bg-slate-200 border-t-2 border-slate-400 font-semibold'
+}
+
 function sectionClass(section: DocumentItem['section']): string {
   if (section === 'left_in_warehouse') return 'bg-sky-50 hover:bg-sky-100'
   if (section === 'repacked') return 'bg-violet-50 hover:bg-violet-100'
   return 'hover:bg-slate-50'
+}
+
+function parseSectionLabelFromRemarks(remarks: string | null | undefined): string | null {
+  const raw = (remarks ?? '').split(';').map(s => s.trim()).find(s => s.startsWith('section_label:'))
+  if (!raw) return null
+  const encoded = raw.slice('section_label:'.length)
+  try {
+    const decoded = decodeURIComponent(encoded).trim()
+    return decoded || null
+  } catch {
+    return encoded || null
+  }
+}
+
+/**
+ * Parser sometimes attaches a full product line (prices, CBM, box range) as `section_label`
+ * when a banner row was mis-read — that must not become a section heading in the UI.
+ */
+function isSpuriousSectionBannerLabel(label: string): boolean {
+  const s = label.replace(/\s+/g, ' ').trim()
+  if (!s) return false
+  const upper = s.toUpperCase()
+  // Real section titles only — never treat these as spurious
+  if (/\bNEW\s+ORDERS?\b/.test(upper)) return false
+  if (/\bBEFORE\s+GOODS\b/.test(upper)) return false
+  if (/\bGOODS\s+LEFT\s+IN\s+SANCARGO\b/.test(upper)) return false
+  if (/\bGOODS\s+STUFFED\b/.test(upper) || /\bSTUFFED\s+INTO\s+THIS\s+CO/.test(upper)) return false
+  // Product-row fingerprints mistakenly stored as labels
+  if (s.length >= 82) return true
+  if (/¥|￥/.test(s) && (/\bCBM\b|\bKGS\b|\bCTNS?\b/i.test(s) || /\d+\s*-\s*\d+\s*$/.test(s))) return true
+  if (/MAG-\d{3}-\d+|MS-\d{3}-\d+/i.test(s) && (/¥|￥/.test(s) || /\b\d+\.?\d*\s*CBM\b/i.test(s))) return true
+  return false
+}
+
+/** DB enum is shipped | left_in_warehouse | repacked; fold parser slug keys into shipped for grouping. */
+function canonicalSectionForGrouping(section: string | undefined): string {
+  const s = section ?? 'shipped'
+  if (s === 'shipped' || s === 'left_in_warehouse' || s === 'repacked') return s
+  return 'shipped'
+}
+
+function cleanSectionLabel(label: string): string {
+  const cleaned = label.replace(/\s+/g, ' ').trim()
+  if (!cleaned) return cleaned
+  const upper = cleaned.toUpperCase()
+  if (/\bNEW\s+ORDERS?\b/.test(upper)) return 'NEW ORDERS'
+  if (/\bGOODS\s+LEFT\s+IN\s+SANCARGO\b/.test(upper)) return 'GOODS LEFT IN SANCARGO WAREHOUSE'
+  if (/\bBEFORE\s+GOODS\b/.test(upper)) {
+    const m = cleaned.match(/BEFORE\s+GOODS(?:\s+[A-Z0-9-]+)?/i)
+    return m ? m[0].replace(/\s+/g, ' ').trim().toUpperCase() : 'BEFORE GOODS'
+  }
+  if (/\bGOODS\s+STUFFED\s+INTO\s+THIS\s+CO(?:NTAINER)?\b/i.test(cleaned)) {
+    const m = cleaned.match(/([A-Z0-9-]+\s+\d+\s*CTN\S*)\s+GOODS\s+STUFFED\s+INTO\s+THIS\s+CO(?:NTAINER)?/i)
+    if (m) return `${m[1].replace(/\s+/g, ' ').trim()} GOODS STUFFED INTO THIS CONTAINER`
+    return 'GOODS STUFFED INTO THIS CONTAINER'
+  }
+  return cleaned
+}
+
+function displaySectionLabel(section: string, remarks?: string | null): string {
+  const custom = parseSectionLabelFromRemarks(remarks)
+  if (custom && !isSpuriousSectionBannerLabel(custom)) {
+    const cleaned = cleanSectionLabel(custom)
+    // NEW ORDERS is the shipped block heading in the PDF.
+    if (section === 'shipped' && /\bNEW\s+ORDERS?\b/i.test(cleaned)) return 'NEW ORDERS'
+    return cleaned
+  }
+  if (section === 'shipped') return 'Shipped'
+  if (section === 'left_in_warehouse') return 'Left in Warehouse'
+  if (section === 'repacked') return 'Repacked'
+  return cleanSectionLabel(section.replace(/_/g, ' '))
 }
 
 function SectionBadge({ section }: { section: DocumentItem['section'] }) {
@@ -377,16 +488,18 @@ export function ProductsClient({
   const sectionCounts = listStats.sectionCounts
   const totals = listStats.totals
 
+  const orderedItems = useMemo(() => [...items].sort(comparePdfManifestOrder), [items])
+
   const mainRows = useMemo(
-    () => items.filter(p => !isFooterLikeItem(p)),
-    [items]
+    () => orderedItems.filter(p => !isFooterLikeItem(p)),
+    [orderedItems]
   )
 
   const footerMerged = useMemo(() => {
     const ids = new Set(footerRows.map(r => r.id))
-    const extra = items.filter(p => isFooterLikeItem(p) && !ids.has(p.id))
-    return [...footerRows, ...extra]
-  }, [footerRows, items])
+    const extra = orderedItems.filter(p => isFooterLikeItem(p) && !ids.has(p.id))
+    return [...footerRows, ...extra].sort(comparePdfManifestOrder)
+  }, [footerRows, orderedItems])
 
   const footerItems = useMemo(() => {
     const qLower = initialQ.trim().toLowerCase()
@@ -438,24 +551,62 @@ export function ProductsClient({
     return [c.shipped, c.left_in_warehouse, c.repacked].filter(n => n > 0).length > 1
   }, [listStats.sectionCounts])
 
-  const groupedSections = useMemo(() =>
-    SECTION_RENDER_ORDER.flatMap(sectionKey => {
-      const rows = mainRows.filter(p => p.section === sectionKey)
-      if (rows.length === 0) return []
-      const subtotalRows = rows.filter(p => !isCarryoverBeforeGoodsItem(p))
-      return [{
-        sectionKey,
-        rows,
-        st: {
-          cartons: subtotalRows.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
-          qty: subtotalRows.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
-          cbm: subtotalRows.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
-          weight: subtotalRows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
-          amount: subtotalRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
-        },
-      }]
+  const groupedSections = useMemo(() => {
+    const groups = new Map<string, { sectionKey: string; sectionLabel: string; rows: DocumentItem[] }>()
+    const hasNewOrdersShippedHeader = mainRows.some(row => {
+      if (canonicalSectionForGrouping(row.section) !== 'shipped') return false
+      const custom = parseSectionLabelFromRemarks(row.remarks)
+      if (!custom || isSpuriousSectionBannerLabel(custom)) return false
+      return /\bNEW\s+ORDERS?\b/i.test(cleanSectionLabel(custom))
     })
-  , [mainRows])
+    for (const row of mainRows) {
+      const sectionKey = canonicalSectionForGrouping(row.section)
+      const custom = parseSectionLabelFromRemarks(row.remarks)
+      const hasCustom = !!custom && !isSpuriousSectionBannerLabel(custom)
+      const sectionLabel = hasCustom
+        ? cleanSectionLabel(custom!)
+        : (sectionKey === 'shipped' && hasNewOrdersShippedHeader ? 'NEW ORDERS' : displaySectionLabel(sectionKey, row.remarks))
+      const key = `${sectionKey}::${sectionLabel}`
+      if (!groups.has(key)) groups.set(key, { sectionKey, sectionLabel, rows: [] })
+      groups.get(key)!.rows.push(row)
+    }
+
+    const minLine = (rows: DocumentItem[]) =>
+      rows.reduce((m, r) => Math.min(m, r.line_no ?? 999999), 999999)
+
+    const rank = (sectionKey: string): number => {
+      if (sectionKey === 'shipped') return 0
+      if (sectionKey === 'left_in_warehouse') return 1
+      if (sectionKey === 'repacked') return 2
+      return 3
+    }
+
+    return [...groups.values()]
+      .sort((a, b) => {
+        const ma = minLine(a.rows)
+        const mb = minLine(b.rows)
+        if (ma !== mb) return ma - mb
+        const d = rank(a.sectionKey) - rank(b.sectionKey)
+        if (d !== 0) return d
+        return a.sectionLabel.localeCompare(b.sectionLabel)
+      })
+      .map(g => {
+        // Section subtotal must match exactly what is visible in this section.
+        const subtotalRows = g.rows
+        return {
+          sectionKey: g.sectionKey,
+          sectionLabel: g.sectionLabel,
+          rows: g.rows,
+          st: {
+            cartons: subtotalRows.reduce((s, p) => s + (p.total_cartons ?? 0), 0),
+            qty: subtotalRows.reduce((s, p) => s + (p.total_quantity ?? 0), 0),
+            cbm: subtotalRows.reduce((s, p) => s + (p.total_cbm ?? 0), 0),
+            weight: subtotalRows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0),
+            amount: subtotalRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
+          },
+        }
+      })
+  }, [mainRows])
 
   function handleDeleteItem(id: string) {
     if (!confirm('Delete this row?')) return
@@ -507,11 +658,7 @@ export function ProductsClient({
   function handleDeleteSection(section: DocumentItem['section']) {
     const sectionLabel = section === 'left_in_warehouse' ? 'left in warehouse' : section
     const scopeLabel = selectedDocumentId !== 'all' ? ' from this document' : ''
-    const base =
-      initialDoc === 'all'
-        ? globalStats.sectionCounts
-        : (docScopeStats?.sectionCounts ?? { shipped: 0, left_in_warehouse: 0, repacked: 0 })
-    const count = base[section]
+    const count = mainRows.filter(p => p.section === section).length
     if (count === 0) return
     if (!confirm(`Delete all ${count} "${sectionLabel}" rows${scopeLabel}? This cannot be undone.`)) return
     startTransition(async () => {
@@ -594,10 +741,14 @@ export function ProductsClient({
     if (isPdf) {
       try {
         startImport(file.name)
-        const result = await importPdfDirect(file, (pct, stage) => updateProgress(pct, stage))
+        const result = await importPdfDirect(
+          file,
+          (pct, stage) => updateProgress(pct, stage),
+          { fullExtract: true }
+        )
         const { products, document: doc } = result
         const rows = products
-          .filter((p: any) => shouldPublishExtractedProduct(p.section))
+          .filter((p: any) => !isFullExtractBanner(p) && !isSubtotalBanner(p) && !isFooterBanner(p))
           .map((p: any) => ({
             MARKS: String(p.marks ?? p.item_code ?? ''),
             'SHOP#': String(p.shop ?? ''),
@@ -612,6 +763,9 @@ export function ProductsClient({
             'T.WEIGHT': p.total_weight_kg != null ? `${p.total_weight_kg}KGS` : '',
             'U.PRICE (RMB)': p.unit_price_rmb != null ? `¥${p.unit_price_rmb}` : '',
             'T.AMOUNT': p.total_amount_rmb != null ? `¥${p.total_amount_rmb}` : '',
+            __section: String(p.section ?? 'shipped'),
+            __section_label: parseSectionLabelFromRemarks(p.remarks),
+            REMARKS: String(p.remarks ?? ''),
             __source: 'claude_core',
             __needs_llm: 'false',
           }))
@@ -886,8 +1040,8 @@ export function ProductsClient({
                 </td>
               </tr>
             ) : (
-              groupedSections.map(({ sectionKey, rows, st }) => (
-                <React.Fragment key={sectionKey}>
+              groupedSections.map(({ sectionKey, sectionLabel, rows, st }) => (
+                <React.Fragment key={`${sectionKey}:${sectionLabel}`}>
                   {rows.map(p => (
                     isStuffedBannerItem(p) ? (
                       <tr key={p.id} className="border-b border-yellow-300 bg-yellow-200 font-semibold">
@@ -984,9 +1138,9 @@ export function ProductsClient({
                     )
                   ))}
                   {/* Section subtotal row */}
-                  <tr className={`text-xs ${SECTION_SUBTOTAL_STYLE[sectionKey]}`}>
+                  <tr className={`text-xs ${sectionSubtotalStyle(sectionKey)}`}>
                     <td className="p-2" colSpan={7}>
-                      {SECTION_LABELS[sectionKey]} — {rows.length} rows
+                      {sectionLabel} — {rows.length} rows
                     </td>
                     <td className="p-2 text-right tabular-nums">{fmtN(st.cartons, 0)} CTN</td>
                     <td className="p-2 text-right tabular-nums">{fmtN(st.qty, 0)} pcs</td>

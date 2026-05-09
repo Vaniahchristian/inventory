@@ -1,6 +1,6 @@
 import { ExtractedDocument, ExtractedProduct, ClaudeExtractionResult } from './claude-extractor'
 import { isFullExtractBanner, isSubtotalBanner, isFooterBanner } from '@/lib/full-extract'
-import { filterToInventoryProducts } from '@/lib/sections'
+import { filterToInventoryProducts, normalizeSectionForStorage } from '@/lib/sections'
 import { dedupeShippedCartonCounts, fixManifestSectionContinuity } from '@/lib/manifest-section-fixer'
 import type { SectionSubtotal } from '@/lib/reducto-html-parser'
 import { ValidationResult, validateExtraction } from './validator'
@@ -36,9 +36,10 @@ export async function insertToSupabase(
     ),
     doc
   )
+  const reconciledProducts = fillMissingRowAmounts(fullProducts)
   // Validation uses shipped-only rows (totals cross-check); insertion stores all sections.
-  const shippedProducts = filterToInventoryProducts(fullProducts)
-  const products = fullProducts
+  const shippedProducts = filterToInventoryProducts(reconciledProducts)
+  const products = reconciledProducts
   const validation = validateExtraction(doc, shippedProducts, fullProducts)
   const ft = doc.footer_totals
 
@@ -169,7 +170,7 @@ export async function insertToSupabase(
       barcode: p.barcode ?? null,
       box_no_start: p.box_no_start ?? null,
       box_no_end: p.box_no_end ?? null,
-      section: p.section ?? 'shipped',
+      section: normalizeSectionForStorage(p.section, p.remarks),
       remarks: p.remarks ?? null,
       extraction_confidence: rv?.confidence ?? 80,
       validation_flags: rv?.flags ?? [],
@@ -252,6 +253,24 @@ function computeOverallConfidence(validation: ValidationResult): number {
 
 function round(n: number): number {
   return Math.round(n * 100) / 100
+}
+
+function fillMissingRowAmounts(products: ExtractedProduct[]): ExtractedProduct[] {
+  return products.map(p => {
+    const qty = p.total_qty ?? 0
+    const unit = p.unit_price_rmb ?? 0
+    const amount = p.total_amount_rmb
+    if (qty <= 0 || unit <= 0 || (amount ?? 0) > 0) return p
+    // Keep explicit carryover-ignored rows null by design.
+    if ((p.remarks ?? '').includes('repair:before_goods_amount_carryover_ignored')) return p
+    return {
+      ...p,
+      total_amount_rmb: round(qty * unit),
+      remarks: p.remarks
+        ? `${p.remarks};repair:amount_from_qty_price`
+        : 'repair:amount_from_qty_price',
+    }
+  })
 }
 
 function normalizeSalesOrderProducts(
