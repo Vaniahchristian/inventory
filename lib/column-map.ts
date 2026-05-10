@@ -13,6 +13,12 @@ export type ProductField =
   | 'unit_cbm' | 'total_cbm' | 'unit_weight_kg' | 'total_weight_kg'
   | 'unit_price_rmb' | 'total_amount_rmb'
   | 'barcode' | 'warehouse' | 'box_no_start' | 'box_no_end' | 'remarks'
+  | 'delivery_no'
+  | 'customer_item_ref'
+  | 'source_item_no'
+  | 'unit'
+  | 'product_name_local'
+  | 'material'
 
 /** Container manifest / packing list column headers → fields */
 export const CONTAINER_COLUMNS: Record<string, ProductField | 'skip'> = {
@@ -64,10 +70,11 @@ export const SALES_ORDER_COLUMNS: Record<string, ProductField | 'skip'> = {
   'NO. 序号': 'line_no',
   'DATE': 'skip', '订单日期': 'skip', 'DATE 订单日期': 'skip',
   'ORD NO': 'marks', 'ORD NO.': 'marks', '销售单号': 'marks', 'ORD NO. 销售单号': 'marks',
-  'DEL NO': 'marks', 'DEL NO.': 'marks', '送货单号': 'marks', 'DEL NO. 送货单号': 'marks',
-  'CUS NO': 'skip', 'CUS NO.': 'skip', '客户货号': 'skip', 'CUS NO. 客户货号': 'skip',
-  'ITEM NO': 'item_code', 'ITEM NO.': 'item_code', 'ITEM NO. 产品货号': 'item_code',
-  '产品货号': 'item_code', 'ITEM CODE': 'item_code', 'SKU': 'item_code',
+  'DEL NO': 'delivery_no', 'DEL NO.': 'delivery_no', '送货单号': 'delivery_no', 'DEL NO. 送货单号': 'delivery_no',
+  'CUS NO': 'customer_item_ref', 'CUS NO.': 'customer_item_ref', '客户货号': 'customer_item_ref',
+  'CUS NO. 客户货号': 'customer_item_ref',
+  'ITEM NO': 'source_item_no', 'ITEM NO.': 'source_item_no', 'ITEM NO. 产品货号': 'source_item_no',
+  '产品货号': 'source_item_no', 'ITEM CODE': 'source_item_no', 'SKU': 'source_item_no',
   'DES': 'description', 'DES.': 'description', 'DESCRIPTION': 'description', 'DES. 描述': 'description', '描述': 'description',
   'PHOTO': 'skip', 'PHOTO2': 'skip', '图片1': 'skip',
   'CTN': 'total_cartons', '总箱数': 'total_cartons', 'TOTAL CARTONS': 'total_cartons', 'CTNS': 'total_cartons',
@@ -88,14 +95,19 @@ export const SALES_ORDER_COLUMNS: Record<string, ProductField | 'skip'> = {
   'H 高': 'dim_h_cm',
   'CBM': 'unit_cbm', '体积': 'unit_cbm', 'UNIT CBM': 'unit_cbm', 'CBM 体积': 'unit_cbm',
   'T.T.CBM': 'total_cbm', '总体积': 'total_cbm', 'TOTAL CBM': 'total_cbm', 'T.T.CBM 总体积': 'total_cbm',
+  'TTL CBM': 'total_cbm',
   'G.W': 'unit_weight_kg', '重量': 'unit_weight_kg', 'UNIT WEIGHT': 'unit_weight_kg', 'UNIT WEIGHT(KG)': 'unit_weight_kg', 'G.W. 重量': 'unit_weight_kg',
   'T.T.KGS': 'total_weight_kg', '总重量': 'total_weight_kg', 'TOTAL WEIGHT': 'total_weight_kg', 'TOTAL WEIGHT(KG)': 'total_weight_kg', 'T.T.KGS 总重量': 'total_weight_kg',
+  'TTL KGS': 'total_weight_kg', 'TTL KGS 总重量': 'total_weight_kg',
   'CODE': 'barcode',
   '条形码': 'barcode', 'BARCODE': 'barcode',
   'CODE 条形码': 'barcode',
   'W.H': 'warehouse',
   '仓位': 'warehouse', 'WAREHOUSE': 'warehouse',
   'W.H. 仓位': 'warehouse',
+  'UNIT': 'unit', 'UNIT 单位': 'unit', '单位': 'unit',
+  'ITEM 品名': 'product_name_local', '品名': 'product_name_local',
+  'MATERIAL': 'material', 'MATERIAL 材质': 'material', '材质': 'material',
   'REK': 'remarks',
   '备注': 'remarks', 'REMARKS': 'remarks',
   'REK 备注': 'remarks',
@@ -136,8 +148,13 @@ export function resolveColumn(
 
   if (docType === 'sales_order') {
     if (key.includes('序号') || /^NO\.?$/.test(key) || key.startsWith('NO ')) return 'line_no'
-    if (key.includes('ORD NO') || key.includes('DEL NO') || key.includes('销售单号') || key.includes('送货单号')) return 'marks'
-    if (key.includes('ITEM NO') || key.includes('产品货号') || key.includes('ITEM CODE')) return 'item_code'
+    if (key.includes('DEL NO') || key.includes('送货单号')) return 'delivery_no'
+    if (key.includes('ORD NO') || key.includes('销售单号')) return 'marks'
+    if (key.includes('CUS NO') || key.includes('客户货号')) return 'customer_item_ref'
+    if (key.includes('ITEM NO') || key.includes('产品货号') || key.includes('ITEM CODE')) return 'source_item_no'
+    if ((key.includes('ITEM') && key.includes('品名')) || /^ITEM\s*品名/.test(key)) return 'product_name_local'
+    if (key.includes('MATERIAL') || key.includes('材质')) return 'material'
+    if (key.includes('UNIT') && (key.includes('单位') || key.endsWith('UNIT'))) return 'unit'
     if (key.includes('DES') || key.includes('描述')) return 'description'
     if (key.includes('CTN') || key.includes('总箱数')) return 'total_cartons'
     if ((key.includes('QTY') && !key.includes('T.QTY')) || key.includes('每箱数量')) return 'packaging'
@@ -147,14 +164,21 @@ export function resolveColumn(
     if (/^L(\s|$)/.test(key) || key.includes(' 长')) return 'dim_l_cm'
     if (/^W(\s|$)/.test(key) || key.includes(' 宽')) return 'dim_w_cm'
     if (/^H(\s|$)/.test(key) || key.includes(' 高')) return 'dim_h_cm'
-    if (key.includes('T.T.CBM') || key.includes('总体积') || key.includes('TOTAL CBM')) return 'total_cbm'
+    if (key.includes('T.T.CBM') || key.includes('TTL CBM') || key.includes('总体积') || key.includes('TOTAL CBM')) return 'total_cbm'
     if (key.includes('CBM') || key.includes('体积')) return 'unit_cbm'
-    if (key.includes('T.T.KGS') || key.includes('总重量') || key.includes('TOTAL WEIGHT')) return 'total_weight_kg'
+    if (key.includes('T.T.KGS') || key.includes('TTL KGS') || key.includes('总重量') || key.includes('TOTAL WEIGHT')) return 'total_weight_kg'
     if (key.includes('G.W') || key.includes('重量') || key.includes('UNIT WEIGHT')) return 'unit_weight_kg'
-    if (key.includes('条形码') || key.includes('BARCODE') || key.includes('CODE')) return 'barcode'
+    if (
+      (key.includes('CODE') || key.includes('条形码') || key.includes('BARCODE')) &&
+      !key.includes('ITEM') &&
+      !key.includes('CUS') &&
+      !key.includes('DEL')
+    ) {
+      return 'barcode'
+    }
     if (key.includes('仓位') || key.includes('W.H') || key.includes('WAREHOUSE')) return 'warehouse'
     if (key.includes('REK') || key.includes('备注') || key.includes('REMARKS')) return 'remarks'
-    if (key.includes('PHOTO') || key.includes('图片') || key.includes('CUS NO') || key.includes('DATE')) return 'skip'
+    if (key.includes('PHOTO') || key.includes('图片') || key.includes('DATE')) return 'skip'
   }
 
   return null

@@ -121,6 +121,14 @@ export type DocumentItem = {
   line_no: number | null
   marks: string | null
   item_code: string | null
+  /** PDF 产品货号 / ITEM NO when stored separately from item_code */
+  source_item_no: string | null
+  delivery_no: string | null
+  customer_item_ref: string | null
+  unit: string | null
+  product_name_local: string | null
+  material: string | null
+  source_cells: Record<string, string> | null
   description: string | null
   shop: string | null
   packaging: string | null

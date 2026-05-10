@@ -58,3 +58,39 @@ export function sanitizeSalesOrderProductPhysicalCaps(p: ExtractedProduct): Extr
 export function sanitizeSalesOrderProductsPhysicalCaps(products: ExtractedProduct[]): ExtractedProduct[] {
   return products.map(sanitizeSalesOrderProductPhysicalCaps)
 }
+
+/** Same DEL-shape heuristic as reducto-html-parser (avoid importing parser here). */
+function looksLikeYiwuDeliveryNoRef(s: string): boolean {
+  const t = s.replace(/\s+/g, '').trim()
+  if (!t) return false
+  return /^\d{2}C\d{3}-\d+[A-Z0-9-]*$/i.test(t) || /^26C\d{3}-[0-9A-Z-]+$/i.test(t)
+}
+
+/**
+ * Prefer real manufacturer SKU when OCR swaps DEL vs ITEM NO or puts the row序号 in ITEM NO.
+ */
+export function resolveSalesOrderSkuFields(
+  source_item_no: string | null,
+  item_code: string | null
+): { item_code: string | null; source_item_no: string | null } {
+  if (!source_item_no && !item_code) return { item_code: null, source_item_no: null }
+  if (
+    item_code &&
+    source_item_no &&
+    looksLikeYiwuDeliveryNoRef(item_code) &&
+    !looksLikeYiwuDeliveryNoRef(source_item_no)
+  ) {
+    return { item_code: source_item_no, source_item_no: source_item_no }
+  }
+  if (
+    item_code &&
+    source_item_no &&
+    /^\d{1,4}$/.test(source_item_no) &&
+    !/^\d{1,4}$/.test(item_code)
+  ) {
+    return { item_code: item_code, source_item_no: source_item_no }
+  }
+  const linked = source_item_no ?? item_code
+  return { item_code: linked, source_item_no: source_item_no ?? item_code }
+}
+

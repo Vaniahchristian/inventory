@@ -172,13 +172,22 @@ function rowMatchesSearch(p: DocumentItem, qLower: string): boolean {
     p.documents && typeof p.documents === 'object' && 'source_file_name' in p.documents
       ? String((p.documents as { source_file_name?: string | null }).source_file_name ?? '')
       : ''
-  return (
-    p.marks?.toLowerCase().includes(qLower) ||
-    p.item_code?.toLowerCase().includes(qLower) ||
-    p.description?.toLowerCase().includes(qLower) ||
-    p.shop?.toLowerCase().includes(qLower) ||
-    docName.toLowerCase().includes(qLower)
-  )
+  const hay = [
+    p.marks,
+    p.item_code,
+    p.source_item_no,
+    p.delivery_no,
+    p.customer_item_ref,
+    p.unit,
+    p.product_name_local,
+    p.material,
+    p.description,
+    p.shop,
+    docName,
+  ]
+    .map(s => (s ?? '').toLowerCase())
+    .join('\u0000')
+  return hay.includes(qLower)
 }
 
 const SECTION_RENDER_ORDER: DocumentItem['section'][] = ['shipped', 'left_in_warehouse', 'repacked']
@@ -289,12 +298,22 @@ function SectionBadge({ section }: { section: DocumentItem['section'] }) {
 
 async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
   const XLSX = await import('xlsx')
-  const header = ['No.', 'Marks', 'Shop', 'Item No', 'Description', 'Packing', 'CTN', 'Qty', 'L', 'W', 'H', 'U.CBM', 'T.CBM', 'U.Wkg', 'T.Wkg', 'U.Price (RMB)', 'Amount (RMB)', 'Section']
+  const header = [
+    'No.', 'Marks', 'Shop', 'Item No', 'Src ITEM', 'DEL', 'CUS', 'Unit', '品名', 'Material',
+    'Description', 'Packing', 'CTN', 'Qty', 'L', 'W', 'H', 'U.CBM', 'T.CBM', 'U.Wkg', 'T.Wkg',
+    'U.Price (RMB)', 'Amount (RMB)', 'Section',
+  ]
   const data = rows.map((p, i) => [
     i + 1,
     p.marks ?? '-',
     p.shop ?? '-',
     p.item_code ?? '-',
+    p.source_item_no ?? '-',
+    p.delivery_no ?? '-',
+    p.customer_item_ref ?? '-',
+    p.unit ?? '-',
+    p.product_name_local ?? '-',
+    p.material ?? '-',
     p.description ?? '-',
     p.packaging ?? '-',
     p.total_cartons ?? 0,
@@ -316,8 +335,20 @@ async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
   const totalWkg    = rows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
   const totalAmount = rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
   const totalsRow = [
-    `TOTALS (${rows.length} rows)`, '', '', '', '', '',
-    totalCtn, totalQty, null, null, null, null, totalCbm, null, totalWkg, null, totalAmount, '',
+    `TOTALS (${rows.length} rows)`,
+    '', '', '', '', '', '', '', '', '', '', '',
+    totalCtn,
+    totalQty,
+    null,
+    null,
+    null,
+    null,
+    totalCbm,
+    null,
+    totalWkg,
+    null,
+    totalAmount,
+    '',
   ]
 
   const ws = XLSX.utils.aoa_to_sheet([header, ...data, totalsRow])
@@ -336,7 +367,10 @@ function exportDocumentItemsToPdf(rows: DocumentItem[]) {
   const totalWkg    = rows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
   const totalAmount = rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
 
-  const headers = ['No.', 'Marks', 'Shop', 'Item No', 'Description', 'Packing', 'CTN', 'Qty', 'T.CBM', 'T.Wkg', 'Amount (RMB)', 'Section']
+  const headers = [
+    'No.', 'Marks', 'Shop', 'Item No', 'Src', 'DEL', 'CUS', 'Unit', '品名', 'Mat',
+    'Description', 'Packing', 'CTN', 'Qty', 'T.CBM', 'T.Wkg', 'Amount (RMB)', 'Section',
+  ]
   const headerRow = headers.map(h => `<th>${esc(h)}</th>`).join('')
 
   const bodyRows = rows.map((p, i) => {
@@ -345,6 +379,12 @@ function exportDocumentItemsToPdf(rows: DocumentItem[]) {
       p.marks,
       p.shop,
       p.item_code,
+      p.source_item_no,
+      p.delivery_no,
+      p.customer_item_ref,
+      p.unit,
+      p.product_name_local,
+      p.material,
       p.description,
       p.packaging,
       p.total_cartons ?? 0,
@@ -358,7 +398,7 @@ function exportDocumentItemsToPdf(rows: DocumentItem[]) {
   }).join('')
 
   const totalsRow = [
-    `<td class="bold" colspan="6">TOTALS — ${rows.length} rows</td>`,
+    `<td class="bold" colspan="12">TOTALS — ${rows.length} rows</td>`,
     `<td class="bold">${totalCtn.toLocaleString()}</td>`,
     `<td class="bold">${totalQty.toLocaleString()}</td>`,
     `<td class="bold">${totalCbm.toFixed(4)}</td>`,
@@ -996,7 +1036,7 @@ export function ProductsClient({
 
       {/* Main table */}
       <div className="rounded-md border bg-white overflow-x-auto">
-        <table className="w-full text-xs border-collapse min-w-[1900px]">
+        <table className="w-full text-xs border-collapse min-w-[2600px]">
           <thead>
             <tr className="bg-slate-50 border-b text-left">
               <th className="p-2 font-medium w-8 text-slate-500">#</th>
@@ -1010,6 +1050,12 @@ export function ProductsClient({
               <th className="p-2 font-medium min-w-[120px]">Marks</th>
               <th className="p-2 font-medium min-w-[80px]">Shop</th>
               <th className="p-2 font-medium w-14">Item</th>
+              <th className="p-2 font-medium w-14">Src</th>
+              <th className="p-2 font-medium min-w-[72px]">DEL</th>
+              <th className="p-2 font-medium min-w-[72px]">CUS</th>
+              <th className="p-2 font-medium w-11">Unit</th>
+              <th className="p-2 font-medium min-w-[64px]">品名</th>
+              <th className="p-2 font-medium min-w-[64px]">Mat</th>
               <th className="p-2 font-medium min-w-[180px]">Description</th>
               <th className="p-2 font-medium min-w-[80px]">Packing</th>
               <th className="p-2 font-medium w-14 text-right">CTN</th>
@@ -1031,7 +1077,7 @@ export function ProductsClient({
           <tbody>
             {tableMainEmpty ? (
               <tr>
-                <td colSpan={21} className="text-center text-slate-400 py-10">
+                <td colSpan={27} className="text-center text-slate-400 py-10">
                   {importStage
                     ? 'Import in progress…'
                     : listStats.totalCount > 0
@@ -1047,7 +1093,7 @@ export function ProductsClient({
                       <tr key={p.id} className="border-b border-yellow-300 bg-yellow-200 font-semibold">
                         <td className="p-2 text-slate-500 tabular-nums">{p.line_no ?? '-'}</td>
                         <td className="p-2 text-center">—</td>
-                        <td className="p-2" colSpan={18}>
+                        <td className="p-2" colSpan={24}>
                           {(p.description ?? p.marks ?? p.item_code ?? 'GOODS STUFFED INTO THIS CO').replace(/\s+/g, ' ').trim()}
                         </td>
                         <td className="p-1">
@@ -1077,6 +1123,18 @@ export function ProductsClient({
                       <td className="p-2 font-mono text-slate-800 whitespace-nowrap">{p.marks ?? '-'}</td>
                       <td className="p-2 text-slate-600 max-w-[100px] truncate">{p.shop ?? '-'}</td>
                       <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+                      <td className="p-2 font-mono text-[11px] text-slate-700 max-w-[88px] truncate" title={p.source_item_no ?? ''}>
+                        {p.source_item_no ?? '-'}
+                      </td>
+                      <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
+                      <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.customer_item_ref ?? '-'}</td>
+                      <td className="p-2 text-[11px] whitespace-nowrap">{p.unit ?? '-'}</td>
+                      <td className="p-2 text-slate-700 max-w-[100px] truncate" title={p.product_name_local ?? ''}>
+                        {p.product_name_local ?? '-'}
+                      </td>
+                      <td className="p-2 text-slate-700 max-w-[100px] truncate" title={p.material ?? ''}>
+                        {p.material ?? '-'}
+                      </td>
                       <td className="p-2 text-slate-700 max-w-[200px]">{p.description ?? '-'}</td>
                       <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
                       <td className="p-2 text-right tabular-nums">
@@ -1139,7 +1197,7 @@ export function ProductsClient({
                   ))}
                   {/* Section subtotal row */}
                   <tr className={`text-xs ${sectionSubtotalStyle(sectionKey)}`}>
-                    <td className="p-2" colSpan={7}>
+                    <td className="p-2" colSpan={13}>
                       {sectionLabel} — {rows.length} rows
                     </td>
                     <td className="p-2 text-right tabular-nums">{fmtN(st.cartons, 0)} CTN</td>
@@ -1166,6 +1224,12 @@ export function ProductsClient({
                     <td className="p-2 font-mono whitespace-nowrap">{p.marks ?? '-'}</td>
                     <td className="p-2 max-w-[100px] truncate">{p.shop ?? '-'}</td>
                     <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+                    <td className="p-2 font-mono text-[11px] max-w-[88px] truncate">{p.source_item_no ?? '-'}</td>
+                    <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
+                    <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.customer_item_ref ?? '-'}</td>
+                    <td className="p-2 text-[11px]">{p.unit ?? '-'}</td>
+                    <td className="p-2 max-w-[100px] truncate">{p.product_name_local ?? '-'}</td>
+                    <td className="p-2 max-w-[100px] truncate">{p.material ?? '-'}</td>
                     <td className="p-2 max-w-[200px]">{p.description ?? '-'}</td>
                     <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
                     <td className="p-2 text-right tabular-nums">{fmtN(p.total_cartons, 0)}</td>
@@ -1196,14 +1260,14 @@ export function ProductsClient({
                   </tr>
                 ))}
                 <tr className="text-xs bg-slate-300 border-t-2 border-slate-500 font-semibold text-slate-700">
-                  <td className="p-2" colSpan={7}>Document Footer — {footerItems.length} rows (financial summary)</td>
+                  <td className="p-2" colSpan={13}>Document Footer — {footerItems.length} rows (financial summary)</td>
                   <td colSpan={14} />
                 </tr>
               </React.Fragment>
             )}
             {selectedRows.length > 0 && (
               <tr className="bg-emerald-100 border-t-2 border-emerald-500 font-bold text-emerald-900">
-                <td className="p-2" colSpan={7}>SELECTED TOTALS — {selectedRows.length} rows</td>
+                <td className="p-2" colSpan={13}>SELECTED TOTALS — {selectedRows.length} rows</td>
                 <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.cartons, 0)} CTN</td>
                 <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.qty, 0)} pcs</td>
                 <td colSpan={3} />
@@ -1218,7 +1282,7 @@ export function ProductsClient({
             )}
             {listStats.totalCount > 0 && multiSection && (
               <tr className="bg-slate-800 text-white font-bold border-t-2 border-slate-900 text-xs">
-                <td className="p-2" colSpan={7}>
+                <td className="p-2" colSpan={13}>
                   {footerGrandTotals ? 'PDF FOOTER TOTAL' : `GRAND TOTAL — ${listStats.totalCount} rows`}
                 </td>
                 <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.cartons ?? totals.cartons, 0)} CTN</td>
@@ -1316,6 +1380,18 @@ export function ProductsClient({
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Marks" name="marks" defaultValue={editingItem.marks ?? ''} />
                 <Field label="Item No" name="item_code" defaultValue={editingItem.item_code ?? ''} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Src ITEM NO" name="source_item_no" defaultValue={editingItem.source_item_no ?? ''} />
+                <Field label="DEL NO" name="delivery_no" defaultValue={editingItem.delivery_no ?? ''} />
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="CUS NO" name="customer_item_ref" defaultValue={editingItem.customer_item_ref ?? ''} />
+                <Field label="Unit" name="unit" defaultValue={editingItem.unit ?? ''} />
+                <Field label="Material" name="material" defaultValue={editingItem.material ?? ''} />
+              </div>
+              <div className="grid grid-cols-1 gap-3">
+                <Field label="品名 (local name)" name="product_name_local" defaultValue={editingItem.product_name_local ?? ''} />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Shop" name="shop" defaultValue={editingItem.shop ?? ''} />

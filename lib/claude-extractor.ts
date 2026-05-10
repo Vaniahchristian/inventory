@@ -56,6 +56,20 @@ export interface ExtractedProduct {
   box_no_end: number | null
   section: string
   remarks: string | null
+  /** PDF 送货单号 / DEL NO — batch delivery reference */
+  delivery_no: string | null
+  /** PDF 客户货号 / CUS NO */
+  customer_item_ref: string | null
+  /** PDF 产品货号 / ITEM NO (manufacturer SKU); mirrors item_code when linked */
+  source_item_no: string | null
+  /** PDF UNIT / 单位 */
+  unit: string | null
+  /** PDF ITEM 品名 column when distinct from English description */
+  product_name_local: string | null
+  /** PDF MATERIAL / 材质 */
+  material: string | null
+  /** Optional keyed snapshot of parsed cells for audit */
+  source_cells: Record<string, string> | null
 }
 
 export interface ClaudeExtractionResult {

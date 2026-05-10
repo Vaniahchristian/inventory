@@ -34,6 +34,7 @@ import {
   SALES_ORDER_MAX_LINE_AMOUNT,
   SALES_ORDER_MAX_LINE_QTY,
   SALES_ORDER_MAX_UNIT_PRICE,
+  resolveSalesOrderSkuFields,
   sanitizeSalesOrderProductsPhysicalCaps,
 } from './sales-order-sanitize'
 
@@ -79,6 +80,13 @@ function syntheticFullExtractRow(
     box_no_end: null,
     section,
     remarks,
+    delivery_no: null,
+    customer_item_ref: null,
+    source_item_no: null,
+    unit: null,
+    product_name_local: null,
+    material: null,
+    source_cells: null,
   }
 }
 
@@ -353,6 +361,9 @@ export function parseReductoChunks(
     fixManifestSectionContinuity(productsWithMag512Outlier, docType),
     docType
   )
+  if (docType === 'sales_order') {
+    productsFixed = mergeSalesOrderContinuationRows(productsFixed)
+  }
   productsFixed = repairSalesOrderCartonOcrGarbage(productsFixed, document)
   productsFixed = sanitizeSalesOrderProductsPhysicalCaps(productsFixed)
   return { products: productsFixed, document, tablesFound, rowsMapped, sectionSubtotals: allSectionSubtotals }
@@ -488,6 +499,13 @@ function appendMag512PricedOutlierRows(
       marks,
       shop,
       item_code: itemCode,
+      source_item_no: itemCode,
+      delivery_no: null,
+      customer_item_ref: null,
+      unit: null,
+      product_name_local: null,
+      material: null,
+      source_cells: null,
       description,
       packaging: null,
       qty_per_carton: null,
@@ -543,7 +561,9 @@ function looksLikeHeaderlessDataTable(grid: string[][]): boolean {
 
 /**
  * Sales order pages 2+ arrive as headerless <tbody>-only tables.
- * Detected by: first cell = row number, second-to-last or third-to-last = 13-digit barcode.
+ * Historically: first cell = row number + barcode near tail.
+ * 义乌送货单 often uses `[ ]` / empty barcode cells — also detect wide numeric rows
+ * with warehouse + PCS tail without a 13-digit code.
  */
 function looksLikeHeaderlessSalesOrderTable(grid: string[][]): boolean {
   if (grid.length === 0) return false
@@ -551,17 +571,180 @@ function looksLikeHeaderlessSalesOrderTable(grid: string[][]): boolean {
   if (row.length < 10) return false
   if (!/^\d{1,4}$/.test(row[0]?.trim() ?? '')) return false
   const n = row.length
-  return (
+
+  const tailBarcode =
     /^\d{12,15}$/.test(row[n - 2]?.trim() ?? '') ||
     /^\d{12,15}$/.test(row[n - 3]?.trim() ?? '')
-  )
+  if (tailBarcode) return true
+
+  // Wide 义乌-style lines (~22–28 cells): warehouse / unit columns exist even when barcode is blank.
+  if (n >= 20 && n <= 28) {
+    const tailWindow = row.slice(Math.max(0, n - 8))
+    const joined = tailWindow.join(' ')
+    const hasWarehouseHint =
+      tailWindow.some(c => looksLikeSalesWarehouseCell(c)) || /浙江仓|东阳仓|浦江仓|\d+仓/.test(joined)
+    const hasUnitHint = tailWindow.some(c => /^(PCS|SET|DCS|PS|PCS\/SE)$/i.test((c ?? '').trim()))
+    if (hasWarehouseHint && hasUnitHint) return true
+  }
+
+  return false
+}
+
+/**
+ * Locate the CODE / 条形 column for 义乌-style tables:
+ * 1) Prefer a 12–15 digit barcode in the typical CODE region.
+ * 2) Else find 仓库 (W.H.) and assume CODE is two cells left (CODE — REK — W.H.).
+ * 3) Else full-width ~24-col layout: … TTL KGS, CODE, REK, W.H., UNIT, ITEM, MATERIAL → CODE at n-6.
+ */
+function inferSalesOrderBarcodeColumnIndex(row: string[]): number | null {
+  const n = row.length
+  if (n < 18) return null
+
+  for (let i = Math.min(n - 1, 22); i >= Math.max(10, n - 16); i--) {
+    const t = row[i]?.trim() ?? ''
+    if (/^\d{12,15}$/.test(t)) return i
+  }
+
+  for (let wi = n - 1; wi >= Math.max(4, n - 12); wi--) {
+    const c = row[wi]?.trim() ?? ''
+    if (looksLikeSalesWarehouseCell(c)) {
+      const candidate = wi - 2
+      if (candidate >= 10 && candidate < n) return candidate
+    }
+  }
+
+  if (n >= 22 && n <= 28) {
+    const unit = row[n - 3]?.trim() ?? ''
+    const wh = row[n - 4]?.trim() ?? ''
+    if (/^(PCS|SET|DCS|PS|PCS\/SE)$/i.test(unit) || looksLikeSalesWarehouseCell(wh)) {
+      return n - 6
+    }
+  }
+
+  return null
+}
+
+function inferSalesOrderWarehouseColumn(
+  row: string[],
+  n: number,
+  codeIdx: number
+): string | null {
+  const wAfterCode = row[codeIdx + 2]?.trim() ?? ''
+  if (looksLikeSalesWarehouseCell(wAfterCode)) {
+    return wAfterCode.replace(/\s+/g, ' ').trim()
+  }
+  if (n >= 20) {
+    const wBack = row[n - 4]?.trim() ?? ''
+    if (looksLikeSalesWarehouseCell(wBack)) {
+      return wBack.replace(/\s+/g, ' ').trim()
+    }
+  }
+  for (let i = n - 1; i >= Math.max(0, n - 8); i--) {
+    const c = row[i]?.trim() ?? ''
+    if (looksLikeSalesWarehouseCell(c)) {
+      return c.replace(/\s+/g, ' ').trim()
+    }
+  }
+  return null
+}
+
+/** 义乌送货单号 DEL NO — e.g. 26C405-1Z — repeats for many lines; not manufacturer ITEM NO (VF… / CZT…). */
+function looksLikeYiwuDeliveryNoRef(s: string): boolean {
+  const t = s.replace(/\s+/g, '').trim()
+  if (!t) return false
+  return /^\d{2}C\d{3}-\d+[A-Z0-9-]*$/i.test(t) || /^26C\d{3}-[0-9A-Z-]+$/i.test(t)
+}
+
+/**
+ * When col3 duplicates the delivery ref, scan a few pre-description cells for a real product code.
+ */
+function pickYiwuManufacturerItemNo(
+  row: string[],
+  desIdx: number,
+  deliveryRef: string
+): string | null {
+  const delN = deliveryRef.replace(/\s+/g, '')
+  const scanTo = Math.min(desIdx, 7)
+  for (let i = 3; i < scanTo; i++) {
+    const c = row[i]?.trim() ?? ''
+    if (!c || c.length > 28) continue
+    if (/^\d{4}-\d{2}-\d{2}$/.test(c)) continue
+    if (/^[A-Z]\d{2}-\d{4}$/.test(c)) continue // skip ORD NO like C25-6083
+    const cn = c.replace(/\s+/g, '')
+    if (delN && cn === delN) continue
+    if (looksLikeYiwuDeliveryNoRef(c)) continue
+    if (/^\d{1,4}$/.test(c)) continue
+    if (c.length > 2 && /^[A-Z0-9][A-Z0-9._\/-]+$/i.test(c)) {
+      return c.replace(/\s+/g, ' ').trim()
+    }
+  }
+  // Also check if the description cell starts with a valid product code
+  // (e.g. Reducto merges ITEM NO into description: "BW20-73 14.5 Dessert set…")
+  // Real SKUs always contain at least one digit — this guards against picking up
+  // plain English words like "Dinner" from product descriptions.
+  const desc = (row[desIdx] ?? '').trim()
+  const firstToken = desc.split(/\s+/)[0] ?? ''
+  if (
+    firstToken.length >= 3 &&
+    firstToken.length <= 28 &&
+    /\d/.test(firstToken) &&
+    !looksLikeYiwuDeliveryNoRef(firstToken) &&
+    !/^\d{4}-\d{2}-\d{2}$/.test(firstToken) &&
+    !/^[A-Z]\d{2}-\d{4}$/.test(firstToken) &&
+    /^[A-Z0-9][A-Z0-9._\/-]+$/i.test(firstToken)
+  ) {
+    return firstToken
+  }
+  return null
+}
+
+/** Returns true for order-reference codes like C25-6083 that are not real SKUs. */
+function looksLikeYiwuOrderRef(s: string): boolean {
+  return /^[A-Z]\d{2}-\d{4}$/.test((s ?? '').trim())
+}
+
+function disambiguateYiwuItemCodeString(
+  candidate: string | null | undefined,
+  row: string[],
+  desIdx: number,
+  marksHint: string | null | undefined
+): string | null {
+  const item = (candidate ?? '').trim()
+  if (!item) return null
+  const needsDisambiguation = looksLikeYiwuDeliveryNoRef(item) || looksLikeYiwuOrderRef(item)
+  if (!needsDisambiguation) return item
+  const better = pickYiwuManufacturerItemNo(row, desIdx, ((marksHint ?? row[1]) ?? '').trim() || item)
+  return better ?? (looksLikeYiwuDeliveryNoRef(item) ? item : null)
+}
+
+/** Col-map path: HTML often pastes 26C405-* or order refs into the ITEM cell — replace when a real SKU exists. */
+function disambiguateYiwuSalesOrderRawFields(
+  raw: Record<string, string>,
+  row: string[],
+  colMap: Map<number, ProductField | 'skip'>
+): void {
+  const item = (raw['source_item_no'] ?? raw['item_code'] ?? '').trim()
+  if (!item || (!looksLikeYiwuDeliveryNoRef(item) && !looksLikeYiwuOrderRef(item))) return
+  let desIdx = -1
+  for (const [idx, f] of colMap) {
+    if (f === 'description') {
+      desIdx = idx
+      break
+    }
+  }
+  if (desIdx < 0) return
+  const marks = (raw['marks'] ?? '').trim()
+  const better = pickYiwuManufacturerItemNo(row, desIdx, marks || item)
+  if (better) {
+    raw['source_item_no'] = better
+    raw['item_code'] = better
+  }
 }
 
 /**
  * Right-anchored positional parser for a single headerless sales order row.
- * Works across all page variants (19–22 columns) because it anchors from the
- * right (W.H. last, barcode second-to-last) and works inward.
- * Returns null for TOTAL/label/blank rows.
+ * Anchors from CODE (条形) / TTL block — works when barcode is present, blank, or `[ ]`.
+ * Warehouse comes from W.H. column (义乌 template), not the last cell (often MATERIAL).
  */
 function parseSalesOrderRowPositional(
   row: string[],
@@ -575,31 +758,94 @@ function parseSalesOrderRowPositional(
   // Row must start with an integer row number
   if (!/^\d{1,4}$/.test(row[0]?.trim() ?? '')) return null
 
-  // Detect REK vs CODE at second-to-last position
-  let codeIdx: number
+  const codeIdx = inferSalesOrderBarcodeColumnIndex(row)
+  if (codeIdx === null || codeIdx < 10) return null
+
+  const barcodeRaw = row[codeIdx]?.trim() ?? ''
+  const barcodeVal = /^\d{12,15}$/.test(barcodeRaw) ? barcodeRaw : null
+
   let rekValue: string | null = null
-  const penultimate = row[n - 2]?.trim() ?? ''
-  if (/^\d{12,15}$/.test(penultimate)) {
-    codeIdx = n - 2
-  } else {
-    codeIdx = n - 3
-    rekValue = penultimate || null
+  const rekCell = row[codeIdx + 1]?.trim() ?? ''
+  if (
+    rekCell &&
+    !/^\d{12,15}$/.test(rekCell) &&
+    !/^[\s\[\]]*$/.test(rekCell) &&
+    rekCell.length < 120
+  ) {
+    rekValue = rekCell
   }
-  if (codeIdx < 5) return null
 
-  // Verify barcode is a real 13-15 digit code
-  const barcodeVal = row[codeIdx]?.trim() ?? ''
-  if (!/^\d{12,15}$/.test(barcodeVal)) return null
+  // Right-anchored numeric column detection.
+  // Standard 24-col:  … L | W | H | CBM | G.W. | TTL CBM | TTL KGS | CODE …
+  // Compact 23-col (no TTL KGS): … L | W | H | CBM | G.W. | TTL CBM | CODE …
+  //
+  // Detect compact by: the cell immediately left of CODE (codeIdx-1) is TTL CBM (small float
+  // 0 < x < 10), while the cell two left (codeIdx-2) is G.W. (a larger number > TTL CBM).
+  // In the standard layout codeIdx-1 = TTL KGS which is always ≥ TTL CBM (kg > m³).
+  // Using _tentativeGw > _tentativeKgs handles lightweight items where G.W. < 10 kg.
+  const _tentativeKgs = parseNum(row[codeIdx - 1]?.trim() ?? '')
+  const _tentativeGw  = parseNum(row[codeIdx - 2]?.trim() ?? '')
+  const isCompactLayout =
+    _tentativeKgs !== null &&
+    _tentativeKgs > 0 &&
+    _tentativeKgs < 10 &&
+    _tentativeGw  !== null &&
+    _tentativeGw  > _tentativeKgs
 
-  // Right-anchored numeric fields
-  const ttKgsIdx = codeIdx - 1
-  const ttCbmIdx = codeIdx - 2
-  const gwIdx    = codeIdx - 3
-  const cbmIdx   = codeIdx - 4
+  let ttKgsIdx: number
+  let ttCbmIdx: number
+  let gwIdx: number
+  let cbmIdx: number
 
-  // Detect W+H merge: cell at codeIdx-5 contains "NUM NUM" (two numbers separated by space)
-  const cellMinus5 = row[codeIdx - 5]?.trim() ?? ''
-  const whMerge = cellMinus5.match(/^(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$/)
+  if (isCompactLayout) {
+    // Two compact variants share the same detection heuristic:
+    //
+    // A) True 23-col compact (TTL KGS column absent): CODE cell is empty or an
+    //    alphanumeric barcode placeholder; TTL KGS genuinely does not exist → ttKgsIdx = -1.
+    //
+    // B) 22-col layout (no REK column): inferSalesOrderBarcodeColumnIndex returns wi-2
+    //    which lands on TTL KGS (a plain number) rather than the empty CODE cell (which
+    //    is at wi-1 in this layout). Detect by checking codeIdx contains a numeric value.
+    const codeCellRaw = row[codeIdx]?.trim() ?? ''
+    const codeCellIsNumeric = codeCellRaw !== '' && parseNum(codeCellRaw) !== null
+    ttKgsIdx = codeCellIsNumeric ? codeIdx : -1
+    ttCbmIdx = codeIdx - 1
+    gwIdx    = codeIdx - 2
+    cbmIdx   = codeIdx - 3
+  } else {
+    ttKgsIdx = codeIdx - 1
+    ttCbmIdx = codeIdx - 2
+    gwIdx    = codeIdx - 3
+    cbmIdx   = codeIdx - 4
+  }
+
+  // Detect G.W. + TTL CBM column merge: OCR/Reducto collapses two narrow adjacent columns
+  // into a single cell like "9.8 0.76" (G.W. first, TTL CBM second) when the G.W. cell is
+  // empty (blank) and the TTL CBM cell contains two space-separated numbers.
+  const ttCbmRaw = row[ttCbmIdx]?.trim() ?? ''
+  const gwRaw = row[gwIdx]?.trim() ?? ''
+  const gwTtlCbmMerge = !gwRaw && /^(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$/.exec(ttCbmRaw)
+
+  // Detect false-CBM case: when G.W. cell is empty and the "TTL CBM" cell contains a single
+  // large number (> 5 kg), Reducto only extracted the G.W. value and the actual TTL CBM was
+  // lost. Treat the large number as G.W. rather than propagating a weight value as a volume.
+  const ttCbmIsSingleLargeGw =
+    !gwRaw && !gwTtlCbmMerge && (() => { const v = parseNum(ttCbmRaw); return v !== null && v > 5 })()
+
+  const resolvedGw: number | null = gwTtlCbmMerge
+    ? parseFloat(gwTtlCbmMerge[1])
+    : ttCbmIsSingleLargeGw ? parseNum(ttCbmRaw)
+    : (gwRaw ? parseNum(row[gwIdx]) : null)
+  const resolvedTtlCbm: number | null = gwTtlCbmMerge
+    ? parseFloat(gwTtlCbmMerge[2])
+    : ttCbmIsSingleLargeGw ? null    // actual TTL CBM is unknown when only G.W. was extracted
+    : (ttCbmRaw ? parseNum(row[ttCbmIdx]) : null)
+
+  // Detect W+H merge: the H-column cell contains "NUM NUM" (two numbers separated by space).
+  // In compact layout H is one position closer to CODE (codeIdx-4 vs codeIdx-5 in standard).
+  const hOffset = isCompactLayout ? 4 : 5
+  const cellAtH = row[codeIdx - hOffset]?.trim() ?? ''
+  const whMerge = cellAtH.match(/^(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$/)
 
   let dim_l_cm: number | null
   let dim_w_cm: number | null
@@ -609,78 +855,235 @@ function parseSalesOrderRowPositional(
   if (whMerge) {
     dim_w_cm = parseFloat(whMerge[1])
     dim_h_cm = parseFloat(whMerge[2])
-    lIdx = codeIdx - 6
+    lIdx = codeIdx - hOffset - 1
     dim_l_cm = parseNum(row[lIdx])
   } else {
-    dim_h_cm = parseNum(row[codeIdx - 5])
-    dim_w_cm = parseNum(row[codeIdx - 6])
-    lIdx = codeIdx - 7
-    dim_l_cm = parseNum(row[lIdx])
+    dim_h_cm = parseNum(row[codeIdx - hOffset])
+    // Detect L+W merge: Reducto sometimes merges the L and W columns into one cell
+    // (e.g. "43 43" or "51.5 47.5"). When detected, lIdx stays at the merged cell
+    // rather than moving one further left, which prevents amountIdx from landing on AMOUNT.
+    const cellAtW = row[codeIdx - hOffset - 1]?.trim() ?? ''
+    const lwMerge = cellAtW.match(/^(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$/)
+    if (lwMerge) {
+      dim_l_cm = parseFloat(lwMerge[1])
+      dim_w_cm = parseFloat(lwMerge[2])
+      lIdx = codeIdx - hOffset - 1
+    } else {
+      dim_w_cm = parseNum(cellAtW)
+      lIdx = codeIdx - hOffset - 2
+      dim_l_cm = parseNum(row[lIdx])
+    }
   }
 
   const amountIdx = lIdx - 1
-  const upIdx     = amountIdx - 1
-  const tqtyIdx   = upIdx - 1
-  const qtyIdx    = tqtyIdx - 1
-  const ctnIdx    = qtyIdx - 1
-  const desIdx    = ctnIdx - 1
+  const upIdx = amountIdx - 1
+  const tqtyIdx = upIdx - 1
+  const qtyIdx = tqtyIdx - 1
+  const ctnIdx = qtyIdx - 1
+  const desIdx = ctnIdx - 1
 
   if (desIdx < 1) return null
 
-  // Find ITEM_NO by scanning left side (after row number, skipping dates and ORD NO)
+  // 义乌送货单 wide layout: col0=NO, 1=DEL NO (送货单号), 2=CUS NO, 3=ITEM NO (产品货号), … 4-5=DES
+  // Some table variants omit the PHOTO column, placing DES at col4 instead of col5.
+  // Accept desIdx >= 4 so those tables still extract delivery_no and item_code from cols 1-3.
   let itemCode: string | null = null
-  for (let i = 1; i < desIdx; i++) {
-    const c = row[i]?.trim() ?? ''
-    if (!c) continue
-    if (/^\d{4}-\d{2}-\d{2}$/.test(c)) continue   // full date YYYY-MM-DD
-    if (/^20\d{2}[-\/]\d{2}/.test(c)) continue     // modern year partial date 20XX-MM
-    if (/^\d{2}-\d{2}-?$/.test(c)) continue        // 2-digit year partial YY-MM or YY-MM-
-    if (/^[A-Z]\d{2}-\d{4}$/.test(c)) continue     // ORD NO like C25-6083
-    itemCode = c
-    break
+  let delivery_no: string | null = null
+  let customer_item_ref: string | null = null
+  if (row.length >= 18 && desIdx >= 4) {
+    const delCell = row[1]?.trim() ?? ''
+    const itemCell = row[3]?.trim() ?? ''
+    const cusCell = row[2]?.trim() ?? ''
+    if (delCell && !/^\d{1,4}$/.test(delCell) && !looksLikeYiwuOrderRef(delCell)) {
+      delivery_no = delCell.replace(/\s+/g, ' ').trim()
+    }
+    if (cusCell && !/^\d{1,4}$/.test(cusCell) && cusCell.length < 120) {
+      customer_item_ref = cusCell.replace(/\s+/g, ' ').trim()
+    }
+    if (
+      itemCell &&
+      !/^\d{1,4}$/.test(itemCell) &&
+      itemCell.length < 64 &&
+      !/^\d{4}-\d{2}-\d{2}$/.test(itemCell) &&
+      !/^[A-Z]\d{2}-\d{4}$/.test(itemCell)  // skip ORD NO like C25-6083 masquerading as ITEM NO
+    ) {
+      itemCode = itemCell
+    }
+  }
+  // When row[1] is empty (Reducto omits repeated merged cells), inherit delivery_no from marks
+  if (!delivery_no && inheritedMarks) {
+    const m = inheritedMarks.trim()
+    if (looksLikeYiwuDeliveryNoRef(m)) delivery_no = m
+  }
+  const lineNoCell = row[0]?.trim() ?? ''
+  if (!itemCode) {
+    for (let i = 1; i < desIdx; i++) {
+      if (row.length >= 18 && desIdx >= 4 && (i === 1 || i === 2)) continue
+      const c = row[i]?.trim() ?? ''
+      if (!c) continue
+      // OCR sometimes repeats the row序号 in the ITEM column — never treat as SKU.
+      if (/^\d{1,4}$/.test(c) && c === lineNoCell) continue
+      if (/^\d{4}-\d{2}-\d{2}$/.test(c)) continue // full date YYYY-MM-DD
+      if (/^20\d{2}[-\/]\d{2}/.test(c)) continue // modern year partial date 20XX-MM
+      if (/^\d{2}-\d{2}-?$/.test(c)) continue // 2-digit year partial YY-MM or YY-MM-
+      if (/^[A-Z]\d{2}-\d{4}$/.test(c)) continue // ORD NO like C25-6083
+      itemCode = c
+      break
+    }
+  }
+  // Pure line-no echo landed in ITEM (wide layout rejected col3); drop so DEL/disambiguation can run.
+  if (itemCode && /^\d{1,4}$/.test(itemCode) && itemCode === lineNoCell) {
+    itemCode = null
   }
 
-  const desc = row[desIdx]?.trim() ?? ''
-  if (!desc && !itemCode) return null
+  if (itemCode && row.length >= 18 && desIdx >= 5) {
+    const fixed = disambiguateYiwuItemCodeString(itemCode, row, desIdx, delivery_no)
+    if (fixed) itemCode = fixed
+  }
 
-  const total_qty_parsed    = parseNum(row[tqtyIdx])
+  let unit: string | null = null
+  let product_name_local: string | null = null
+  let material: string | null = null
+  if (n >= 22) {
+    const u = row[n - 3]?.trim() ?? ''
+    const pn = row[n - 2]?.trim() ?? ''
+    const mat = row[n - 1]?.trim() ?? ''
+    if (u && looksLikeSalesUnitCell(u)) unit = u.replace(/\s+/g, ' ').trim()
+    if (pn && pn.length < 200 && !/^\d{12,15}$/.test(pn)) {
+      product_name_local = pn.replace(/\s+/g, ' ').trim()
+    }
+    if (mat && mat.length < 200 && !looksLikeSalesWarehouseCell(mat)) {
+      material = mat.replace(/\s+/g, ' ').trim()
+    }
+  }
+
+  const description = (row[desIdx] ?? '').trim()
+  if (!description && !itemCode) return null
+
+  const total_qty_parsed = parseNum(row[tqtyIdx])
   const total_amount_parsed = parseNum(row[amountIdx])
-  let unit_price_rmb        = parseNum(row[upIdx])
+  let unit_price_rmb = parseNum(row[upIdx])
   if (
     (unit_price_rmb === null || unit_price_rmb <= 0) &&
-    total_amount_parsed !== null && total_qty_parsed !== null && total_qty_parsed > 0
+    total_amount_parsed !== null &&
+    total_qty_parsed !== null &&
+    total_qty_parsed > 0
   ) {
     const inferred = Math.round((total_amount_parsed / total_qty_parsed) * 100) / 100
     if (isFinite(inferred) && inferred > 0) unit_price_rmb = inferred
   }
 
   const qty_per_carton = parseNum(row[qtyIdx])
+  let total_cartons_adj = parseNum(row[ctnIdx])
+  const unit_cbm_raw    = parseNum(row[cbmIdx])
+  const ttKgsVal        = ttKgsIdx >= 0 ? parseNum(row[ttKgsIdx]) : null
+
+  // Cross-validate total_cartons against independent ratios to catch Reducto anomalies where a
+  // stray value lands in the CTN cell (e.g. DH4344 ctn=252 from an adjacent column bleed, or
+  // BWT30-18 ctn=5 when qty/pkg=50).
+  //
+  // Priority (highest to lowest):
+  //   1. qty / qty_per_carton  — exact integer arithmetic, most reliable when both available
+  //   2. ttl_kgs / g_w         — standard rows with measured TTL KGS column
+  //   3. total_cbm / unit_cbm  — compact rows without TTL KGS column
+  //
+  // Only replace when the parsed value deviates by more than 3× from the derived value.
+  // Also fill in null CTN for compact rows (standard null CTN means genuinely blank in PDF).
+  const pkgCtn =
+    total_qty_parsed !== null && total_qty_parsed > 0 &&
+    qty_per_carton !== null && qty_per_carton > 0
+      ? Math.round(total_qty_parsed / qty_per_carton)
+      : null
+
+  if (pkgCtn !== null && pkgCtn > 0) {
+    if (total_cartons_adj === null) {
+      total_cartons_adj = pkgCtn
+    } else if (total_cartons_adj > pkgCtn * 3 || total_cartons_adj * 3 < pkgCtn) {
+      total_cartons_adj = pkgCtn
+    }
+  } else if (isCompactLayout) {
+    if (unit_cbm_raw !== null && unit_cbm_raw > 0 && resolvedTtlCbm !== null) {
+      const cbmCtn = Math.round(resolvedTtlCbm / unit_cbm_raw)
+      if (cbmCtn > 0) {
+        if (total_cartons_adj === null) {
+          total_cartons_adj = cbmCtn
+        } else if (total_cartons_adj > cbmCtn * 5 || total_cartons_adj * 5 < cbmCtn) {
+          total_cartons_adj = cbmCtn
+        }
+      }
+    }
+  } else if (ttKgsVal !== null && resolvedGw !== null && resolvedGw > 0) {
+    const wgtCtn = Math.round(ttKgsVal / resolvedGw)
+    if (wgtCtn > 0) {
+      if (total_cartons_adj === null) {
+        // Standard rows: fill null CTN from TTL KGS / G.W. when no other source is available
+        // (e.g. rows where QTY per carton is blank and CTN cell is empty in the HTML)
+        total_cartons_adj = wgtCtn
+      } else if (total_cartons_adj > wgtCtn * 5 || total_cartons_adj * 5 < wgtCtn) {
+        total_cartons_adj = wgtCtn
+      }
+    }
+  }
+
+  // Compact rows have no TTL KGS column → compute total_weight_kg from CTN × G.W.
+  const totalWeightKg =
+    isCompactLayout && ttKgsIdx < 0 && total_cartons_adj !== null && resolvedGw !== null
+      ? total_cartons_adj * resolvedGw
+      : ttKgsVal
+
+  // When the false-CBM path fired (G.W. leaked into TTL CBM cell, real CBM lost), recover
+  // total_cbm from the now-corrected CTN × unit_cbm so the running CBM total stays accurate.
+  let resolvedTtlCbmFinal = resolvedTtlCbm
+  if (
+    ttCbmIsSingleLargeGw &&
+    resolvedTtlCbm === null &&
+    total_cartons_adj !== null &&
+    unit_cbm_raw !== null
+  ) {
+    resolvedTtlCbmFinal = Math.round(total_cartons_adj * unit_cbm_raw * 1000) / 1000
+  }
+
+  const hasCoreNumeric =
+    (total_qty_parsed !== null && total_qty_parsed > 0) ||
+    (total_cartons_adj !== null && total_cartons_adj > 0) ||
+    (total_amount_parsed !== null && total_amount_parsed > 0) ||
+    (unit_price_rmb !== null && unit_price_rmb > 0)
+  if (!hasCoreNumeric) return null
+
+  const warehouse = inferSalesOrderWarehouseColumn(row, n, codeIdx)
 
   return {
     line_no: lineNo,
     marks: inheritedMarks,
     shop: null,
     item_code: itemCode,
-    description: desc || null,
+    source_item_no: itemCode,
+    delivery_no,
+    customer_item_ref,
+    unit,
+    product_name_local,
+    material,
+    description: description || null,
     packaging: qty_per_carton !== null ? `${qty_per_carton}pcs` : null,
     qty_per_carton,
-    total_cartons: parseNum(row[ctnIdx]),
+    total_cartons: total_cartons_adj,
     total_qty: total_qty_parsed,
     unit_price_rmb,
     total_amount_rmb: total_amount_parsed,
     dim_l_cm,
     dim_w_cm,
     dim_h_cm,
-    unit_cbm: parseNum(row[cbmIdx]),
-    total_cbm: parseNum(row[ttCbmIdx]),
-    unit_weight_kg: parseNum(row[gwIdx]),
-    total_weight_kg: parseNum(row[ttKgsIdx]),
-    barcode: barcodeVal || null,
-    warehouse: row[n - 1]?.trim() || null,
+    unit_cbm: unit_cbm_raw,
+    total_cbm: resolvedTtlCbmFinal,
+    unit_weight_kg: resolvedGw,
+    total_weight_kg: totalWeightKg,
+    barcode: barcodeVal,
+    warehouse,
     box_no_start: null,
     box_no_end: null,
     section,
     remarks: rekValue,
+    source_cells: null,
   }
 }
 
@@ -722,6 +1125,199 @@ function parseSalesOrderGridPositional(
   }
 
   return { products, lastMarks: inheritedMarks, exitSection: defaultSection, sectionSubtotals: [] }
+}
+
+/**
+ * 义乌佰世威-style multi-column 送货单: fingerprint thead labels so we can document behaviour.
+ * (Merge pass runs for all sales_order docs; fingerprint reserved for future template overrides.)
+ */
+export function isYiwuStyleDeliverySalesTableHeader(grid: string[][], headerRowIdx: number): boolean {
+  if (headerRowIdx < 0 || headerRowIdx >= grid.length) return false
+  const joined = (grid[headerRowIdx] ?? [])
+    .map(c => c.replace(/\s+/g, ' ').trim())
+    .join(' ')
+  const lower = joined.toLowerCase()
+  const cnHits = [
+    /送货单号|del\s*no/i.test(joined),
+    /产品货号|item\s*no/i.test(joined),
+    /描述|des\.?/i.test(lower),
+    /总数量|t\.?\s*qty/i.test(lower),
+    /仓库|w\.?\s*h/i.test(joined),
+  ].filter(Boolean).length
+  return cnHits >= 3
+}
+
+function normalizeSalesOrderItemKey(code: string | null | undefined): string {
+  return (code ?? '').replace(/\s+/g, '').toUpperCase().replace(/[^A-Z0-9-]/g, '')
+}
+
+/** Continuation / rowspan-split rows: OCR puts "22" or "33555551" in DES, or leaves DES empty on follow-on `<tr>`. */
+function isContinuationNoiseDescription(desc: string): boolean {
+  const d = desc.replace(/\s+/g, ' ').trim()
+  if (!d) return true
+  if (/^\d{1,15}$/.test(d)) return true
+  if (/^\[\s*\](\s*\[\s*\])*$/i.test(d)) return true
+  return false
+}
+
+function isSyntheticPipelineRow(p: ExtractedProduct): boolean {
+  const c = (p.item_code ?? '').trim()
+  if (
+    c === FOOTER_ITEM_CODE ||
+    c === SECTION_SUBTOTAL_ITEM_CODE ||
+    c === FULL_EXTRACT_ITEM_CODE
+  ) {
+    return true
+  }
+  if ((p.remarks ?? '').includes('full_extract:')) return true
+  return false
+}
+
+function mergeSalesOrderDescriptionChunks(a: string | null | undefined, b: string | null | undefined): string | null {
+  const pa = (a ?? '').trim()
+  const pb = (b ?? '').trim()
+  if (!pb || isContinuationNoiseDescription(pb)) return pa || null
+  if (!pa) return pb || null
+  if (pa.includes(pb.slice(0, Math.min(24, pb.length)))) return pa
+  return `${pa} ${pb}`.replace(/\s+/g, ' ').trim()
+}
+
+function pickMergedNumeric(
+  a: number | null | undefined,
+  b: number | null | undefined
+): number | null | undefined {
+  const av = a ?? 0
+  const bv = b ?? 0
+  if (av > 0) return a
+  if (bv > 0) return b
+  return a ?? b ?? null
+}
+
+function pickMergedStr(
+  a: string | null | undefined,
+  b: string | null | undefined
+): string | null {
+  const ta = (a ?? '').trim()
+  const tb = (b ?? '').trim()
+  if (ta) return ta
+  if (tb) return tb
+  return null
+}
+
+function shouldMergeSalesOrderContinuation(prev: ExtractedProduct, curr: ExtractedProduct): boolean {
+  if (isSyntheticPipelineRow(prev) || isSyntheticPipelineRow(curr)) return false
+
+  const pk = normalizeSalesOrderItemKey(prev.source_item_no ?? prev.item_code)
+  const ck = normalizeSalesOrderItemKey(curr.source_item_no ?? curr.item_code)
+  if (!pk || pk !== ck) return false
+
+  const pm = (prev.marks ?? '').trim()
+  const cm = (curr.marks ?? '').trim()
+  if (pm && cm && pm !== cm) return false
+
+  const pd = (prev.description ?? '').trim()
+  const cd = (curr.description ?? '').trim()
+
+  const prevHasNums =
+    (prev.total_qty ?? 0) > 0 ||
+    (prev.total_amount_rmb ?? 0) > 0 ||
+    (prev.unit_price_rmb ?? 0) > 0
+  const currHasNums =
+    (curr.total_qty ?? 0) > 0 ||
+    (curr.total_amount_rmb ?? 0) > 0 ||
+    (curr.unit_price_rmb ?? 0) > 0
+
+  // Junk-only DES tail (same ITEM NO): absorb numerics into the row that has the real title text.
+  if (cd.length > 0 && isContinuationNoiseDescription(cd) && currHasNums) {
+    const prevQtyPriceAmt =
+      (prev.total_qty ?? 0) > 0 &&
+      (prev.unit_price_rmb ?? 0) > 0 &&
+      (prev.total_amount_rmb ?? 0) > 0
+    if (prevQtyPriceAmt && pd.length >= 4) return false
+    if (pd.length >= 6 && !isContinuationNoiseDescription(pd)) return true
+    if (!pd || pd.length < 4) return true
+    if (!prevHasNums) return true
+  }
+
+  // Title on prev split across rows: prev has no / short DES, curr carries text.
+  if ((!pd || pd.length < 4) && cd.length >= 6 && !isContinuationNoiseDescription(cd)) return true
+
+  // Prev has title but missing qty/amount; curr row supplies metrics (possibly noise DES).
+  if (pd.length >= 6 && !prevHasNums && currHasNums && (!cd || isContinuationNoiseDescription(cd) || cd.length < 4)) {
+    return true
+  }
+
+  return false
+}
+
+function mergeTwoSalesOrderContinuationRows(prev: ExtractedProduct, curr: ExtractedProduct): ExtractedProduct {
+  const tag = 'repair:merged_continuation_row'
+  const remarks =
+    prev.remarks && curr.remarks
+      ? `${prev.remarks};${tag}`
+      : prev.remarks
+        ? `${prev.remarks};${tag}`
+        : curr.remarks
+          ? `${curr.remarks};${tag}`
+          : tag
+
+  const mergedSku = pickMergedStr(
+    prev.source_item_no ?? prev.item_code,
+    curr.source_item_no ?? curr.item_code
+  )
+
+  return {
+    ...prev,
+    description: mergeSalesOrderDescriptionChunks(prev.description, curr.description),
+    delivery_no: pickMergedStr(prev.delivery_no, curr.delivery_no),
+    customer_item_ref: pickMergedStr(prev.customer_item_ref, curr.customer_item_ref),
+    item_code: mergedSku,
+    source_item_no: mergedSku,
+    unit: pickMergedStr(prev.unit, curr.unit),
+    product_name_local: mergeSalesOrderDescriptionChunks(
+      prev.product_name_local,
+      curr.product_name_local
+    ),
+    material: pickMergedStr(prev.material, curr.material),
+    packaging: prev.packaging ?? curr.packaging,
+    qty_per_carton: pickMergedNumeric(prev.qty_per_carton, curr.qty_per_carton) ?? null,
+    total_cartons: pickMergedNumeric(prev.total_cartons, curr.total_cartons) ?? null,
+    total_qty: pickMergedNumeric(prev.total_qty, curr.total_qty) ?? null,
+    unit_price_rmb: pickMergedNumeric(prev.unit_price_rmb, curr.unit_price_rmb) ?? null,
+    total_amount_rmb: pickMergedNumeric(prev.total_amount_rmb, curr.total_amount_rmb) ?? null,
+    dim_l_cm: pickMergedNumeric(prev.dim_l_cm, curr.dim_l_cm) ?? null,
+    dim_w_cm: pickMergedNumeric(prev.dim_w_cm, curr.dim_w_cm) ?? null,
+    dim_h_cm: pickMergedNumeric(prev.dim_h_cm, curr.dim_h_cm) ?? null,
+    unit_cbm: pickMergedNumeric(prev.unit_cbm, curr.unit_cbm) ?? null,
+    total_cbm: pickMergedNumeric(prev.total_cbm, curr.total_cbm) ?? null,
+    unit_weight_kg: pickMergedNumeric(prev.unit_weight_kg, curr.unit_weight_kg) ?? null,
+    total_weight_kg: pickMergedNumeric(prev.total_weight_kg, curr.total_weight_kg) ?? null,
+    barcode: prev.barcode ?? curr.barcode,
+    warehouse: prev.warehouse ?? curr.warehouse,
+    shop: prev.shop ?? curr.shop,
+    source_cells: prev.source_cells ?? curr.source_cells ?? null,
+    remarks,
+  }
+}
+
+/** Merge rowspan/OCR-split continuation rows (same ITEM NO, fragmented DES / metrics). */
+export function mergeSalesOrderContinuationRows(products: ExtractedProduct[]): ExtractedProduct[] {
+  if (products.length < 2) return products
+  const out: ExtractedProduct[] = []
+  for (let i = 0; i < products.length; i++) {
+    const curr = products[i]
+    if (out.length === 0) {
+      out.push(curr)
+      continue
+    }
+    const prev = out[out.length - 1]
+    if (shouldMergeSalesOrderContinuation(prev, curr)) {
+      out[out.length - 1] = mergeTwoSalesOrderContinuationRows(prev, curr)
+      continue
+    }
+    out.push(curr)
+  }
+  return out
 }
 
 /** When a header cell has colspan, expandHtmlTable duplicates the label across spanned columns. */
@@ -1327,6 +1923,20 @@ function buildRawFromRow(
   return raw
 }
 
+function buildSalesOrderSourceCells(
+  alignedRow: string[],
+  colMap: Map<number, ProductField | 'skip'>
+): Record<string, string> | null {
+  const out: Record<string, string> = {}
+  for (const [idx, field] of colMap) {
+    if (field === 'skip') continue
+    const cell = (alignedRow[idx] ?? '').trim()
+    if (!cell) continue
+    out[field] = cell
+  }
+  return Object.keys(out).length > 0 ? out : null
+}
+
 /** Row is probably a 2nd header line (sub-headers like U.PRICE under a group row), not data. */
 function isLikelySubHeaderRow(row: string[] | undefined, docType: DocType): boolean {
   if (!row?.length) return false
@@ -1577,6 +2187,7 @@ function recoverSalesOrderFlatRow(
     marks: marks || inheritedMarks,
     shop: null,
     item_code: item,
+    source_item_no: item,
     description: desc,
     packaging: null,
     qty_per_carton: null,
@@ -1597,6 +2208,12 @@ function recoverSalesOrderFlatRow(
     box_no_end: null,
     section,
     remarks: 'full_extract:flattened_sales_order_row',
+    delivery_no: null,
+    customer_item_ref: null,
+    unit: null,
+    product_name_local: null,
+    material: null,
+    source_cells: null,
   }
   product = fixCollapsedSalesMetricsFromDescription(product)
   product = fixContinuationSalesMetricsFromDescription(product)
@@ -1750,7 +2367,11 @@ function parseGridToProducts(
     // Build raw field map — normalize row length first.
     // Handles both overflow (extra desc cells) and underflow (missing desc cells when header
     // uses colspan, as in 新多 MAG-510-3 where colspan=3 header gets only 2 desc cells).
-    const raw = buildRawFromRow(normalizeRowToColMap(row, colMap, docType), colMap)
+    const alignedRow = normalizeRowToColMap(row, colMap, docType)
+    const raw = buildRawFromRow(alignedRow, colMap)
+    if (docType === 'sales_order') {
+      disambiguateYiwuSalesOrderRawFields(raw, alignedRow, colMap)
+    }
 
     // Yellow / rolled section subtotal bars (CTNS+CBM+KGS+¥).
     // Capture their values for section-level reconciliation before skipping/emitting.
@@ -1806,6 +2427,34 @@ function parseGridToProducts(
     }
 
     let product = rawToProduct(raw, currentSection, lineNo, prevMarks)
+    if (docType === 'sales_order' && colMap.size > 0) {
+      const snap = buildSalesOrderSourceCells(alignedRow, colMap)
+      if (snap) product = { ...product, source_cells: snap }
+    }
+    if (docType === 'sales_order') {
+      // When the HTML col-map path glues metrics into `description` (OCR/merged <td>), the same
+      // `row[]` often still has 20+ cells — re-parse with the right-anchored 义乌 layout.
+      const positional = parseSalesOrderRowPositional(row, currentSection, lineNo, prevMarks)
+      if (positional) {
+        const mappedCoherent =
+          (product.total_qty ?? 0) > 0 &&
+          (product.unit_price_rmb ?? 0) > 0 &&
+          (product.total_amount_rmb ?? 0) > 0
+        if (!mappedCoherent) {
+          product = {
+            ...positional,
+            marks: product.marks ?? positional.marks ?? prevMarks,
+            shop: positional.shop ?? product.shop,
+            source_cells: product.source_cells ?? positional.source_cells,
+            line_no: lineNo,
+            section: currentSection,
+            remarks: product.remarks
+              ? `${product.remarks};repair:positional_row_override`
+              : 'repair:positional_row_override',
+          }
+        }
+      }
+    }
     if (docType === 'sales_order') {
       product = fixCollapsedSalesMetricsFromDescription(product)
       product = fixContinuationSalesMetricsFromDescription(product)
@@ -2125,11 +2774,23 @@ function rawToProduct(
     }
   }
 
+  const source_item_no = parseStr(raw['source_item_no'])
+  const item_code_raw = parseStr(raw['item_code'])
+  const sku = resolveSalesOrderSkuFields(source_item_no, item_code_raw)
+
   return {
     line_no: lineNo,
     marks,
     shop: parseStr(raw['shop']),
-    item_code: parseStr(raw['item_code']),
+    item_code: sku.item_code,
+    source_item_no: sku.source_item_no,
+    delivery_no: parseStr(raw['delivery_no']) ?? (
+      marks && looksLikeYiwuDeliveryNoRef(marks) ? marks : null
+    ),
+    customer_item_ref: parseStr(raw['customer_item_ref']),
+    unit: parseStr(raw['unit']),
+    product_name_local: parseStr(raw['product_name_local']),
+    material: parseStr(raw['material']),
     description: parseStr(raw['description']),
     packaging: parseStr(raw['packaging']),
     qty_per_carton,
@@ -2150,6 +2811,7 @@ function rawToProduct(
     box_no_end,
     section,
     remarks: parseStr(raw['remarks']),
+    source_cells: null,
   }
 }
 

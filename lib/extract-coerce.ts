@@ -12,6 +12,7 @@
  */
 
 import type { ExtractedDocument, ExtractedProduct } from './claude-extractor'
+import { resolveSalesOrderSkuFields } from './sales-order-sanitize'
 import { parseFiniteInt, parseFiniteNumber } from './numeric-parse'
 
 export function coerceProductArray(raw: unknown): ExtractedProduct[] {
@@ -25,7 +26,10 @@ export function coerceProduct(raw: unknown): ExtractedProduct {
     line_no: parseFiniteInt(p['line_no']),
     marks: coerceStr(p['marks']),
     shop: coerceStr(p['shop']),
-    item_code: coerceStr(p['item_code']),
+    ...(() => {
+      const sku = resolveSalesOrderSkuFields(coerceStr(p['source_item_no']), coerceStr(p['item_code']))
+      return { item_code: sku.item_code, source_item_no: sku.source_item_no }
+    })(),
     description: coerceStr(p['description']),
     packaging: coerceStr(p['packaging']),
     qty_per_carton: coerceNum(p['qty_per_carton']),
@@ -46,6 +50,12 @@ export function coerceProduct(raw: unknown): ExtractedProduct {
     box_no_end: parseFiniteInt(p['box_no_end']),
     section: coerceSection(p['section']),
     remarks: coerceStr(p['remarks']),
+    delivery_no: coerceStr(p['delivery_no']),
+    customer_item_ref: coerceStr(p['customer_item_ref']),
+    unit: coerceStr(p['unit']),
+    product_name_local: coerceStr(p['product_name_local']),
+    material: coerceStr(p['material']),
+    source_cells: coerceStrRecordMap(p['source_cells']),
   }
 }
 
@@ -104,6 +114,16 @@ function coerceStr(v: unknown): string | null {
     return s === '' || s === 'null' || s === 'undefined' ? null : s
   }
   return null
+}
+
+function coerceStrRecordMap(v: unknown): Record<string, string> | null {
+  if (!isObj(v)) return null
+  const out: Record<string, string> = {}
+  for (const [k, val] of Object.entries(v)) {
+    const s = coerceStr(val)
+    if (s) out[k] = s
+  }
+  return Object.keys(out).length > 0 ? out : null
 }
 
 function coerceSection(v: unknown): ExtractedProduct['section'] {

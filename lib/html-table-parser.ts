@@ -54,8 +54,14 @@ export function expandHtmlTable(tableHtml: string): string[][] {
 }
 
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, ' ')
+  // Use a sentinel to mark <br/> positions before stripping all tags.
+  // We then rejoin fragments with context-aware spacing: if the previous
+  // fragment ends with a letter and the next fragment is 1-2 lowercase
+  // characters, join without a space (word wrapped mid-syllable by column
+  // width — e.g. "Bakewar" + "e" → "Bakeware", "displ" + "ay" → "display").
+  const BR = '\x00'
+  const withMarkers = html.replace(/<br\s*\/?>/gi, BR)
+  const plain = withMarkers
     .replace(/<[^>]+>/g, '')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -65,6 +71,20 @@ export function htmlToText(html: string): string {
     .replace(/&nbsp;/g, ' ')
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\s+/g, ' ')
-    .trim()
+
+  const fragments = plain.split(BR).map(f => f.replace(/\s+/g, ' ').trim())
+  let result = ''
+  for (const frag of fragments) {
+    if (!frag) continue
+    if (!result) {
+      result = frag
+      continue
+    }
+    // Word-continuation heuristic: previous fragment ends with a letter and
+    // the next fragment is 1-2 lowercase characters — treat as mid-word wrap.
+    const prevEndsLetter = /[a-zA-Z]$/.test(result)
+    const nextIsContinuation = /^[a-z]{1,2}$/.test(frag)
+    result = prevEndsLetter && nextIsContinuation ? result + frag : result + ' ' + frag
+  }
+  return result.replace(/\s+/g, ' ').trim()
 }

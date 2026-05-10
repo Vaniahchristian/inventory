@@ -35,8 +35,9 @@ export function getSalesOrderPrompt(ocrText: string): string {
   return `You are a strict data extraction engine for Chinese sales orders (销售单).
 
 The OCR text below was extracted from a multi-column PDF table.
-Columns in the source are: 序号 (line_no), 订单日期 (date), 销售单号 (order_no),
-客户货号 (customer_item_no), 产品货号 (item_code), 描述 (description),
+Columns in the source are: 序号 (line_no), 订单日期 (date), 销售单号 / ORD NO (marks),
+送货单号 / DEL NO (delivery_no), 客户货号 / CUS NO (customer_item_ref),
+产品货号 / ITEM NO (source_item_no + item_code), 描述 (description),
 总箱数 (total_cartons), 每箱数量 (qty_per_carton), 总数量 (total_qty),
 单价 (unit_price), 金额 (total_amount), 长/宽/高 (dimensions cm),
 体积 (unit_cbm), 重量 (unit_weight_kg), 总体积 (total_cbm),
@@ -59,7 +60,14 @@ Return a JSON object with EXACTLY this structure:
   "products": [
     {
       "line_no": 1,
+      "marks": null,
+      "delivery_no": null,
+      "customer_item_ref": null,
+      "source_item_no": "",
       "item_code": "",
+      "unit": null,
+      "product_name_local": null,
+      "material": null,
       "description": "",
       "qty_per_carton": null,
       "total_cartons": null,
@@ -83,6 +91,8 @@ Return a JSON object with EXACTLY this structure:
 ${SHARED_RULES}
 
 SALES ORDER SPECIFIC:
+- delivery_no is 送货单号 / DEL NO when present; marks holds ORD NO / 销售单号 when present (do not mix DEL into marks).
+- source_item_no and item_code both hold the 产品货号 / ITEM NO manufacturer SKU when present.
 - item_code is the 产品货号 column (e.g. "CPK-014", "BW20-15/1C", "GS2105-01")
 - warehouse is the 仓位 column (e.g. "浦江仓", "东阳仓", "3仓")
 - footer_totals: look for a TOTAL row at the bottom of the document with summed values

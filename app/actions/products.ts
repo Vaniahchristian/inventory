@@ -67,6 +67,13 @@ const DOCUMENT_ITEM_SELECT = [
   'line_no',
   'marks',
   'item_code',
+  'source_item_no',
+  'delivery_no',
+  'customer_item_ref',
+  'unit',
+  'product_name_local',
+  'material',
+  'source_cells',
   'description',
   'shop',
   'packaging',
@@ -87,6 +94,7 @@ const DOCUMENT_ITEM_SELECT = [
   'box_no_end',
   'section',
   'remarks',
+  'validation_flags',
   'created_at',
   'documents(source_file_name, client_id, container_no, document_date, doc_number, created_at)',
 ].join(', ')
@@ -121,7 +129,9 @@ function applyDocumentItemsListFilters(qb: any, filters: DocumentItemsListFilter
   const raw = filters.search?.trim()
   if (raw) {
     const p = `%${escapeIlikePattern(raw)}%`
-    q = q.or(`marks.ilike.${p},item_code.ilike.${p},description.ilike.${p},shop.ilike.${p}`)
+    q = q.or(
+      `marks.ilike.${p},item_code.ilike.${p},source_item_no.ilike.${p},description.ilike.${p},shop.ilike.${p},delivery_no.ilike.${p},customer_item_ref.ilike.${p},product_name_local.ilike.${p},material.ilike.${p},unit.ilike.${p}`
+    )
   }
   return q
 }
@@ -975,6 +985,12 @@ export async function updateDocumentItem(id: string, formData: FormData): Promis
   const update: Record<string, unknown> = {
     marks: ((formData.get('marks') as string) || '').trim() || null,
     item_code: ((formData.get('item_code') as string) || '').trim() || null,
+    source_item_no: ((formData.get('source_item_no') as string) || '').trim() || null,
+    delivery_no: ((formData.get('delivery_no') as string) || '').trim() || null,
+    customer_item_ref: ((formData.get('customer_item_ref') as string) || '').trim() || null,
+    unit: ((formData.get('unit') as string) || '').trim() || null,
+    product_name_local: ((formData.get('product_name_local') as string) || '').trim() || null,
+    material: ((formData.get('material') as string) || '').trim() || null,
     description: ((formData.get('description') as string) || '').trim() || null,
     shop: ((formData.get('shop') as string) || '').trim() || null,
     packaging: ((formData.get('packaging') as string) || '').trim() || null,
@@ -1319,6 +1335,7 @@ async function saveNormalizedDocument(payload: {
         validation_flags: computeValidationFlags(row, {
           requirePacking: payload.importMeta?.document_type !== 'sales_order',
         }),
+        source_cells: {},
       }
     })
 
