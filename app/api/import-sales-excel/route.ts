@@ -135,6 +135,16 @@ export async function POST(req: Request) {
         `Import service returned HTTP ${upstream.status}`
       return NextResponse.json(body ?? { error: msg }, { status: upstream.status })
     }
+    // Python service returns { document_id, items_inserted, ... } on success
+    // Convert to { success: true } so frontend shows completion message
+    if (body && typeof body === 'object' && 'document_id' in body && 'items_inserted' in body) {
+      return NextResponse.json({
+        success: true,
+        message: `Imported ${body.items_inserted} rows (document: ${body.document_id})`,
+        document_id: body.document_id,
+        items_inserted: body.items_inserted,
+      })
+    }
     return NextResponse.json(body)
   }
 
