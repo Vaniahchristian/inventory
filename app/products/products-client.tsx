@@ -37,6 +37,7 @@ import {
 import { isFullExtractBanner, isSubtotalBanner, isFooterBanner } from '@/lib/full-extract'
 import type { DocumentItemsPageStats } from '@/lib/products-list'
 import { importPdfDirect } from '@/lib/export'
+import type { ExtractedDocument } from '@/lib/claude-extractor'
 import { useImportStore } from '@/lib/import-store'
 import { shouldPublishExtractedProduct } from '@/lib/sections'
 import type { DocumentItem, ImportMeta, ProductDocumentRef } from '@/lib/types'
@@ -227,6 +228,63 @@ function parseSectionLabelFromRemarks(remarks: string | null | undefined): strin
   } catch {
     return encoded || null
   }
+}
+
+function mapExtractPayloadToImport(
+  products: unknown[],
+  doc: unknown,
+  sourceFileName: string,
+  source_file_type: ImportMeta['source_file_type']
+): { rows: Record<string, unknown>[]; meta: ImportMeta } {
+  const d = doc as ExtractedDocument
+  const footer = d.footer_totals
+  const rows = products
+    .filter((p: any) => !isFullExtractBanner(p) && !isSubtotalBanner(p) && !isFooterBanner(p))
+    .map((p: any) => ({
+      MARKS: String(p.marks ?? p.item_code ?? ''),
+      'SHOP#': String(p.shop ?? ''),
+      'ITEM NO.': String(p.line_no ?? ''),
+      'DESCRIPTION OF GOODS': String(p.description ?? ''),
+      PACKING: String(p.packaging ?? ''),
+      'T.CTN': p.total_cartons != null ? `${p.total_cartons}CTNS` : '',
+      'T.QTY': p.total_qty != null ? `${p.total_qty}pcs` : '',
+      'UNIT CBM': p.unit_cbm != null ? `${p.unit_cbm}CBM` : '',
+      'T.CBM': p.total_cbm != null ? `${p.total_cbm}CBM` : '',
+      'UNIT WEIGHT': p.unit_weight_kg != null ? `${p.unit_weight_kg}KGS` : '',
+      'T.WEIGHT': p.total_weight_kg != null ? `${p.total_weight_kg}KGS` : '',
+      'U.PRICE (RMB)': p.unit_price_rmb != null ? `¥${p.unit_price_rmb}` : '',
+      'T.AMOUNT': p.total_amount_rmb != null ? `¥${p.total_amount_rmb}` : '',
+      __section: String(p.section ?? 'shipped'),
+      __section_label: parseSectionLabelFromRemarks(p.remarks),
+      REMARKS: String(p.remarks ?? ''),
+      __source: 'claude_core',
+      __needs_llm: 'false',
+    }))
+  const normalizedDocumentType: ImportMeta['document_type'] =
+    d.document_type === 'sales_order' || d.document_type === 'container_manifest'
+      ? d.document_type
+      : 'container_manifest'
+  const meta: ImportMeta = {
+    source_file_name: sourceFileName,
+    source_file_type,
+    document_type: normalizedDocumentType,
+    client_details: d.client_id ?? null,
+    container_no: d.container_no ?? null,
+    total_carton: footer?.total_cartons ?? null,
+    total_cbm: footer?.total_cbm ?? null,
+    total_weight_kgs: footer?.total_weight_kg ?? null,
+    total_cost_rmb: footer?.total_amount_rmb ?? null,
+    total_cost_usd: footer?.total_amount_usd ?? null,
+    payment_date: null,
+    payment_usd: null,
+    goods_balance_usd: null,
+    credit_support_usd: null,
+    pivoc_usd: null,
+    freight_usd: null,
+    total_balance_usd: null,
+    exchange_rate: null,
+  }
+  return { rows, meta }
 }
 
 /**
@@ -787,51 +845,13 @@ export function ProductsClient({
           { fullExtract: true }
         )
         const { products, document: doc } = result
-        const rows = products
-          .filter((p: any) => !isFullExtractBanner(p) && !isSubtotalBanner(p) && !isFooterBanner(p))
-          .map((p: any) => ({
-            MARKS: String(p.marks ?? p.item_code ?? ''),
-            'SHOP#': String(p.shop ?? ''),
-            'ITEM NO.': String(p.line_no ?? ''),
-            'DESCRIPTION OF GOODS': String(p.description ?? ''),
-            PACKING: String(p.packaging ?? ''),
-            'T.CTN': p.total_cartons != null ? `${p.total_cartons}CTNS` : '',
-            'T.QTY': p.total_qty != null ? `${p.total_qty}pcs` : '',
-            'UNIT CBM': p.unit_cbm != null ? `${p.unit_cbm}CBM` : '',
-            'T.CBM': p.total_cbm != null ? `${p.total_cbm}CBM` : '',
-            'UNIT WEIGHT': p.unit_weight_kg != null ? `${p.unit_weight_kg}KGS` : '',
-            'T.WEIGHT': p.total_weight_kg != null ? `${p.total_weight_kg}KGS` : '',
-            'U.PRICE (RMB)': p.unit_price_rmb != null ? `¥${p.unit_price_rmb}` : '',
-            'T.AMOUNT': p.total_amount_rmb != null ? `¥${p.total_amount_rmb}` : '',
-            __section: String(p.section ?? 'shipped'),
-            __section_label: parseSectionLabelFromRemarks(p.remarks),
-            REMARKS: String(p.remarks ?? ''),
-            __source: 'claude_core',
-            __needs_llm: 'false',
-          }))
+        const { rows, meta } = mapExtractPayloadToImport(products, doc, file.name, 'pdf')
         if (rows.length === 0) {
           toast.error('PDF processed but no product rows found')
           failImport('No product rows found')
           return
         }
         updateProgress(92, `Saving ${rows.length} rows…`)
-        const normalizedDocumentType: ImportMeta['document_type'] =
-          doc.document_type === 'sales_order' || doc.document_type === 'container_manifest'
-            ? doc.document_type : 'container_manifest'
-        const meta: ImportMeta = {
-          source_file_name: file.name, source_file_type: 'pdf',
-          document_type: normalizedDocumentType,
-          client_details: doc.client_id ?? null,
-          container_no: doc.container_no ?? null,
-          total_carton: doc.footer_totals?.total_cartons ?? null,
-          total_cbm: doc.footer_totals?.total_cbm ?? null,
-          total_weight_kgs: doc.footer_totals?.total_weight_kg ?? null,
-          total_cost_rmb: doc.footer_totals?.total_amount_rmb ?? null,
-          total_cost_usd: doc.footer_totals?.total_amount_usd ?? null,
-          payment_date: null, payment_usd: null, goods_balance_usd: null,
-          credit_support_usd: null, pivoc_usd: null, freight_usd: null,
-          total_balance_usd: null, exchange_rate: null,
-        }
         startTransition(async () => {
           try {
             await importProducts(rows, meta)
@@ -849,7 +869,57 @@ export function ProductsClient({
       return
     }
 
-    toast.info('For PDFs use Live View. CSV/Excel import writes to a separate products table.')
+    const isSalesSheet =
+      /\.xlsx$/i.test(file.name) || /\.xls$/i.test(file.name) || /\.csv$/i.test(file.name)
+    if (isSalesSheet) {
+      try {
+        startImport(file.name)
+        updateProgress(25, 'Submitting sales spreadsheet…')
+        const fd = new FormData()
+        fd.append('file', file)
+        const res = await fetch('/api/import-sales-excel', { method: 'POST', body: fd })
+        const data = await res.json().catch(() => ({})) as Record<string, unknown>
+
+        if (!res.ok) {
+          throw new Error(typeof data.error === 'string' ? data.error : `Import failed (HTTP ${res.status})`)
+        }
+
+        const productsRaw = data.products
+        const documentRaw = data.document
+        if (Array.isArray(productsRaw) && documentRaw && typeof documentRaw === 'object') {
+          const { rows, meta } = mapExtractPayloadToImport(productsRaw, documentRaw, file.name, 'excel_or_csv')
+          if (rows.length === 0) {
+            toast.error('Import returned no product rows')
+            failImport('No product rows returned')
+          } else {
+            updateProgress(92, `Saving ${rows.length} rows…`)
+            startTransition(async () => {
+              try {
+                await importProducts(rows, meta)
+                toast.success(`Imported ${rows.length} rows`)
+                router.refresh()
+              } catch (err: unknown) {
+                toast.error(err instanceof Error ? err.message : 'Save failed')
+              } finally {
+                finishImport()
+              }
+            })
+          }
+        } else if (data.success === true) {
+          toast.success(typeof data.message === 'string' ? data.message : 'Sales spreadsheet submitted successfully')
+          finishImport()
+        } else {
+          throw new Error(typeof data.error === 'string' ? data.error : 'Unexpected response from sales import service')
+        }
+      } catch (err: unknown) {
+        toast.error(err instanceof Error ? err.message : 'Failed to import spreadsheet')
+        failImport(String(err))
+      }
+      e.target.value = ''
+      return
+    }
+
+    toast.info('Use PDF for container manifests, or .xlsx / .xls / .csv for sales / 送货单 files.')
     e.target.value = ''
   }
 
@@ -909,7 +979,7 @@ export function ProductsClient({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,image/*"
+            accept=".pdf,image/*,.xlsx,.xls,.csv"
             className="hidden"
             onChange={handleImport}
           />

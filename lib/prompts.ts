@@ -16,8 +16,37 @@ export function detectDocType(lines: string[]): DocType {
 }
 
 export function detectDocTypeFromFilename(filename: string): DocType {
-  const name = filename.toLowerCase()
-  if (name.includes('销售单') || name.includes('sales') || name.includes('order')) return 'sales_order'
+  const base = filename.toLowerCase().split(/[/\\]/).pop() ?? filename.toLowerCase()
+  const salesSignals =
+    base.includes('销售单') ||
+    base.includes('送货单') ||
+    /\bsales[_-]?order\b/i.test(base) ||
+    base.includes('sales')
+  if (salesSignals) return 'sales_order'
+  return 'container_manifest'
+}
+
+/**
+ * How we pick `sales_order` vs `container_manifest` for HTML-table parsing after Reducto.
+ * Filename is authoritative for sales uploads when chunks lack a visible title row;
+ * chunks that clearly look like a SANCARGO container manifest override a generic "order" filename.
+ */
+export function resolveHtmlParserDocType(chunkPlainText: string, fileName: string): DocType {
+  const headerBlob = chunkPlainText.replace(/\s+/g, ' ').slice(0, 24_000).toUpperCase()
+  const stronglyContainer =
+    headerBlob.includes('CONTAINER NO') &&
+    (headerBlob.includes('CLIENT DETAILS') || headerBlob.includes('SANCARGO'))
+  const fileType = detectDocTypeFromFilename(fileName)
+
+  if (fileType === 'sales_order') {
+    if (stronglyContainer) return 'container_manifest'
+    return 'sales_order'
+  }
+
+  const lines = chunkPlainText.split(/\r?\n/).map(l => l.trim()).filter(Boolean).slice(0, 140)
+  const textType = detectDocType(lines)
+  if (textType !== 'unknown') return textType
+  if (fileType !== 'unknown') return fileType
   return 'container_manifest'
 }
 

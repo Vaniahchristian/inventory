@@ -84,6 +84,16 @@ export function isUnknownSectionBanner(raw: string): boolean {
   if (/MAG-\d{3}-\d+|MS-\d{3}-\d+/i.test(text) && (/¥|￥/.test(text) || /\bCBM\b|\bKGS\b/i.test(text))) return false
 
   const upper = text.toUpperCase()
+  if (/^\d{1,4}\s/.test(upper)) {
+    const tokens = upper.split(/\s+/).filter(Boolean)
+    let numericTailLen = 0
+    for (let i = tokens.length - 1; i >= 0 && numericTailLen < 5; i--) {
+      if (/^\d+(?:\.\d+)?$/.test(tokens[i]!)) numericTailLen++
+      else break
+    }
+    if (numericTailLen >= 3) return false
+  }
+
   const wordCount = upper.split(' ').filter(Boolean).length
   const hasMetricTokens = /\b(PCS\/CTN|CTNS?|CBM|KGS?|USD|RMB)\b/.test(upper)
   const alphaHeavy = /[A-Z\u4E00-\u9FFF]/.test(upper)

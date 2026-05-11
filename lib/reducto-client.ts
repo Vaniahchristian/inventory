@@ -6,7 +6,7 @@ import {
   type SectionSubtotal,
 } from './reducto-html-parser'
 import { coerceDocument, coerceProductArray } from './extract-coerce'
-import { detectDocTypeFromFilename, detectDocType } from './prompts'
+import { resolveHtmlParserDocType } from './prompts'
 import { CONTAINER_COLUMN_ORDER } from './column-map'
 
 const REDUCTO_BASE = 'https://platform.reducto.ai'
@@ -30,6 +30,12 @@ const REDUCTO_EXTRACT_MAX_ATTEMPTS = Math.max(
   1,
   Number(process.env.REDUCTO_EXTRACT_MAX_ATTEMPTS ?? 2)
 )
+
+/** Agentic table enhance can vary between runs — set REDUCTO_PARSE_AGENTIC_TABLE=0 for stabler HTML. */
+function parseBodyUsesAgenticTable(): boolean {
+  const v = (process.env.REDUCTO_PARSE_AGENTIC_TABLE ?? '1').toLowerCase().trim()
+  return v !== '0' && v !== 'false' && v !== 'off' && v !== 'no'
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -83,8 +89,9 @@ async function uploadFile(
       headers: { Authorization: `Bearer ${apiKey}` },
       body: uploadForm,
     })
-  } catch (err: any) {
-    throw new Error(`Reducto upload network error: ${err?.message ?? err}`)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`Reducto upload network error: ${msg}`)
   }
   if (!uploadRes.ok) {
     const err = await uploadRes.text().catch(() => uploadRes.statusText)
@@ -113,12 +120,15 @@ async function fetchWithRetry(
     try {
       const res = await fetch(url, { ...init, signal: controller.signal })
       return res
-    } catch (err: any) {
+    } catch (err: unknown) {
       lastError = err
+      const isAbort =
+        err &&
+        typeof err === 'object' &&
+        'name' in err &&
+        (err as { name?: string }).name === 'AbortError'
       const detail =
-        err?.name === 'AbortError'
-          ? `timeout after ${timeoutMs}ms`
-          : err?.message ?? String(err)
+        isAbort ? `timeout after ${timeoutMs}ms` : err instanceof Error ? err.message : String(err)
       console.warn(
         `${tag} ${label} attempt ${attempt}/${maxAttempts} network error: ${detail}`
       )
@@ -130,7 +140,8 @@ async function fetchWithRetry(
     }
   }
 
-  const msg = (lastError as any)?.message ?? String(lastError)
+  const msg =
+    lastError instanceof Error ? lastError.message : String(lastError)
   throw new Error(`Reducto ${label} network error after ${maxAttempts} attempts: ${msg}`)
 }
 
@@ -146,15 +157,20 @@ async function parseWithReducto(
 
   // HTML table format preserves colspan/rowspan — required for MARKS merged cells
   const parseStart = Date.now()
+  const agentic = parseBodyUsesAgenticTable()
+  if (!agentic) {
+    console.warn(
+      `${tag} REDUCTO_PARSE_AGENTIC_TABLE disabled — stabler reproducibility; table fidelity may regress on noisy scans`
+    )
+  }
+
   const parseBody = JSON.stringify({
     input: file_id,
     formatting: {
       table_output_format: 'html',
       add_page_markers: false,
     },
-    enhance: {
-      agentic: [{ scope: 'table' }],
-    },
+    ...(agentic ? { enhance: { agentic: [{ scope: 'table' }] } } : {}),
     settings: {
       extraction_mode: 'hybrid',
     },
@@ -251,11 +267,7 @@ export async function extractWithReductoHtmlParser(
 
   const parseOutput = await parseWithReducto(fileBuffer, fileName, apiKey, tag)
 
-  const textDocType = detectDocType(parseOutput.text.split('\n').slice(0, 120))
-  const fileDocType = detectDocTypeFromFilename(fileName)
-  const docType = textDocType !== 'unknown'
-    ? textDocType
-    : (fileDocType !== 'unknown' ? fileDocType : 'container_manifest')
+  const docType = resolveHtmlParserDocType(parseOutput.text, fileName)
 
   const parseMode: ParseMode = options?.parseMode ?? 'inventory'
   const parseResult = parseReductoChunks(parseOutput.chunks, docType, { mode: parseMode })

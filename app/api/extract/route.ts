@@ -169,7 +169,9 @@ export async function POST(req: Request) {
         let documentId: string | null = null
         if (!skipInsert) {
           try {
-            const fileSha256 = crypto.createHash('sha256').update(fallbackText || fileName).digest('hex')
+            // Must hash file bytes — filename-only caused same hash for any PDF with that name,
+            // breaking replace logic and double-counting aggregates on re-upload with renamed files.
+            const fileSha256 = crypto.createHash('sha256').update(buffer).digest('hex')
             const result = await insertToSupabase(fileName, fileSha256, extraction, [], structured.sectionSubtotals)
             documentId = result.document_id
           } catch (err: any) {
