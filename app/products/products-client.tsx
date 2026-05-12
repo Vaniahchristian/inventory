@@ -40,6 +40,7 @@ import { importPdfDirect } from '@/lib/export'
 import type { ExtractedDocument } from '@/lib/claude-extractor'
 import { useImportStore } from '@/lib/import-store'
 import { shouldPublishExtractedProduct } from '@/lib/sections'
+import { pickSpreadsheetImportKind } from '@/lib/spreadsheet-import-route'
 import type { DocumentItem, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
 type Props = {
@@ -874,10 +875,14 @@ export function ProductsClient({
     if (isSalesSheet) {
       try {
         startImport(file.name)
-        updateProgress(25, 'Submitting sales spreadsheet…')
+        updateProgress(18, 'Detecting spreadsheet type…')
+        const kind = await pickSpreadsheetImportKind(file)
+        updateProgress(22, kind === 'manifest' ? 'Importing container manifest…' : 'Importing sales spreadsheet…')
         const fd = new FormData()
         fd.append('file', file)
-        const res = await fetch('/api/import-sales-excel', { method: 'POST', body: fd })
+        const endpoint =
+          kind === 'manifest' ? '/api/import-manifest' : '/api/import-sales-excel'
+        const res = await fetch(endpoint, { method: 'POST', body: fd })
         const data = await res.json().catch(() => ({})) as Record<string, unknown>
 
         if (!res.ok) {
@@ -906,10 +911,11 @@ export function ProductsClient({
             })
           }
         } else if (data.success === true) {
-          toast.success(typeof data.message === 'string' ? data.message : 'Sales spreadsheet submitted successfully')
+          toast.success(typeof data.message === 'string' ? data.message : 'Spreadsheet import completed')
           finishImport()
+          router.refresh()
         } else {
-          throw new Error(typeof data.error === 'string' ? data.error : 'Unexpected response from sales import service')
+          throw new Error(typeof data.error === 'string' ? data.error : 'Unexpected response from import service')
         }
       } catch (err: unknown) {
         toast.error(err instanceof Error ? err.message : 'Failed to import spreadsheet')
@@ -919,7 +925,7 @@ export function ProductsClient({
       return
     }
 
-    toast.info('Use PDF for container manifests, or .xlsx / .xls / .csv for sales / 送货单 files.')
+    toast.info('Use PDF for in-app extraction, or .xlsx / .xls / .csv for container manifests (Python API) or sales / 送货单 files.')
     e.target.value = ''
   }
 

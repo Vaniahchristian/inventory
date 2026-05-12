@@ -27,6 +27,33 @@ export function detectDocTypeFromFilename(filename: string): DocType {
 }
 
 /**
+ * CSV / Excel export of a SANCARGO-style container manifest (MARKS 唛头, T.CTN, T.QTY).
+ * Used by POST /api/import-manifest before proxying to the Python manifest importer.
+ */
+export function isContainerManifestSpreadsheetPreview(previewLines: string[]): boolean {
+  if (previewLines.length === 0) return false
+  const blob = previewLines.slice(0, 120).join(' ').toUpperCase()
+  const hasMarks = /\bMARKS\b|唛头/.test(blob)
+  const hasTctn = /\bT[\s.]*CTN\b/.test(blob)
+  const hasTqty = /\bT[\s.]*QTY\b/.test(blob)
+  if (hasMarks && hasTctn && hasTqty) return true
+  const dt = detectDocType(previewLines)
+  if (dt === 'container_manifest') return true
+  return false
+}
+
+/** Prefer manifest API when the file name looks like MS-* / MS-T-* / manifest exports. */
+export function filenameSuggestsContainerManifest(filename: string): boolean {
+  const base = filename.toLowerCase().split(/[/\\]/).pop() ?? filename.toLowerCase()
+  // MS-301, MS-3, MS-T-2, MS_T_201, etc. (SANCARGO job codes)
+  if (/\bms[-_](?:t[-_])?\d+/i.test(base)) return true
+  if (/\bms[-_]?\d+/i.test(base)) return true
+  if (/\bmanifest\b/i.test(base)) return true
+  if (/\bcontainer\b/i.test(base) && /\.(csv|xlsx|xlsm?)$/i.test(base)) return true
+  return false
+}
+
+/**
  * How we pick `sales_order` vs `container_manifest` for HTML-table parsing after Reducto.
  * Filename is authoritative for sales uploads when chunks lack a visible title row;
  * chunks that clearly look like a SANCARGO container manifest override a generic "order" filename.
