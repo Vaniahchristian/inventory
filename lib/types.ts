@@ -44,6 +44,8 @@ export type Product = {
   customer_no?: string | null
   delivery_address?: string | null
   document_date?: string | null
+  /** Container manifest `document_items.section` (shipped | repacked | …); used on Compiled Products only. */
+  manifest_section?: string | null
   created_at: string
   updated_at: string
   suppliers?: Supplier | null
@@ -77,6 +79,14 @@ export type ImportMeta = {
   freight_usd: number | null
   total_balance_usd: number | null
   exchange_rate: number | null
+  /**
+   * Sum of `document_items` numeric columns for this document (DB trigger `sync_document_totals_from_items`),
+   * including warehouse-left lines. Footer marker rows excluded in SQL, not the same as `isFooterLikeItem`.
+   */
+  computed_sum_cartons?: number | null
+  computed_sum_cbm?: number | null
+  computed_sum_weight_kgs?: number | null
+  computed_sum_amount_rmb?: number | null
 }
 
 export type ImportDocumentMeta = {

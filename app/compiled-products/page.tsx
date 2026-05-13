@@ -1,7 +1,13 @@
 export const dynamic = 'force-dynamic'
 
-import { getShippedDocumentItems, getDocumentItemDocuments, getLatestImportMeta } from '@/app/actions/products'
+import {
+  getCompiledProductsSourceItems,
+  getDocumentItemDocuments,
+  getLatestImportMeta,
+  getWarehouseLeftDocumentItems,
+} from '@/app/actions/products'
 import { CompiledProductsClient } from './compiled-client'
+import { isFooterLikeItem } from '@/lib/document-item-filters'
 import type { DocumentItem } from '@/lib/types'
 
 function mapToProduct(item: DocumentItem) {
@@ -44,13 +50,15 @@ function mapToProduct(item: DocumentItem) {
     created_at: item.created_at,
     updated_at: item.created_at,
     suppliers: null,
+    manifest_section: item.section ?? null,
   }
 }
 
 export default async function CompiledProductsPage() {
-  const [itemsResult, importMetaResult, productDocumentsResult] =
+  const [itemsResult, leftItemsResult, importMetaResult, productDocumentsResult] =
     await Promise.allSettled([
-      getShippedDocumentItems(),
+      getCompiledProductsSourceItems(),
+      getWarehouseLeftDocumentItems(),
       getLatestImportMeta(),
       getDocumentItemDocuments(),
     ])
@@ -58,13 +66,24 @@ export default async function CompiledProductsPage() {
   if (itemsResult.status === 'rejected') throw itemsResult.reason
 
   const items = itemsResult.value
-  const products = items.map(mapToProduct)
+  const products = items.filter(p => !isFooterLikeItem(p)).map(mapToProduct)
+  const leftItems =
+    leftItemsResult.status === 'fulfilled' ? leftItemsResult.value : []
+  const warehouseLeftProducts = leftItems.filter(p => !isFooterLikeItem(p)).map(mapToProduct)
+
+  const footerLikeById = new Map<string, DocumentItem>()
+  for (const row of items.filter(p => isFooterLikeItem(p))) footerLikeById.set(row.id, row)
+  for (const row of leftItems.filter(p => isFooterLikeItem(p))) footerLikeById.set(row.id, row)
+  const footerLikeExcludedProducts = [...footerLikeById.values()].map(mapToProduct)
+
   const importMeta = importMetaResult.status === 'fulfilled' ? importMetaResult.value : null
   const productDocuments = productDocumentsResult.status === 'fulfilled' ? productDocumentsResult.value : []
 
   return (
     <CompiledProductsClient
       products={products as any}
+      warehouseLeftProducts={warehouseLeftProducts as any}
+      footerLikeExcludedProducts={footerLikeExcludedProducts as any}
       importMeta={importMeta}
       productDocuments={productDocuments as any}
     />

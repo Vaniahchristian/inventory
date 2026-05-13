@@ -4,8 +4,19 @@ import { revalidatePath } from 'next/cache'
 import { supabase } from '@/lib/supabase'
 import type { ImportMeta, ProductDocumentRef } from '@/lib/types'
 import type { DocumentItemsListFilters, DocumentItemsPageStats } from '@/lib/products-list'
-import { REPACKAGED_SECTION_MARKER_SKU, REPACKAGED_SECTION_TITLE, STAGE_SECTION_MARKER_PREFIX, STAGE_TOTAL_MARKER_PREFIX, isRepackagedSectionHeader, isGoodsLeftHeader, isValidStageSectionTitle, makeStageTotalSku } from '@/lib/sections'
-import { normalizeSectionForStorage } from '@/lib/sections'
+import {
+  REPACKAGED_SECTION_MARKER_SKU,
+  REPACKAGED_SECTION_TITLE,
+  STAGE_SECTION_MARKER_PREFIX,
+  STAGE_TOTAL_MARKER_PREFIX,
+  isCompiledProductsInclusionSection,
+  isWarehouseLeftSection,
+  isGoodsLeftHeader,
+  isRepackagedSectionHeader,
+  isValidStageSectionTitle,
+  makeStageTotalSku,
+  normalizeSectionForStorage,
+} from '@/lib/sections'
 import Anthropic from '@anthropic-ai/sdk'
 import { callLlm } from '@/lib/llm-client'
 
@@ -700,6 +711,10 @@ export async function getDocumentImportMeta(documentId: string): Promise<Documen
     freight_usd: null,
     total_balance_usd: null,
     exchange_rate: null,
+    computed_sum_cartons: totals?.computed_cartons != null ? Number(totals.computed_cartons) : null,
+    computed_sum_cbm: totals?.computed_cbm != null ? Number(totals.computed_cbm) : null,
+    computed_sum_weight_kgs: totals?.computed_weight_kg != null ? Number(totals.computed_weight_kg) : null,
+    computed_sum_amount_rmb: totals?.computed_amount_rmb != null ? Number(totals.computed_amount_rmb) : null,
   }
 
   const paymentRows: DocumentFooterPaymentRow[] = []
@@ -1049,28 +1064,83 @@ export async function deleteAllProducts(options?: { sourceDocumentId?: string | 
 
 // ── Document items (canonical PDF extraction store) ───────────────────────────
 
+/**
+ * PostgREST returns at most **1000** rows per request. Unpaged `.select()` silently truncates;
+ * paginate with `.range()` so Compiled Products / Products get every `document_items` row.
+ */
+const DOCUMENT_ITEMS_PAGE_SIZE = 1000
+
 export async function getDocumentItems() {
-  const { data, error } = await withSupabaseRetry(
-    () => supabase.from('document_items').select(DOCUMENT_ITEM_SELECT).order('line_no', { ascending: true }).order('id', { ascending: true }),
-    'getDocumentItems'
-  )
-  if (error) throw new Error(`Failed to fetch document items: ${error.message}`)
-  return ((data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+  const all: import('@/lib/types').DocumentItem[] = []
+  for (let offset = 0; ; offset += DOCUMENT_ITEMS_PAGE_SIZE) {
+    const to = offset + DOCUMENT_ITEMS_PAGE_SIZE - 1
+    const { data, error } = await withSupabaseRetry(
+      () =>
+        supabase
+          .from('document_items')
+          .select(DOCUMENT_ITEM_SELECT)
+          .order('line_no', { ascending: true })
+          .order('id', { ascending: true })
+          .range(offset, to),
+      `getDocumentItems.${offset}`
+    )
+    if (error) throw new Error(`Failed to fetch document items: ${error.message}`)
+    const batch = ((data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+    all.push(...batch)
+    if (batch.length < DOCUMENT_ITEMS_PAGE_SIZE) break
+  }
+  return all
 }
 
-export async function getShippedDocumentItems() {
-  const { data, error } = await withSupabaseRetry(
-    () =>
-      supabase
-        .from('document_items')
-        .select(DOCUMENT_ITEM_SELECT)
-        .eq('section', 'shipped')
-        .order('line_no', { ascending: true })
-        .order('id', { ascending: true }),
-    'getShippedDocumentItems'
-  )
-  if (error) throw new Error(`Failed to fetch shipped document items: ${error.message}`)
-  return ((data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+/**
+ * Source rows for **Compiled Products**: shipped, repacked, and any legacy section value —
+ * **excludes only** `left_in_warehouse` (goods left in warehouse). Footer-like rows are stripped on the page.
+ */
+export async function getCompiledProductsSourceItems() {
+  const all: import('@/lib/types').DocumentItem[] = []
+  for (let offset = 0; ; offset += DOCUMENT_ITEMS_PAGE_SIZE) {
+    const to = offset + DOCUMENT_ITEMS_PAGE_SIZE - 1
+    const { data, error } = await withSupabaseRetry(
+      () =>
+        supabase
+          .from('document_items')
+          .select(DOCUMENT_ITEM_SELECT)
+          .or('section.is.null,section.neq.left_in_warehouse')
+          .order('line_no', { ascending: true })
+          .order('id', { ascending: true })
+          .range(offset, to),
+      `getCompiledProductsSourceItems.${offset}`
+    )
+    if (error) throw new Error(`Failed to fetch compiled products source rows: ${error.message}`)
+    const batch = ((data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+    all.push(...batch)
+    if (batch.length < DOCUMENT_ITEMS_PAGE_SIZE) break
+  }
+  return all.filter(p => isCompiledProductsInclusionSection(p.section))
+}
+
+/** “Goods left in warehouse” lines for Compiled Products reconciliation (same rows as Products sky section). */
+export async function getWarehouseLeftDocumentItems() {
+  const all: import('@/lib/types').DocumentItem[] = []
+  for (let offset = 0; ; offset += DOCUMENT_ITEMS_PAGE_SIZE) {
+    const to = offset + DOCUMENT_ITEMS_PAGE_SIZE - 1
+    const { data, error } = await withSupabaseRetry(
+      () =>
+        supabase
+          .from('document_items')
+          .select(DOCUMENT_ITEM_SELECT)
+          .eq('section', 'left_in_warehouse')
+          .order('line_no', { ascending: true })
+          .order('id', { ascending: true })
+          .range(offset, to),
+      `getWarehouseLeftDocumentItems.${offset}`
+    )
+    if (error) throw new Error(`Failed to fetch warehouse-left document items: ${error.message}`)
+    const batch = ((data ?? []) as unknown) as import('@/lib/types').DocumentItem[]
+    all.push(...batch)
+    if (batch.length < DOCUMENT_ITEMS_PAGE_SIZE) break
+  }
+  return all.filter(p => isWarehouseLeftSection(p.section))
 }
 
 /**

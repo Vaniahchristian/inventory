@@ -11,6 +11,37 @@ export function filterToInventoryProducts(products: ExtractedProduct[]): Extract
   return products.filter(p => shouldPublishExtractedProduct(p.section))
 }
 
+export type ManifestSectionBucket = 'shipped' | 'left_in_warehouse' | 'repacked'
+
+/**
+ * Same rule as Products page `groupedSections`: DB enum is shipped | left_in_warehouse | repacked;
+ * any other value (including null) is folded into **shipped** for yellow subtotal buckets.
+ */
+export function canonicalSectionForGrouping(section: string | null | undefined): ManifestSectionBucket {
+  const s = section ?? 'shipped'
+  if (s === 'left_in_warehouse') return 'left_in_warehouse'
+  if (s === 'repacked') return 'repacked'
+  if (s === 'shipped') return 'shipped'
+  return 'shipped'
+}
+
+/** Rows that contribute to Products “shipped” yellow subtotal rows (excludes only left + repacked). */
+export function isProductsShippedSubtotalBucket(section: string | null | undefined): boolean {
+  return canonicalSectionForGrouping(section) === 'shipped'
+}
+
+/** Compiled Products: include shipped, repacked, and legacy/unknown sections — exclude only goods left in warehouse. */
+export function isCompiledProductsInclusionSection(section: string | null | undefined): boolean {
+  const s = (section ?? '').trim().toLowerCase()
+  if (!s) return true
+  return s !== 'left_in_warehouse'
+}
+
+/** Rows in the “goods left in warehouse” block (Products sky section). */
+export function isWarehouseLeftSection(section: string | null | undefined): boolean {
+  return (section ?? '').trim().toLowerCase() === 'left_in_warehouse'
+}
+
 /**
  * Remove rows that are section subtotals or grand totals mistakenly returned as products.
  * A row with no description, no item_code, and no marks has no product identity —

@@ -39,7 +39,8 @@ import type { DocumentItemsPageStats } from '@/lib/products-list'
 import { importPdfDirect } from '@/lib/export'
 import type { ExtractedDocument } from '@/lib/claude-extractor'
 import { useImportStore } from '@/lib/import-store'
-import { shouldPublishExtractedProduct } from '@/lib/sections'
+import { isFooterLikeItem } from '@/lib/document-item-filters'
+import { canonicalSectionForGrouping, shouldPublishExtractedProduct } from '@/lib/sections'
 import { pickSpreadsheetImportKind } from '@/lib/spreadsheet-import-route'
 import type { DocumentItem, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
@@ -245,31 +246,6 @@ function comparePdfManifestOrder(a: DocumentItem, b: DocumentItem): number {
   return a.id.localeCompare(b.id)
 }
 
-/** Detects financial summary / footer rows saved in older imports (now filtered at parse time). */
-function isFooterLikeItem(p: DocumentItem): boolean {
-  const combined = [p.marks ?? '', p.description ?? '', p.item_code ?? '', p.shop ?? '']
-    .join(' ').toUpperCase()
-  // Standard totals
-  if (/\bTOTAL\s+(WEIGHT|CBM|CARTON|COST|BALANCE)\b/.test(combined)) return true
-  // Balance line items
-  if (/\b(GOODS\s+BALANCE|CREDIT\s+SUPPORT|PIVOC|EXCHANGE\s+RATE)\b/.test(combined)) return true
-  // Freight
-  if (/YIWU.{0,10}MOMBASA.{0,10}FREIGHT/i.test(combined)) return true
-  // Payment rows (date + PAYMENT keyword)
-  if (/\bPAYMENT\b/.test(combined) && /\d{1,2}\/\d{1,2}\/\d{4}/.test(combined)) return true
-  // Payment with USD but no pcs/ctn
-  if (/\bPAYMENT\b/.test(combined) && /USD/.test(combined) && !/\bPCS\/CTN\b/.test(combined)) return true
-  // Payment terms body text
-  if (/IF\s+OUTSTANDING\s+BALANCE\s+IS\s+NOT\s+PAID/i.test(combined)) return true
-  if (/PAYMENT\s+DELAY\s+SURCHARGE/i.test(combined)) return true
-  if (/VESSEL\s+ARRIVAL\s+MOMBASA/i.test(combined)) return true
-  if (/BALANCE\s+PAYMENT\s+TERMS/i.test(combined)) return true
-  // Reduce notes after TOTAL CARTON
-  if (/REDUCE\s+DETAILS/i.test(combined)) return true
-  if (/REDUCE\s+\d+\s*CTN/i.test(combined)) return true
-  return false
-}
-
 function isStuffedBannerItem(p: DocumentItem): boolean {
   const text = [p.marks ?? '', p.item_code ?? '', p.description ?? '', p.shop ?? '', p.packaging ?? '']
     .join(' ')
@@ -442,13 +418,6 @@ function isSpuriousSectionBannerLabel(label: string): boolean {
   if (/¥|￥/.test(s) && (/\bCBM\b|\bKGS\b|\bCTNS?\b/i.test(s) || /\d+\s*-\s*\d+\s*$/.test(s))) return true
   if (/MAG-\d{3}-\d+|MS-\d{3}-\d+/i.test(s) && (/¥|￥/.test(s) || /\b\d+\.?\d*\s*CBM\b/i.test(s))) return true
   return false
-}
-
-/** DB enum is shipped | left_in_warehouse | repacked; fold parser slug keys into shipped for grouping. */
-function canonicalSectionForGrouping(section: string | undefined): string {
-  const s = section ?? 'shipped'
-  if (s === 'shipped' || s === 'left_in_warehouse' || s === 'repacked') return s
-  return 'shipped'
 }
 
 function cleanSectionLabel(label: string): string {
