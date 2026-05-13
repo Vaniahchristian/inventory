@@ -19,7 +19,12 @@ import { Search, ImageIcon, Download, FileSpreadsheet, FileText, MoreHorizontal,
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { deleteDocumentItem, adjustDocumentItemCartons } from '@/app/actions/products'
+import {
+  deleteDocumentItem,
+  adjustDocumentItemCartons,
+  getDocumentImportMeta,
+  type DocumentFooterPaymentRow,
+} from '@/app/actions/products'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
 import type { Product, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
@@ -216,6 +221,10 @@ function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta
 export function CompiledProductsClient({ products, importMeta, productDocuments }: Props) {
   const [query, setQuery] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>('all')
+  /** PDF footer totals + payments for the document chosen in the dropdown (not global latest import). */
+  const [documentFooterMeta, setDocumentFooterMeta] = useState<ImportMeta | null>(null)
+  const [documentPaymentRows, setDocumentPaymentRows] = useState<DocumentFooterPaymentRow[] | null>(null)
+  const [documentFooterLoading, setDocumentFooterLoading] = useState(false)
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set())
   const [outOfStockIds, setOutOfStockIds] = useState<Set<string>>(new Set())
   const [adjustingId, setAdjustingId] = useState<string | null>(null)
@@ -277,7 +286,7 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
       const sortedSingles = singles
         .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '', undefined, { sensitivity: 'base' }))
       sortedSingles.forEach(s => { s._rowNo = rowNo++ })
-      const data = [...numbered, ...sortedSingles].filter(p => !((p.cartons ?? 0) === 0 && p.quantity === 0))
+      const data = [...numbered, ...sortedSingles]
       return { data, nextRowNo: rowNo }
     }
 
@@ -344,6 +353,42 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
     weight: selectedDataRows.reduce((s, p) => s + parseWeight(p.total_weight), 0),
     amount: selectedDataRows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0),
   }), [selectedDataRows])
+
+  useEffect(() => {
+    if (selectedDocumentId === 'all') {
+      setDocumentFooterMeta(null)
+      setDocumentPaymentRows(null)
+      setDocumentFooterLoading(false)
+      return
+    }
+    let cancelled = false
+    setDocumentFooterLoading(true)
+    ;(async () => {
+      try {
+        const bundle = await getDocumentImportMeta(selectedDocumentId)
+        if (cancelled) return
+        if (bundle) {
+          setDocumentFooterMeta(bundle.meta)
+          setDocumentPaymentRows(bundle.paymentRows.length > 0 ? bundle.paymentRows : null)
+        } else {
+          setDocumentFooterMeta(null)
+          setDocumentPaymentRows(null)
+        }
+      } catch {
+        if (!cancelled) {
+          setDocumentFooterMeta(null)
+          setDocumentPaymentRows(null)
+        }
+      } finally {
+        if (!cancelled) setDocumentFooterLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDocumentId])
+
+  const exportImportMeta = documentFooterMeta ?? importMeta
 
   useEffect(() => {
     const visibleIds = new Set(filteredDataRows.map(p => p.id))
@@ -429,8 +474,8 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
         : filteredDataRows.length < compiledRows.length
           ? filteredDataRows
           : compiledRows
-    if (exportFormat === 'excel') exportToExcel(rows, fields, importMeta)
-    else exportToPdf(rows, fields, importMeta)
+    if (exportFormat === 'excel') exportToExcel(rows, fields, exportImportMeta)
+    else exportToPdf(rows, fields, exportImportMeta)
     setExportOpen(false)
   }
 
@@ -488,16 +533,16 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
         </div>
       </div>
 
-      {/* Client / container banner */}
-      {importMeta && (
+      {/* Client / container — only when a single document is selected (matches footer totals). */}
+      {documentFooterMeta && (
         <div className="rounded-md border bg-amber-50 border-amber-200 px-3 py-2 text-xs flex flex-wrap gap-x-6 gap-y-0.5 items-center">
           <span className="font-semibold text-slate-800">
-            CLIENT DETAILS: <span className="text-amber-800">{importMeta.client_details ?? '-'}</span>
+            CLIENT DETAILS: <span className="text-amber-800">{documentFooterMeta.client_details ?? '-'}</span>
           </span>
           <span className="font-semibold text-slate-800">
-            CONTAINER NO: <span className="text-amber-800">{importMeta.container_no ?? '-'}</span>
+            CONTAINER NO: <span className="text-amber-800">{documentFooterMeta.container_no ?? '-'}</span>
           </span>
-          <span className="text-slate-500 text-[10px] ml-auto">{importMeta.source_file_name}</span>
+          <span className="text-slate-500 text-[10px] ml-auto">{documentFooterMeta.source_file_name}</span>
         </div>
       )}
 
@@ -671,21 +716,30 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
         </Table>
       </div>
 
-      {/* Financial summary */}
-      {importMeta && (
+      {/* Financial summary: PDF footer from selected document (document_totals), not global latest import. */}
+      {selectedDocumentId === 'all' ? (
+        <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          Select a document in the dropdown above to show PDF footer totals (weight, CBM, cartons, cost) and
+          payment lines for that file. The yellow bar in the table is the sum of compiled line items in the current
+          view; with &quot;All PDFs / documents&quot; it can differ from any single document&apos;s footer.
+        </div>
+      ) : documentFooterLoading ? (
+        <div className="rounded-md border bg-white px-3 py-2 text-xs text-slate-500">Loading document totals…</div>
+      ) : documentFooterMeta ? (
         <div className="rounded-md border bg-white overflow-hidden text-xs">
           <div className="grid grid-cols-2 divide-x divide-slate-200">
             <table className="w-full">
               <tbody>
-                <MetaRow label="TOTAL WEIGHT" value={importMeta.total_weight_kgs != null ? `${fmt(importMeta.total_weight_kgs, 1)} KGS` : '-'} />
-                <MetaRow label="TOTAL CBM" value={importMeta.total_cbm != null ? `${fmt(importMeta.total_cbm, 1)} CBM` : '-'} />
-                <MetaRow label="TOTAL CARTON" value={importMeta.total_carton != null ? `${fmt(importMeta.total_carton, 0)} CTN` : '-'} />
+                <MetaRow label="TOTAL WEIGHT" value={documentFooterMeta.total_weight_kgs != null ? `${fmt(documentFooterMeta.total_weight_kgs, 1)} KGS` : '-'} />
+                <MetaRow label="TOTAL CBM" value={documentFooterMeta.total_cbm != null ? `${fmt(documentFooterMeta.total_cbm, 1)} CBM` : '-'} />
+                <MetaRow label="TOTAL CARTON" value={documentFooterMeta.total_carton != null ? `${fmt(documentFooterMeta.total_carton, 0)} CTN` : '-'} />
                 <MetaRow
                   label="TOTAL COST"
                   value={
                     <>
-                      {importMeta.total_cost_rmb != null && <span className="mr-3">¥{fmt(importMeta.total_cost_rmb, 2)} RMB</span>}
-                      {importMeta.total_cost_usd != null && <span>${fmt(importMeta.total_cost_usd, 2)} USD</span>}
+                      {documentFooterMeta.total_cost_rmb != null && <span className="mr-3">¥{fmt(documentFooterMeta.total_cost_rmb, 2)} RMB</span>}
+                      {documentFooterMeta.total_cost_usd != null && <span>${fmt(documentFooterMeta.total_cost_usd, 2)} USD</span>}
+                      {documentFooterMeta.total_cost_rmb == null && documentFooterMeta.total_cost_usd == null && '-'}
                     </>
                   }
                 />
@@ -693,30 +747,54 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
             </table>
             <table className="w-full">
               <tbody>
-                {importMeta.payment_date != null && importMeta.payment_usd != null && (
-                  <MetaRow label={`${importMeta.payment_date} PAYMENT`} value={`$${fmt(importMeta.payment_usd, 2)} USD`} />
-                )}
-                {importMeta.goods_balance_usd != null && (
-                  <MetaRow label="GOODS BALANCE" value={`$${fmt(importMeta.goods_balance_usd, 2)} USD`} />
-                )}
-                {importMeta.credit_support_usd != null && (
-                  <MetaRow label="CREDIT SUPPORT TO MOMBASA" value={`$${fmt(importMeta.credit_support_usd, 2)} USD`} />
-                )}
-                {importMeta.pivoc_usd != null && (
-                  <MetaRow label="PIVOC" value={`$${fmt(importMeta.pivoc_usd, 2)} USD`} />
-                )}
-                {importMeta.freight_usd != null && (
-                  <MetaRow label="YIWU-MOMBASA FREIGHT" value={`$${fmt(importMeta.freight_usd, 2)} USD`} />
-                )}
-                {importMeta.total_balance_usd != null && (
-                  <MetaRow label="TOTAL BALANCE" value={`$${fmt(importMeta.total_balance_usd, 2)} USD`} highlight />
-                )}
-                {importMeta.exchange_rate != null && (
-                  <MetaRow label="EXCHANGE RATE" value={`¥${fmt(importMeta.exchange_rate, 2)} RMB`} />
+                {documentPaymentRows && documentPaymentRows.length > 0 ? (
+                  <>
+                    {documentPaymentRows.map((row, idx) => (
+                      <MetaRow key={`${row.label}-${idx}`} label={row.label} value={row.value} highlight={row.highlight} />
+                    ))}
+                    {documentFooterMeta.goods_balance_usd != null && (
+                      <MetaRow label="GOODS BALANCE" value={`$${fmt(documentFooterMeta.goods_balance_usd, 2)} USD`} />
+                    )}
+                    {documentFooterMeta.total_balance_usd != null && (
+                      <MetaRow label="TOTAL BALANCE" value={`$${fmt(documentFooterMeta.total_balance_usd, 2)} USD`} highlight />
+                    )}
+                    {documentFooterMeta.exchange_rate != null && (
+                      <MetaRow label="EXCHANGE RATE" value={`¥${fmt(documentFooterMeta.exchange_rate, 2)} RMB`} />
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {documentFooterMeta.payment_date != null && documentFooterMeta.payment_usd != null && (
+                      <MetaRow label={`${documentFooterMeta.payment_date} PAYMENT`} value={`$${fmt(documentFooterMeta.payment_usd, 2)} USD`} />
+                    )}
+                    {documentFooterMeta.goods_balance_usd != null && (
+                      <MetaRow label="GOODS BALANCE" value={`$${fmt(documentFooterMeta.goods_balance_usd, 2)} USD`} />
+                    )}
+                    {documentFooterMeta.credit_support_usd != null && (
+                      <MetaRow label="CREDIT SUPPORT TO MOMBASA" value={`$${fmt(documentFooterMeta.credit_support_usd, 2)} USD`} />
+                    )}
+                    {documentFooterMeta.pivoc_usd != null && (
+                      <MetaRow label="PIVOC" value={`$${fmt(documentFooterMeta.pivoc_usd, 2)} USD`} />
+                    )}
+                    {documentFooterMeta.freight_usd != null && (
+                      <MetaRow label="YIWU-MOMBASA FREIGHT" value={`$${fmt(documentFooterMeta.freight_usd, 2)} USD`} />
+                    )}
+                    {documentFooterMeta.total_balance_usd != null && (
+                      <MetaRow label="TOTAL BALANCE" value={`$${fmt(documentFooterMeta.total_balance_usd, 2)} USD`} highlight />
+                    )}
+                    {documentFooterMeta.exchange_rate != null && (
+                      <MetaRow label="EXCHANGE RATE" value={`¥${fmt(documentFooterMeta.exchange_rate, 2)} RMB`} />
+                    )}
+                  </>
                 )}
               </tbody>
             </table>
           </div>
+        </div>
+      ) : (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          Could not load footer totals for this document (missing <code className="text-[10px]">document_totals</code> row or
+          access error). Re-import the file or run totals reconciliation if your pipeline supports it.
         </div>
       )}
 
