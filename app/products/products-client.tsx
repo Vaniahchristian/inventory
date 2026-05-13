@@ -84,6 +84,142 @@ function documentSelectLabel(doc: ProductDocumentRef): string {
   }
 }
 
+/** Live View: column sets — manifest vs sales hide the other side's exclusive fields; mixed shows all */
+type ProductTableLayout = 'sales' | 'manifest' | 'mixed'
+
+function productTableColumnCount(layout: ProductTableLayout): number {
+  switch (layout) {
+    case 'mixed':
+      return 27
+    case 'manifest':
+      return 22 // no DEL, CUS, Unit, 品名, Mat
+    case 'sales':
+      return 24 // no Marks, Shop, Box
+    default:
+      return 27
+  }
+}
+
+function subtotalLabelColSpan(layout: ProductTableLayout): number {
+  switch (layout) {
+    case 'mixed':
+      return 13 // # … through Packing
+    case 'manifest':
+      return 8 // # … through Packing (4 lead + desc + pack)
+    case 'sales':
+      return 11 // # … through Packing
+    default:
+      return 13
+  }
+}
+
+function ProductLeadHeaders({ layout }: { layout: ProductTableLayout }) {
+  if (layout === 'sales') {
+    return (
+      <>
+        <th className="p-2 font-medium min-w-[72px]">DEL</th>
+        <th className="p-2 font-medium min-w-[72px]">CUS</th>
+        <th className="p-2 font-medium w-14">Item</th>
+        <th className="p-2 font-medium w-14">Src</th>
+      </>
+    )
+  }
+  if (layout === 'manifest') {
+    return (
+      <>
+        <th className="p-2 font-medium min-w-[120px]">Marks</th>
+        <th className="p-2 font-medium min-w-[80px]">Shop</th>
+        <th className="p-2 font-medium w-14">Item</th>
+        <th className="p-2 font-medium w-14">Src</th>
+      </>
+    )
+  }
+  // mixed
+  return (
+    <>
+      <th className="p-2 font-medium min-w-[120px]">Marks</th>
+      <th className="p-2 font-medium min-w-[80px]">Shop</th>
+      <th className="p-2 font-medium w-14">Item</th>
+      <th className="p-2 font-medium w-14">Src</th>
+      <th className="p-2 font-medium min-w-[72px]">DEL</th>
+      <th className="p-2 font-medium min-w-[72px]">CUS</th>
+    </>
+  )
+}
+
+function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTableLayout }) {
+  if (layout === 'sales') {
+    return (
+      <>
+        <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
+        <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.customer_item_ref ?? '-'}</td>
+        <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+        <td className="p-2 font-mono text-[11px] text-slate-700 max-w-[88px] truncate" title={p.source_item_no ?? ''}>
+          {p.source_item_no ?? '-'}
+        </td>
+      </>
+    )
+  }
+  if (layout === 'manifest') {
+    return (
+      <>
+        <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
+        <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
+        <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+        <td className="p-2 font-mono text-[11px] text-slate-700 max-w-[88px] truncate" title={p.source_item_no ?? ''}>
+          {p.source_item_no ?? '-'}
+        </td>
+      </>
+    )
+  }
+  // mixed
+  return (
+    <>
+      <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
+      <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
+      <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
+      <td className="p-2 font-mono text-[11px] text-slate-700 max-w-[88px] truncate" title={p.source_item_no ?? ''}>
+        {p.source_item_no ?? '-'}
+      </td>
+      <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
+      <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.customer_item_ref ?? '-'}</td>
+    </>
+  )
+}
+
+/** Metrics tail aligned under numeric columns (matches mixed layout rhythm; sales omits Box span) */
+function ProductSubtotalTail({
+  layout,
+  cartons,
+  qty,
+  cbm,
+  weight,
+  amount,
+}: {
+  layout: ProductTableLayout
+  cartons: number
+  qty: number
+  cbm: number
+  weight: number
+  amount: number
+}) {
+  const showBoxColumn = layout !== 'sales'
+  return (
+    <>
+      <td className="p-2 text-right tabular-nums">{fmtN(cartons, 0)} CTN</td>
+      <td className="p-2 text-right tabular-nums">{fmtN(qty, 0)} pcs</td>
+      <td colSpan={3} />
+      <td />
+      <td className="p-2 text-right tabular-nums">{fmtN(cbm, 4)} CBM</td>
+      <td />
+      <td className="p-2 text-right tabular-nums">{fmtN(weight, 3)} KGS</td>
+      <td />
+      <td className="p-2 text-right tabular-nums">¥{fmtN(amount, 0)} RMB</td>
+      {showBoxColumn ? <td colSpan={3} /> : <td colSpan={2} />}
+    </>
+  )
+}
+
 function boxLabel(start: number | null, end: number | null): string {
   if (start == null) return '-'
   if (end != null && end !== start) return `${start}–${end}`
@@ -707,6 +843,27 @@ export function ProductsClient({
       })
   }, [mainRows])
 
+  const selectedDocRef = useMemo(
+    () =>
+      selectedDocumentId === 'all'
+        ? null
+        : productDocuments.find(d => d.id === selectedDocumentId) ?? null,
+    [selectedDocumentId, productDocuments]
+  )
+
+  /** all docs → full grid; single manifest → hide sales-only cols; single sales → hide manifest-only cols */
+  const productTableLayout: ProductTableLayout =
+    selectedDocumentId === 'all'
+      ? 'mixed'
+      : selectedDocRef?.document_type === 'sales_order'
+        ? 'sales'
+        : 'manifest'
+
+  const showSalesOnlyColumns = productTableLayout === 'sales' || productTableLayout === 'mixed'
+  const showManifestOnlyColumns = productTableLayout === 'manifest' || productTableLayout === 'mixed'
+  const tableColCount = productTableColumnCount(productTableLayout)
+  const labelThroughPackingColSpan = subtotalLabelColSpan(productTableLayout)
+
   function handleDeleteItem(id: string) {
     if (!confirm('Delete this row?')) return
     startTransition(async () => {
@@ -945,6 +1102,24 @@ export function ProductsClient({
               ? `${listStats.totalCount} rows match filters · latest import per file name`
               : `${listStats.totalCount} rows match · latest import for this file`}
           </p>
+          {selectedDocumentId === 'all' && (
+            <p className="text-[11px] text-slate-500 mt-1">
+              Table:{' '}
+              <span className="font-medium text-slate-700">
+                All documents — full column set (sales + manifest fields)
+              </span>
+            </p>
+          )}
+          {selectedDocRef && (
+            <p className="text-[11px] text-slate-500 mt-1">
+              Table:{' '}
+              <span className="font-medium text-slate-700">
+                {productTableLayout === 'sales'
+                  ? 'Sales / 送货单 — DEL · CUS · Unit · 品名 · Mat · … (Marks · Shop · Box hidden)'
+                  : 'Container manifest — Marks · Shop · Box · … (DEL · CUS · Unit · 品名 · Mat hidden)'}
+              </span>
+            </p>
+          )}
           {selectedRows.length > 0 && (
             <p className="text-xs text-emerald-700 mt-1">{selectedRows.length} selected</p>
           )}
@@ -1112,7 +1287,15 @@ export function ProductsClient({
 
       {/* Main table */}
       <div className="rounded-md border bg-white overflow-x-auto">
-        <table className="w-full text-xs border-collapse min-w-[2600px]">
+        <table
+          className={`w-full text-xs border-collapse ${
+            productTableLayout === 'mixed'
+              ? 'min-w-[2600px]'
+              : productTableLayout === 'sales'
+                ? 'min-w-[2100px]'
+                : 'min-w-[2000px]'
+          }`}
+        >
           <thead>
             <tr className="bg-slate-50 border-b text-left">
               <th className="p-2 font-medium w-8 text-slate-500">#</th>
@@ -1123,15 +1306,14 @@ export function ProductsClient({
                   aria-label="Select all visible products"
                 />
               </th>
-              <th className="p-2 font-medium min-w-[120px]">Marks</th>
-              <th className="p-2 font-medium min-w-[80px]">Shop</th>
-              <th className="p-2 font-medium w-14">Item</th>
-              <th className="p-2 font-medium w-14">Src</th>
-              <th className="p-2 font-medium min-w-[72px]">DEL</th>
-              <th className="p-2 font-medium min-w-[72px]">CUS</th>
-              <th className="p-2 font-medium w-11">Unit</th>
-              <th className="p-2 font-medium min-w-[64px]">品名</th>
-              <th className="p-2 font-medium min-w-[64px]">Mat</th>
+              <ProductLeadHeaders layout={productTableLayout} />
+              {showSalesOnlyColumns && (
+                <>
+                  <th className="p-2 font-medium w-11">Unit</th>
+                  <th className="p-2 font-medium min-w-[64px]">品名</th>
+                  <th className="p-2 font-medium min-w-[64px]">Mat</th>
+                </>
+              )}
               <th className="p-2 font-medium min-w-[180px]">Description</th>
               <th className="p-2 font-medium min-w-[80px]">Packing</th>
               <th className="p-2 font-medium w-14 text-right">CTN</th>
@@ -1145,7 +1327,7 @@ export function ProductsClient({
               <th className="p-2 font-medium w-16 text-right">T.Wkg</th>
               <th className="p-2 font-medium w-20 text-right">U.Price ¥</th>
               <th className="p-2 font-medium w-20 text-right">Amount ¥</th>
-              <th className="p-2 font-medium w-16">Box No</th>
+              {showManifestOnlyColumns && <th className="p-2 font-medium w-16">Box No</th>}
               <th className="p-2 font-medium w-24">Section</th>
               <th className="p-2 font-medium w-8" />
             </tr>
@@ -1153,7 +1335,7 @@ export function ProductsClient({
           <tbody>
             {tableMainEmpty ? (
               <tr>
-                <td colSpan={27} className="text-center text-slate-400 py-10">
+                <td colSpan={tableColCount} className="text-center text-slate-400 py-10">
                   {importStage
                     ? 'Import in progress…'
                     : listStats.totalCount > 0
@@ -1169,7 +1351,7 @@ export function ProductsClient({
                       <tr key={p.id} className="border-b border-yellow-300 bg-yellow-200 font-semibold">
                         <td className="p-2 text-slate-500 tabular-nums">{p.line_no ?? '-'}</td>
                         <td className="p-2 text-center">—</td>
-                        <td className="p-2" colSpan={24}>
+                        <td className="p-2" colSpan={tableColCount - 3}>
                           {(p.description ?? p.marks ?? p.item_code ?? 'GOODS STUFFED INTO THIS CO').replace(/\s+/g, ' ').trim()}
                         </td>
                         <td className="p-1">
@@ -1196,21 +1378,18 @@ export function ProductsClient({
                           aria-label={`Select ${p.description ?? p.marks ?? 'row'}`}
                         />
                       </td>
-                      <td className="p-2 font-mono text-slate-800 whitespace-nowrap">{p.marks ?? '-'}</td>
-                      <td className="p-2 text-slate-600 max-w-[100px] truncate">{p.shop ?? '-'}</td>
-                      <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
-                      <td className="p-2 font-mono text-[11px] text-slate-700 max-w-[88px] truncate" title={p.source_item_no ?? ''}>
-                        {p.source_item_no ?? '-'}
-                      </td>
-                      <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
-                      <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.customer_item_ref ?? '-'}</td>
-                      <td className="p-2 text-[11px] whitespace-nowrap">{p.unit ?? '-'}</td>
-                      <td className="p-2 text-slate-700 max-w-[100px] truncate" title={p.product_name_local ?? ''}>
-                        {p.product_name_local ?? '-'}
-                      </td>
-                      <td className="p-2 text-slate-700 max-w-[100px] truncate" title={p.material ?? ''}>
-                        {p.material ?? '-'}
-                      </td>
+                      <ProductLeadCells p={p} layout={productTableLayout} />
+                      {showSalesOnlyColumns && (
+                        <>
+                          <td className="p-2 text-[11px] whitespace-nowrap">{p.unit ?? '-'}</td>
+                          <td className="p-2 text-slate-700 max-w-[100px] truncate" title={p.product_name_local ?? ''}>
+                            {p.product_name_local ?? '-'}
+                          </td>
+                          <td className="p-2 text-slate-700 max-w-[100px] truncate" title={p.material ?? ''}>
+                            {p.material ?? '-'}
+                          </td>
+                        </>
+                      )}
                       <td className="p-2 text-slate-700 max-w-[200px]">{p.description ?? '-'}</td>
                       <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
                       <td className="p-2 text-right tabular-nums">
@@ -1248,7 +1427,9 @@ export function ProductsClient({
                       <td className="p-2 text-right tabular-nums">{fmtN(p.total_weight_kg, 3)}</td>
                       <td className="p-2 text-right tabular-nums">{fmtMoney(p.unit_price_rmb)}</td>
                       <td className="p-2 text-right tabular-nums font-medium">{fmtMoney(p.total_amount_rmb)}</td>
-                      <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
+                      {showManifestOnlyColumns && (
+                        <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
+                      )}
                       <td className="p-2"><SectionBadge section={p.section} /></td>
                       <td className="p-1">
                         <DropdownMenu>
@@ -1273,19 +1454,17 @@ export function ProductsClient({
                   ))}
                   {/* Section subtotal row */}
                   <tr className={`text-xs ${sectionSubtotalStyle(sectionKey)}`}>
-                    <td className="p-2" colSpan={13}>
+                    <td className="p-2" colSpan={labelThroughPackingColSpan}>
                       {sectionLabel} — {rows.length} rows
                     </td>
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.cartons, 0)} CTN</td>
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.qty, 0)} pcs</td>
-                    <td colSpan={3} />
-                    <td />
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.cbm, 4)} CBM</td>
-                    <td />
-                    <td className="p-2 text-right tabular-nums">{fmtN(st.weight, 3)} KGS</td>
-                    <td />
-                    <td className="p-2 text-right tabular-nums">¥{fmtN(st.amount, 0)} RMB</td>
-                    <td colSpan={3} />
+                    <ProductSubtotalTail
+                      layout={productTableLayout}
+                      cartons={st.cartons}
+                      qty={st.qty}
+                      cbm={st.cbm}
+                      weight={st.weight}
+                      amount={st.amount}
+                    />
                   </tr>
                 </React.Fragment>
               ))
@@ -1297,15 +1476,14 @@ export function ProductsClient({
                   <tr key={p.id} className="border-b border-slate-200 bg-slate-100 text-slate-500 italic">
                     <td className="p-2 text-slate-400 tabular-nums">{p.line_no ?? '-'}</td>
                     <td className="p-2 text-center">—</td>
-                    <td className="p-2 font-mono whitespace-nowrap">{p.marks ?? '-'}</td>
-                    <td className="p-2 max-w-[100px] truncate">{p.shop ?? '-'}</td>
-                    <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
-                    <td className="p-2 font-mono text-[11px] max-w-[88px] truncate">{p.source_item_no ?? '-'}</td>
-                    <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
-                    <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.customer_item_ref ?? '-'}</td>
-                    <td className="p-2 text-[11px]">{p.unit ?? '-'}</td>
-                    <td className="p-2 max-w-[100px] truncate">{p.product_name_local ?? '-'}</td>
-                    <td className="p-2 max-w-[100px] truncate">{p.material ?? '-'}</td>
+                    <ProductLeadCells p={p} layout={productTableLayout} />
+                    {showSalesOnlyColumns && (
+                      <>
+                        <td className="p-2 text-[11px]">{p.unit ?? '-'}</td>
+                        <td className="p-2 max-w-[100px] truncate">{p.product_name_local ?? '-'}</td>
+                        <td className="p-2 max-w-[100px] truncate">{p.material ?? '-'}</td>
+                      </>
+                    )}
                     <td className="p-2 max-w-[200px]">{p.description ?? '-'}</td>
                     <td className="p-2 whitespace-nowrap">{p.packaging ?? '-'}</td>
                     <td className="p-2 text-right tabular-nums">{fmtN(p.total_cartons, 0)}</td>
@@ -1319,7 +1497,9 @@ export function ProductsClient({
                     <td className="p-2 text-right tabular-nums">{fmtN(p.total_weight_kg, 3)}</td>
                     <td className="p-2 text-right tabular-nums">{fmtMoney(p.unit_price_rmb)}</td>
                     <td className="p-2 text-right tabular-nums font-medium">{fmtMoney(p.total_amount_rmb)}</td>
-                    <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
+                    {showManifestOnlyColumns && (
+                      <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
+                    )}
                     <td className="p-2">
                       <span className="text-[10px] text-slate-400 border border-slate-300 rounded px-1">footer</span>
                     </td>
@@ -1336,41 +1516,41 @@ export function ProductsClient({
                   </tr>
                 ))}
                 <tr className="text-xs bg-slate-300 border-t-2 border-slate-500 font-semibold text-slate-700">
-                  <td className="p-2" colSpan={13}>Document Footer — {footerItems.length} rows (financial summary)</td>
-                  <td colSpan={14} />
+                  <td className="p-2" colSpan={labelThroughPackingColSpan}>
+                    Document Footer — {footerItems.length} rows (financial summary)
+                  </td>
+                  <td colSpan={tableColCount - labelThroughPackingColSpan} />
                 </tr>
               </React.Fragment>
             )}
             {selectedRows.length > 0 && (
               <tr className="bg-emerald-100 border-t-2 border-emerald-500 font-bold text-emerald-900">
-                <td className="p-2" colSpan={13}>SELECTED TOTALS — {selectedRows.length} rows</td>
-                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.cartons, 0)} CTN</td>
-                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.qty, 0)} pcs</td>
-                <td colSpan={3} />
-                <td />
-                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.cbm, 4)} CBM</td>
-                <td />
-                <td className="p-2 text-right tabular-nums">{fmtN(selectedTotals.weight, 3)} KGS</td>
-                <td />
-                <td className="p-2 text-right tabular-nums">¥{fmtN(selectedTotals.amount, 0)} RMB</td>
-                <td colSpan={3} />
+                <td className="p-2" colSpan={labelThroughPackingColSpan}>
+                  SELECTED TOTALS — {selectedRows.length} rows
+                </td>
+                <ProductSubtotalTail
+                  layout={productTableLayout}
+                  cartons={selectedTotals.cartons}
+                  qty={selectedTotals.qty}
+                  cbm={selectedTotals.cbm}
+                  weight={selectedTotals.weight}
+                  amount={selectedTotals.amount}
+                />
               </tr>
             )}
             {listStats.totalCount > 0 && multiSection && (
               <tr className="bg-slate-800 text-white font-bold border-t-2 border-slate-900 text-xs">
-                <td className="p-2" colSpan={13}>
+                <td className="p-2" colSpan={labelThroughPackingColSpan}>
                   {footerGrandTotals ? 'PDF FOOTER TOTAL' : `GRAND TOTAL — ${listStats.totalCount} rows`}
                 </td>
-                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.cartons ?? totals.cartons, 0)} CTN</td>
-                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.qty ?? totals.qty, 0)} pcs</td>
-                <td colSpan={3} />
-                <td />
-                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.cbm ?? totals.cbm, 4)} CBM</td>
-                <td />
-                <td className="p-2 text-right tabular-nums">{fmtN(footerGrandTotals?.weight ?? totals.weight, 3)} KGS</td>
-                <td />
-                <td className="p-2 text-right tabular-nums">¥{fmtN(footerGrandTotals?.amount ?? totals.amount, 0)} RMB</td>
-                <td colSpan={3} />
+                <ProductSubtotalTail
+                  layout={productTableLayout}
+                  cartons={footerGrandTotals?.cartons ?? totals.cartons}
+                  qty={footerGrandTotals?.qty ?? totals.qty}
+                  cbm={footerGrandTotals?.cbm ?? totals.cbm}
+                  weight={footerGrandTotals?.weight ?? totals.weight}
+                  amount={footerGrandTotals?.amount ?? totals.amount}
+                />
               </tr>
             )}
           </tbody>
