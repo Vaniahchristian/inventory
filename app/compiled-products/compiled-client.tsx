@@ -526,9 +526,6 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
               <TableHead className="text-right">Qty</TableHead>
               <TableHead className="text-right">U.CBM</TableHead>
               <TableHead className="text-right">T.CBM</TableHead>
-              <TableHead className="text-right">L</TableHead>
-              <TableHead className="text-right">W</TableHead>
-              <TableHead className="text-right">H</TableHead>
               <TableHead className="text-right">U.Weight</TableHead>
               <TableHead className="text-right">T.Weight</TableHead>
               <TableHead className="text-right">Unit Price</TableHead>
@@ -540,7 +537,7 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={23} className="text-center text-slate-400 py-10">
+                <TableCell colSpan={20} className="text-center text-slate-400 py-10">
                   No products found.
                 </TableCell>
               </TableRow>
@@ -549,7 +546,7 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
                 if ('_isDivider' in p) {
                   return (
                     <TableRow key={p.id} className="bg-yellow-200 hover:bg-yellow-200">
-                      <TableCell colSpan={23} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
+                      <TableCell colSpan={20} className="text-center font-semibold text-slate-800 py-2 tracking-wide">
                         {p.title}
                       </TableCell>
                     </TableRow>
@@ -615,9 +612,6 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
                     <TableCell className="text-right font-medium">{p.quantity} {p.unit}</TableCell>
                     <TableCell className="text-right">{p.unit_cbm != null ? Number(p.unit_cbm).toFixed(3) : '-'}</TableCell>
                     <TableCell className="text-right">{p.cbm != null ? Number(p.cbm).toFixed(4) : '-'}</TableCell>
-                    <TableCell className="text-right">{p.dim_l_cm != null ? Number(p.dim_l_cm).toFixed(1) : '-'}</TableCell>
-                    <TableCell className="text-right">{p.dim_w_cm != null ? Number(p.dim_w_cm).toFixed(1) : '-'}</TableCell>
-                    <TableCell className="text-right">{p.dim_h_cm != null ? Number(p.dim_h_cm).toFixed(1) : '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.unit_weight ?? '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">{p.total_weight ?? '-'}</TableCell>
                     <TableCell className="text-right whitespace-nowrap">
@@ -661,14 +655,14 @@ export function CompiledProductsClient({ products, importMeta, productDocuments 
 
             {selectedDataRows.length > 0 && (
               <TableRow className="bg-emerald-100 font-bold border-t-2 border-emerald-400">
-                <TableCell colSpan={23} className="text-right text-emerald-900">
+                <TableCell colSpan={20} className="text-right text-emerald-900">
                   {`SELECTED TOTALS: ${fmt(selectedTotals.cartons, 0)} CTNS | ${fmt(selectedTotals.cbm, 4)} CBM | ${fmt(selectedTotals.weight, 1)} KGS | ¥${fmt(selectedTotals.amount, 0)}`}
                 </TableCell>
               </TableRow>
             )}
             {filteredDataRows.length > 0 && (
               <TableRow className="bg-yellow-300 font-bold border-t-2 border-yellow-500">
-                <TableCell colSpan={23} className="text-right text-slate-900">
+                <TableCell colSpan={20} className="text-right text-slate-900">
                   {`TOTALS: ${fmt(totals.cartons, 0)} CTNS | ${fmt(totals.cbm, 4)} CBM | ${fmt(totals.weight, 1)} KGS | ¥${fmt(totals.amount, 0)}`}
                 </TableCell>
               </TableRow>
