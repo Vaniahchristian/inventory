@@ -1084,8 +1084,8 @@ export function ProductsClient({
               Table:{' '}
               <span className="font-medium text-slate-700">
                 {productTableLayout === 'sales'
-                  ? 'Sales / 送货单 — DEL · CUS · Unit · 品名 · Mat · … (Marks · Shop · Box hidden)'
-                  : 'Container manifest — Marks · Shop · Box · … (DEL · CUS · Unit · 品名 · Mat hidden)'}
+                  ? 'Sales / 送货单 — DEL · CUS · Unit · Name · Mat · … (Marks · Shop · Box hidden)'
+                  : 'Container manifest — Marks · Shop · Box · … (DEL · CUS · Unit · Name · Mat hidden)'}
               </span>
             </p>
           )}
@@ -1279,7 +1279,7 @@ export function ProductsClient({
               {showSalesOnlyColumns && (
                 <>
                   <th className="p-2 font-medium w-11">Unit</th>
-                  <th className="p-2 font-medium min-w-[64px]">品名</th>
+                  <th className="p-2 font-medium min-w-[64px]">Name</th>
                   <th className="p-2 font-medium min-w-[64px]">Mat</th>
                 </>
               )}
@@ -1616,7 +1616,7 @@ export function ProductsClient({
                 <Field label="Material" name="material" defaultValue={editingItem.material ?? ''} />
               </div>
               <div className="grid grid-cols-1 gap-3">
-                <Field label="品名 (local name)" name="product_name_local" defaultValue={editingItem.product_name_local ?? ''} />
+                <Field label="Name" name="product_name_local" defaultValue={editingItem.product_name_local ?? ''} />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Shop" name="shop" defaultValue={editingItem.shop ?? ''} />
