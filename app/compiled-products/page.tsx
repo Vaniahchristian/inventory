@@ -13,7 +13,7 @@ import type { DocumentItem } from '@/lib/types'
 function mapToProduct(item: DocumentItem) {
   return {
     id: item.id,
-    name: item.description ?? item.marks ?? null,
+    name: item.product_name_local ?? item.description ?? item.marks ?? null,
     sku: item.marks ?? null,
     source_item_no: item.source_item_no ?? item.item_code ?? null,
     description: item.description,
