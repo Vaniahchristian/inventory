@@ -207,7 +207,7 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
       filters
     )
 
-  const [totalRes, shippedRes, leftRes, repackedRes, totalsRowsRes] = (await Promise.all([
+  const [totalRes, shippedRes, leftRes, repackedRes, otherRes, totalsRowsRes] = (await Promise.all([
     withSupabaseRetry(() => baseHead(), 'getDocumentItemsPageStats.total'),
     withSupabaseRetry(
       () => applyDocumentItemsListFilters(supabase.from('document_items').select('*', { count: 'exact', head: true }), filters).eq('section', 'shipped'),
@@ -220,6 +220,10 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
     withSupabaseRetry(
       () => applyDocumentItemsListFilters(supabase.from('document_items').select('*', { count: 'exact', head: true }), filters).eq('section', 'repacked'),
       'getDocumentItemsPageStats.repacked'
+    ),
+    withSupabaseRetry(
+      () => applyDocumentItemsListFilters(supabase.from('document_items').select('*', { count: 'exact', head: true }), filters).eq('section', 'other'),
+      'getDocumentItemsPageStats.other'
     ),
     withSupabaseRetry(
       () =>
@@ -236,6 +240,7 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
     { count: number | null; error: { message: string } | null },
     { count: number | null; error: { message: string } | null },
     { count: number | null; error: { message: string } | null },
+    { count: number | null; error: { message: string } | null },
     { data: unknown; error: { message: string } | null },
   ]
 
@@ -243,6 +248,7 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
   if (shippedRes.error) throw new Error(shippedRes.error.message)
   if (leftRes.error) throw new Error(leftRes.error.message)
   if (repackedRes.error) throw new Error(repackedRes.error.message)
+  if (otherRes.error) throw new Error(otherRes.error.message)
   if (totalsRowsRes.error) throw new Error(totalsRowsRes.error.message)
 
   const totalCount = totalRes.count ?? 0
@@ -271,6 +277,7 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
       shipped: shippedRes.count ?? 0,
       left_in_warehouse: leftRes.count ?? 0,
       repacked: repackedRes.count ?? 0,
+      other: otherRes.count ?? 0,
     },
     totals: {
       cartons: summedTotals.cartons,

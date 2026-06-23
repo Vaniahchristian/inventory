@@ -752,7 +752,7 @@ export function ProductsClient({
 
   const multiSection = useMemo(() => {
     const c = listStats.sectionCounts
-    return [c.shipped, c.left_in_warehouse, c.repacked].filter(n => n > 0).length > 1
+    return [c.shipped, c.left_in_warehouse, c.repacked, c.other].filter(n => n > 0).length > 1
   }, [listStats.sectionCounts])
 
   const groupedSections = useMemo(() => {
@@ -1230,6 +1230,21 @@ export function ProductsClient({
           {sectionCounts.repacked > 0 && (
             <button
               onClick={() => handleDeleteSection('repacked')}
+              disabled={isPending}
+              className="text-[10px] text-red-400 hover:text-red-600 underline disabled:opacity-40"
+            >
+              delete section
+            </button>
+          )}
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm bg-slate-200 border border-slate-400" />
+            needs review ({sectionCounts.other})
+          </span>
+          {sectionCounts.other > 0 && (
+            <button
+              onClick={() => handleDeleteSection('other')}
               disabled={isPending}
               className="text-[10px] text-red-400 hover:text-red-600 underline disabled:opacity-40"
             >

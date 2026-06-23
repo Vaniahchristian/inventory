@@ -11,16 +11,19 @@ export function filterToInventoryProducts(products: ExtractedProduct[]): Extract
   return products.filter(p => shouldPublishExtractedProduct(p.section))
 }
 
-export type ManifestSectionBucket = 'shipped' | 'left_in_warehouse' | 'repacked'
+export type ManifestSectionBucket = 'shipped' | 'left_in_warehouse' | 'repacked' | 'other'
 
 /**
- * Same rule as Products page `groupedSections`: DB enum is shipped | left_in_warehouse | repacked;
- * any other value (including null) is folded into **shipped** for yellow subtotal buckets.
+ * Same rule as Products page `groupedSections`: DB enum is shipped | left_in_warehouse |
+ * repacked | other. `other` is the bucket for a section heading the import classifier
+ * couldn't recognize — kept separate rather than guessed into one of the 3 known buckets.
+ * Anything else unrecognized (including null) still folds into **shipped**.
  */
 export function canonicalSectionForGrouping(section: string | null | undefined): ManifestSectionBucket {
   const s = section ?? 'shipped'
   if (s === 'left_in_warehouse') return 'left_in_warehouse'
   if (s === 'repacked') return 'repacked'
+  if (s === 'other') return 'other'
   if (s === 'shipped') return 'shipped'
   return 'shipped'
 }
@@ -207,16 +210,16 @@ function parseSectionLabelFromRemarks(remarks: string | null | undefined): strin
 
 /**
  * Database constraint on document_items.section currently allows only:
- * shipped | left_in_warehouse | repacked.
+ * shipped | left_in_warehouse | repacked | other.
  * Keep dynamic labels in remarks, but normalize stored section to one
  * of the allowed values to avoid insert failures.
  */
 export function normalizeSectionForStorage(
   section: string | null | undefined,
   remarks?: string | null
-): 'shipped' | 'left_in_warehouse' | 'repacked' {
+): 'shipped' | 'left_in_warehouse' | 'repacked' | 'other' {
   const s = (section ?? '').trim().toLowerCase()
-  if (s === 'shipped' || s === 'left_in_warehouse' || s === 'repacked') return s
+  if (s === 'shipped' || s === 'left_in_warehouse' || s === 'repacked' || s === 'other') return s
 
   const label = ((parseSectionLabelFromRemarks(remarks) ?? '') + ' ' + (remarks ?? '')).toLowerCase()
   if (label.includes('before goods') || label.includes('goods left') || label.includes('warehouse')) {

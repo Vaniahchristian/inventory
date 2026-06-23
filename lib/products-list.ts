@@ -12,6 +12,7 @@ export type DocumentItemsPageStats = {
     shipped: number
     left_in_warehouse: number
     repacked: number
+    other: number
   }
   totals: {
     cartons: number
