@@ -1003,6 +1003,29 @@ export async function markDocumentItemOutOfStock(id: string): Promise<void> {
   revalidatePath('/products')
 }
 
+const DOCUMENT_ITEM_SECTIONS = ['shipped', 'left_in_warehouse', 'repacked', 'other'] as const
+type DocumentItemSection = (typeof DOCUMENT_ITEM_SECTIONS)[number]
+
+export async function updateDocumentItemsSection(ids: string[], section: string): Promise<void> {
+  const unique = [...new Set(ids.filter(Boolean))]
+  if (unique.length === 0) throw new Error('No rows selected')
+  const s = section.trim().toLowerCase()
+  if (!(DOCUMENT_ITEM_SECTIONS as readonly string[]).includes(s)) {
+    throw new Error(`Invalid section: ${section}`)
+  }
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('document_items').update({ section: s as DocumentItemSection }).in('id', unique),
+    'updateDocumentItemsSection'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/compiled-products')
+  revalidatePath('/products')
+}
+
+export async function updateDocumentItemSection(id: string, section: string): Promise<void> {
+  await updateDocumentItemsSection([id], section)
+}
+
 export async function updateDocumentItem(id: string, formData: FormData): Promise<void> {
   const update: Record<string, unknown> = {
     marks: ((formData.get('marks') as string) || '').trim() || null,

@@ -5,7 +5,6 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
@@ -31,6 +30,8 @@ import {
   adjustDocumentItemCartons,
   markDocumentItemOutOfStock,
   updateDocumentItem,
+  updateDocumentItemSection,
+  updateDocumentItemsSection,
   importProducts,
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
@@ -452,12 +453,55 @@ function displaySectionLabel(section: string, remarks?: string | null): string {
   return cleanSectionLabel(section.replace(/_/g, ' '))
 }
 
-function SectionBadge({ section }: { section: DocumentItem['section'] }) {
-  if (section === 'left_in_warehouse')
-    return <Badge variant="outline" className="text-[10px] border-sky-300 text-sky-700 bg-sky-50">left</Badge>
-  if (section === 'repacked')
-    return <Badge variant="outline" className="text-[10px] border-violet-300 text-violet-700 bg-violet-50">repacked</Badge>
-  return <Badge variant="outline" className="text-[10px] border-emerald-300 text-emerald-700 bg-emerald-50">shipped</Badge>
+const SECTION_PICK_OPTIONS = ['shipped', 'left_in_warehouse', 'repacked', 'other'] as const
+
+function sectionShortLabel(section: string): string {
+  if (section === 'left_in_warehouse') return 'left'
+  if (section === 'repacked') return 'repacked'
+  if (section === 'other') return 'review'
+  return 'shipped'
+}
+
+function sectionBadgeClass(section: string): string {
+  if (section === 'left_in_warehouse') return 'border-sky-300 text-sky-700 bg-sky-50'
+  if (section === 'repacked') return 'border-violet-300 text-violet-700 bg-violet-50'
+  if (section === 'other') return 'border-amber-300 text-amber-700 bg-amber-50'
+  return 'border-emerald-300 text-emerald-700 bg-emerald-50'
+}
+
+function SectionPicker({
+  section,
+  disabled,
+  onPick,
+}: {
+  section: DocumentItem['section']
+  disabled?: boolean
+  onPick: (next: DocumentItem['section']) => void
+}) {
+  const key = canonicalSectionForGrouping(section)
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        disabled={disabled}
+        render={
+          <button
+            type="button"
+            title="Change section"
+            className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium hover:opacity-80 disabled:opacity-50 ${sectionBadgeClass(key)}`}
+          >
+            {sectionShortLabel(key)}
+          </button>
+        }
+      />
+      <DropdownMenuContent align="end">
+        {SECTION_PICK_OPTIONS.map(opt => (
+          <DropdownMenuItem key={opt} disabled={opt === key} onClick={() => onPick(opt)}>
+            {sectionShortLabel(opt)}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
@@ -867,6 +911,31 @@ export function ProductsClient({
     })
   }
 
+  function handleSectionChange(id: string, section: DocumentItem['section']) {
+    startTransition(async () => {
+      try {
+        await updateDocumentItemSection(id, section)
+        toast.success(`Section → ${sectionShortLabel(canonicalSectionForGrouping(section))}`)
+        router.refresh()
+      } catch (e: any) { toast.error(e.message) }
+    })
+  }
+
+  function handleBulkSectionChange(section: DocumentItem['section']) {
+    const ids = selectedRows.map(p => p.id)
+    if (ids.length === 0) return
+    startTransition(async () => {
+      try {
+        await updateDocumentItemsSection(ids, section)
+        setSelectedRowIds(new Set())
+        toast.success(
+          `Moved ${ids.length} rows → ${sectionShortLabel(canonicalSectionForGrouping(section))}`
+        )
+        router.refresh()
+      } catch (e: any) { toast.error(e.message) }
+    })
+  }
+
   function handleDeleteFooterItems() {
     if (footerItems.length === 0) return
     const scopeLabel = selectedDocumentId !== 'all' ? ' from this document' : ''
@@ -1142,6 +1211,24 @@ export function ProductsClient({
               ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Importing...</>
               : <><Upload className="h-3.5 w-3.5" /> Import</>}
           </Button>
+          {selectedRows.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button variant="outline" size="sm" className="h-8 gap-1.5" disabled={isPending} />
+                }
+              >
+                Move section ({selectedRows.length})
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {SECTION_PICK_OPTIONS.map(opt => (
+                  <DropdownMenuItem key={opt} onClick={() => handleBulkSectionChange(opt)}>
+                    {sectionShortLabel(opt)}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-8 gap-1.5" />}>
               <Download className="h-3.5 w-3.5" /> Export
@@ -1414,7 +1501,13 @@ export function ProductsClient({
                       {showManifestOnlyColumns && (
                         <td className="p-2 tabular-nums">{boxLabel(p.box_no_start, p.box_no_end)}</td>
                       )}
-                      <td className="p-2"><SectionBadge section={p.section} /></td>
+                      <td className="p-2">
+                        <SectionPicker
+                          section={p.section}
+                          disabled={isPending}
+                          onPick={next => handleSectionChange(p.id, next)}
+                        />
+                      </td>
                       <td className="p-1">
                         <DropdownMenu>
                           <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon" className="h-7 w-7" />}>
