@@ -12,6 +12,7 @@ import {
   Boxes,
   FileSpreadsheet,
   MonitorPlay,
+  FolderOpen,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -24,6 +25,7 @@ const navItems = [
   { href: '/stock', label: 'Stock Movements', icon: ArrowLeftRight },
   { href: '/suppliers', label: 'Suppliers', icon: Truck },
   { href: '/compiled-products', label: 'Compiled Products', icon: FileSpreadsheet },
+  { href: '/management', label: 'Management', icon: FolderOpen },
   { href: '/live-view', label: 'Live View', icon: MonitorPlay },
 ]
 

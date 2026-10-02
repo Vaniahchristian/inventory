@@ -1059,6 +1059,7 @@ export async function updateDocumentItem(id: string, formData: FormData): Promis
   if (error) throw new Error(error.message)
   revalidatePath('/compiled-products')
   revalidatePath('/products')
+  revalidatePath('/management')
 }
 
 export async function deleteProduct(id: string) {
@@ -1218,6 +1219,7 @@ export async function deleteDocumentItem(id: string): Promise<void> {
   )
   if (error) throw new Error(error.message)
   revalidatePath('/products')
+  revalidatePath('/management')
 }
 
 /** Deletes one document; line items cascade. Compiled `products` rows linked by source_document_id cascade (FK). */
