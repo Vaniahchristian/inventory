@@ -86,7 +86,7 @@ function documentSelectLabel(doc: ProductDocumentRef): string {
   }
 }
 
-/** Live View: column sets — manifest vs sales hide the other side's exclusive fields; mixed shows all */
+/** Column sets — manifest vs sales hide the other side's exclusive fields; mixed shows all */
 type ProductTableLayout = 'sales' | 'manifest' | 'mixed'
 
 function productTableColumnCount(layout: ProductTableLayout): number {
@@ -1431,7 +1431,7 @@ export function ProductsClient({
                     ? 'Import in progress…'
                     : listStats.totalCount > 0
                       ? 'No product rows in this view. Try clearing filters.'
-                      : 'No rows found. Save a PDF via Live View.'}
+                      : 'No rows found. Import a PDF or spreadsheet to get started.'}
                 </td>
               </tr>
             ) : (

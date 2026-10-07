@@ -11,7 +11,6 @@ import {
   X,
   Boxes,
   FileSpreadsheet,
-  MonitorPlay,
   FolderOpen,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -26,7 +25,6 @@ const navItems = [
   { href: '/suppliers', label: 'Suppliers', icon: Truck },
   { href: '/compiled-products', label: 'Compiled Products', icon: FileSpreadsheet },
   { href: '/management', label: 'Management', icon: FolderOpen },
-  { href: '/live-view', label: 'Live View', icon: MonitorPlay },
 ]
 
 function NavLink({ href, label, icon: Icon, onClick }: {
