@@ -1007,6 +1007,8 @@ export async function adjustDocumentItemCartons(id: string, delta: number) {
   if (error) throw new Error(error.message)
   revalidatePath('/compiled-products')
   revalidatePath('/products')
+  revalidatePath('/management')
+  revalidatePath('/')
 }
 
 export async function markDocumentItemOutOfStock(id: string): Promise<void> {
@@ -1017,6 +1019,8 @@ export async function markDocumentItemOutOfStock(id: string): Promise<void> {
   if (error) throw new Error(error.message)
   revalidatePath('/compiled-products')
   revalidatePath('/products')
+  revalidatePath('/management')
+  revalidatePath('/')
 }
 
 const DOCUMENT_ITEM_SECTIONS = ['shipped', 'left_in_warehouse', 'repacked', 'other'] as const

@@ -3,7 +3,7 @@
 import React, { useMemo, useState, useTransition } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
-import { Search, Pencil, Trash2 } from 'lucide-react'
+import { Search, Pencil, Trash2, Minus, Plus } from 'lucide-react'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
@@ -17,7 +17,11 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { deleteDocumentItem, updateDocumentItem } from '@/app/actions/products'
+import {
+  adjustDocumentItemCartons,
+  deleteDocumentItem,
+  updateDocumentItem,
+} from '@/app/actions/products'
 import { isFooterLikeItem } from '@/lib/document-item-filters'
 import type { DocumentItem, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
@@ -89,6 +93,7 @@ export function ManagementClient({
   const [isPending, startTransition] = useTransition()
   const [query, setQuery] = useState('')
   const [editingItem, setEditingItem] = useState<DocumentItem | null>(null)
+  const [adjustingId, setAdjustingId] = useState<string | null>(null)
 
   const visibleItems = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -176,6 +181,19 @@ export function ManagementClient({
         toast.error(err instanceof Error ? err.message : 'Save failed')
       }
     })
+  }
+
+  async function handleAdjustCartons(id: string, delta: number) {
+    if (adjustingId || isPending) return
+    setAdjustingId(id)
+    try {
+      await adjustDocumentItemCartons(id, delta)
+      router.refresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Adjust failed')
+    } finally {
+      setAdjustingId(null)
+    }
   }
 
   return (
@@ -273,7 +291,33 @@ export function ManagementClient({
                             {fmtNum(item.total_quantity)}
                           </TableCell>
                           <TableCell className="align-top text-right tabular-nums">
-                            {fmtNum(item.total_cartons)}
+                            <div className="flex items-center justify-end gap-0.5">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 rounded text-slate-500 hover:text-slate-900"
+                                disabled={adjustingId === item.id || isPending}
+                                onClick={() => handleAdjustCartons(item.id, -1)}
+                                aria-label="Subtract one carton"
+                              >
+                                <Minus className="h-3 w-3" />
+                              </Button>
+                              <span className="w-8 text-center tabular-nums">
+                                {fmtNum(item.total_cartons)}
+                              </span>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 rounded text-slate-500 hover:text-slate-900"
+                                disabled={adjustingId === item.id || isPending}
+                                onClick={() => handleAdjustCartons(item.id, +1)}
+                                aria-label="Add one carton"
+                              >
+                                <Plus className="h-3 w-3" />
+                              </Button>
+                            </div>
                           </TableCell>
                           <TableCell className="align-top">
                             <div className="flex items-center justify-center gap-1">
