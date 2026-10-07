@@ -229,16 +229,16 @@ export function ManagementClient({
               : 'Select a file from the dropdown to view its rows.'}
           </div>
         ) : (
-          <div className="rounded-md border bg-white overflow-x-auto">
-            <Table className="text-xs">
+          <div className="rounded-md border bg-white">
+            <Table className="text-xs table-fixed w-full">
               <TableHeader>
                 <TableRow className="bg-slate-50">
                   <TableHead className="w-10 text-center">#</TableHead>
-                  <TableHead className="min-w-[100px]">Marks</TableHead>
-                  <TableHead className="min-w-[140px]">Name</TableHead>
-                  <TableHead className="min-w-[220px]">Description</TableHead>
-                  <TableHead className="w-24 text-right">Pieces</TableHead>
-                  <TableHead className="w-24 text-right">Cartons</TableHead>
+                  <TableHead className="w-[12%]">Marks</TableHead>
+                  <TableHead className="w-[34%]">Name</TableHead>
+                  <TableHead className="w-[30%]">Description</TableHead>
+                  <TableHead className="w-20 text-right">Pieces</TableHead>
+                  <TableHead className="w-20 text-right">Cartons</TableHead>
                   <TableHead className="w-24 text-center">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -259,23 +259,23 @@ export function ManagementClient({
                       </TableRow>
                       {rows.map((item, idx) => (
                         <TableRow key={item.id}>
-                          <TableCell className="text-center text-slate-400">{idx + 1}</TableCell>
-                          <TableCell className="font-medium text-slate-800">
+                          <TableCell className="align-top text-center text-slate-400">{idx + 1}</TableCell>
+                          <TableCell className="align-top font-medium text-slate-800 whitespace-normal break-words">
                             {item.marks ?? '-'}
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="align-top whitespace-normal break-words">
                             {item.product_name_local ?? item.description ?? '-'}
                           </TableCell>
-                          <TableCell className="max-w-[360px] truncate text-slate-600" title={item.description ?? ''}>
+                          <TableCell className="align-top whitespace-normal break-words text-slate-600">
                             {item.description ?? '-'}
                           </TableCell>
-                          <TableCell className="text-right tabular-nums">
+                          <TableCell className="align-top text-right tabular-nums">
                             {fmtNum(item.total_quantity)}
                           </TableCell>
-                          <TableCell className="text-right tabular-nums">
+                          <TableCell className="align-top text-right tabular-nums">
                             {fmtNum(item.total_cartons)}
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="align-top">
                             <div className="flex items-center justify-center gap-1">
                               <Button
                                 type="button"
