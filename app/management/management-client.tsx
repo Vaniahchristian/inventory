@@ -1,29 +1,31 @@
 'use client'
 
-import { useMemo, useState, useTransition } from 'react'
+import React, { useMemo, useState, useTransition } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
-import { Search, Pencil, Trash2, FileText, FileSpreadsheet } from 'lucide-react'
+import { Search, Pencil, Trash2 } from 'lucide-react'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { cn } from '@/lib/utils'
 import { deleteDocumentItem, updateDocumentItem } from '@/app/actions/products'
 import { isFooterLikeItem } from '@/lib/document-item-filters'
-import type { DocumentItem, ProductDocumentRef } from '@/lib/types'
+import type { DocumentItem, ImportMeta, ProductDocumentRef } from '@/lib/types'
 
 type Props = {
   documents: ProductDocumentRef[]
   items: DocumentItem[]
   selectedDocumentId: string | null
+  importMeta?: ImportMeta | null
 }
 
 function fmtNum(n: number | null | undefined) {
@@ -31,32 +33,62 @@ function fmtNum(n: number | null | undefined) {
   return n.toLocaleString('en-UG', { maximumFractionDigits: 2 })
 }
 
-function formatDate(iso: string | undefined) {
-  if (!iso) return ''
+function documentSelectLabel(doc: ProductDocumentRef): string {
+  const name = (doc.source_file_name ?? 'Document').trim() || 'Document'
+  const short = name.length > 52 ? `${name.slice(0, 50)}…` : name
+  if (!doc.created_at) return short
   try {
-    return new Date(iso).toLocaleDateString('en-GB', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-    })
+    const d = new Date(doc.created_at)
+    if (!isFinite(d.getTime())) return short
+    const when = d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    return `${short} — ${when}`
   } catch {
-    return ''
+    return short
   }
 }
 
-function docTypeLabel(t: ProductDocumentRef['document_type']) {
-  return t === 'sales_order' ? 'Sales' : 'Manifest'
+function parseSectionLabel(remarks: string | null | undefined): string | null {
+  const raw = (remarks ?? '').split(';').map(s => s.trim()).find(s => s.startsWith('section_label:'))
+  if (!raw) return null
+  try {
+    return decodeURIComponent(raw.slice('section_label:'.length)).trim() || null
+  } catch {
+    return raw.slice('section_label:'.length).trim() || null
+  }
 }
 
-export function ManagementClient({ documents, items, selectedDocumentId }: Props) {
+function sectionTitleForItem(item: DocumentItem, hasNamedBlocks: boolean): string {
+  const custom = parseSectionLabel(item.remarks)
+  if (custom) return custom
+  if (hasNamedBlocks && (item.section ?? 'shipped') === 'shipped') return 'NEW ORDERS'
+  if (item.section === 'left_in_warehouse') return 'GOODS LEFT IN SANCARGO'
+  if (item.section === 'repacked') return 'REPACKED'
+  if (item.section === 'other') return 'OTHER'
+  return 'NEW ORDERS'
+}
+
+function sectionSortRank(title: string): number {
+  const u = title.toUpperCase()
+  if (/\bNEW\s+ORDERS?\b/.test(u)) return 0
+  if (/\bGOODS\s+LOAD\b/.test(u) || /\bMMB\b/.test(u)) return 1
+  if (/^SHEET\s*\d+\b/.test(u)) return 2
+  if (/\bLEFT\b/.test(u)) return 3
+  if (/\bREPACK/.test(u)) return 4
+  return 5
+}
+
+export function ManagementClient({
+  documents,
+  items,
+  selectedDocumentId,
+  importMeta = null,
+}: Props) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const [isPending, startTransition] = useTransition()
   const [query, setQuery] = useState('')
   const [editingItem, setEditingItem] = useState<DocumentItem | null>(null)
-
-  const selectedDoc = documents.find(d => d.id === selectedDocumentId) ?? null
 
   const visibleItems = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -67,6 +99,7 @@ export function ManagementClient({ documents, items, selectedDocumentId }: Props
         i.marks,
         i.product_name_local,
         i.description,
+        parseSectionLabel(i.remarks),
       ]
         .filter(Boolean)
         .join(' ')
@@ -74,6 +107,43 @@ export function ManagementClient({ documents, items, selectedDocumentId }: Props
       return hay.includes(q)
     })
   }, [items, query])
+
+  const sectionGroups = useMemo(() => {
+    const hasNamed = visibleItems.some(i => !!parseSectionLabel(i.remarks))
+    const map = new Map<string, DocumentItem[]>()
+    for (const item of visibleItems) {
+      const title = sectionTitleForItem(item, hasNamed)
+      if (!map.has(title)) map.set(title, [])
+      map.get(title)!.push(item)
+    }
+    return [...map.entries()]
+      .map(([title, rows]) => ({
+        title,
+        rows,
+        st: {
+          cartons: rows.reduce((s, r) => s + (r.total_cartons ?? 0), 0),
+          qty: rows.reduce((s, r) => s + (r.total_quantity ?? 0), 0),
+          cbm: rows.reduce((s, r) => s + (r.total_cbm ?? 0), 0),
+          weight: rows.reduce((s, r) => s + (r.total_weight_kg ?? 0), 0),
+          amount: rows.reduce((s, r) => s + (r.total_amount_rmb ?? 0), 0),
+        },
+        minLine: rows.reduce((m, r) => Math.min(m, r.line_no ?? 999999), 999999),
+      }))
+      .sort((a, b) => {
+        const ra = sectionSortRank(a.title)
+        const rb = sectionSortRank(b.title)
+        if (ra !== rb) return ra - rb
+        if (a.minLine !== b.minLine) return a.minLine - b.minLine
+        return a.title.localeCompare(b.title)
+      })
+  }, [visibleItems])
+
+  const hasDocFooter =
+    !!importMeta &&
+    (importMeta.total_carton != null ||
+      importMeta.total_cbm != null ||
+      importMeta.total_weight_kgs != null ||
+      importMeta.total_cost_rmb != null)
 
   function selectDocument(id: string) {
     const params = new URLSearchParams(searchParams.toString())
@@ -109,174 +179,182 @@ export function ManagementClient({ documents, items, selectedDocumentId }: Props
   }
 
   return (
-    <div className="flex h-full min-h-0">
-      {/* Left: file list */}
-      <aside className="w-[280px] shrink-0 border-r bg-white flex flex-col min-h-0">
-        <div className="px-3 py-3 border-b">
+    <div className="flex h-full min-h-0 flex-col bg-slate-50">
+      <div className="px-4 py-3 border-b bg-white flex items-center gap-3 flex-wrap">
+        <div className="min-w-0 flex-1">
           <h1 className="text-sm font-semibold text-slate-900">Management</h1>
           <p className="text-[11px] text-slate-500 mt-0.5">
-            {documents.length} imported file{documents.length === 1 ? '' : 's'}
+            {visibleItems.length} row{visibleItems.length === 1 ? '' : 's'}
+            {query.trim() ? ' matching search' : ''}
+            {documents.length > 0
+              ? ` · ${documents.length} imported file${documents.length === 1 ? '' : 's'}`
+              : ''}
           </p>
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {documents.length === 0 ? (
-            <p className="px-3 py-6 text-xs text-slate-500">No imported files yet.</p>
-          ) : (
-            <ul className="py-1">
-              {documents.map(doc => {
-                const active = doc.id === selectedDocumentId
-                const isSales = doc.document_type === 'sales_order'
-                return (
-                  <li key={doc.id}>
-                    <button
-                      type="button"
-                      onClick={() => selectDocument(doc.id)}
-                      className={cn(
-                        'w-full text-left px-3 py-2.5 border-l-2 transition-colors',
-                        active
-                          ? 'bg-slate-100 border-slate-800'
-                          : 'border-transparent hover:bg-slate-50'
-                      )}
-                    >
-                      <div className="flex items-start gap-2">
-                        {isSales ? (
-                          <FileSpreadsheet className="h-3.5 w-3.5 mt-0.5 shrink-0 text-slate-500" />
-                        ) : (
-                          <FileText className="h-3.5 w-3.5 mt-0.5 shrink-0 text-slate-500" />
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <p className={cn(
-                            'text-xs truncate',
-                            active ? 'font-semibold text-slate-900' : 'font-medium text-slate-700'
-                          )}>
-                            {doc.source_file_name ?? doc.id}
-                          </p>
-                          <div className="flex items-center gap-1.5 mt-1">
-                            <Badge
-                              variant="secondary"
-                              className="text-[9px] px-1.5 py-0 h-4 font-normal"
-                            >
-                              {docTypeLabel(doc.document_type)}
-                            </Badge>
-                            <span className="text-[10px] text-slate-400">
-                              {formatDate(doc.created_at)}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
+        <div className="relative">
+          <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+          <Input
+            placeholder="Search marks, name, description…"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            className="pl-8 h-8 text-sm w-64"
+            disabled={!selectedDocumentId}
+          />
         </div>
-      </aside>
+        <Select
+          value={selectedDocumentId ?? undefined}
+          onValueChange={(v) => {
+            if (v) selectDocument(v)
+          }}
+          disabled={documents.length === 0}
+        >
+          <SelectTrigger className="h-8 text-xs min-w-[300px] max-w-[420px]">
+            <SelectValue placeholder="Select imported file" />
+          </SelectTrigger>
+          <SelectContent>
+            {documents.map(doc => (
+              <SelectItem key={doc.id} value={doc.id}>
+                {documentSelectLabel(doc)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
 
-      {/* Right: items table */}
-      <section className="flex-1 min-w-0 flex flex-col bg-slate-50">
-        <div className="px-4 py-3 border-b bg-white flex items-center gap-3 flex-wrap">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold text-slate-900 truncate">
-              {selectedDoc?.source_file_name ?? 'Select a file'}
-            </h2>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              {visibleItems.length} row{visibleItems.length === 1 ? '' : 's'}
-              {query.trim() ? ' matching search' : ''}
-            </p>
+      <div className="flex-1 overflow-auto p-4">
+        {!selectedDocumentId ? (
+          <div className="rounded-md border bg-white px-4 py-12 text-center text-sm text-slate-500">
+            {documents.length === 0
+              ? 'No imported files yet.'
+              : 'Select a file from the dropdown to view its rows.'}
           </div>
-          <div className="relative">
-            <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
-            <Input
-              placeholder="Search marks, name, description…"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              className="pl-8 h-8 text-sm w-64"
-              disabled={!selectedDocumentId}
-            />
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-auto p-4">
-          {!selectedDocumentId ? (
-            <div className="rounded-md border bg-white px-4 py-12 text-center text-sm text-slate-500">
-              Select a file from the left to view its rows.
-            </div>
-          ) : (
-            <div className="rounded-md border bg-white overflow-x-auto">
-              <Table className="text-xs">
-                <TableHeader>
-                  <TableRow className="bg-slate-50">
-                    <TableHead className="w-10 text-center">#</TableHead>
-                    <TableHead className="min-w-[100px]">Marks</TableHead>
-                    <TableHead className="min-w-[140px]">Name</TableHead>
-                    <TableHead className="min-w-[220px]">Description</TableHead>
-                    <TableHead className="w-24 text-right">Pieces</TableHead>
-                    <TableHead className="w-24 text-right">Cartons</TableHead>
-                    <TableHead className="w-24 text-center">Actions</TableHead>
+        ) : (
+          <div className="rounded-md border bg-white overflow-x-auto">
+            <Table className="text-xs">
+              <TableHeader>
+                <TableRow className="bg-slate-50">
+                  <TableHead className="w-10 text-center">#</TableHead>
+                  <TableHead className="min-w-[100px]">Marks</TableHead>
+                  <TableHead className="min-w-[140px]">Name</TableHead>
+                  <TableHead className="min-w-[220px]">Description</TableHead>
+                  <TableHead className="w-24 text-right">Pieces</TableHead>
+                  <TableHead className="w-24 text-right">Cartons</TableHead>
+                  <TableHead className="w-24 text-center">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visibleItems.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="text-center text-slate-500 py-10">
+                      No rows for this file.
+                    </TableCell>
                   </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {visibleItems.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center text-slate-500 py-10">
-                        No rows for this file.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    visibleItems.map((item, idx) => (
-                      <TableRow key={item.id}>
-                        <TableCell className="text-center text-slate-400">{idx + 1}</TableCell>
-                        <TableCell className="font-medium text-slate-800">
-                          {item.marks ?? '-'}
-                        </TableCell>
-                        <TableCell>
-                          {item.product_name_local ?? item.description ?? '-'}
-                        </TableCell>
-                        <TableCell className="max-w-[360px] truncate text-slate-600" title={item.description ?? ''}>
-                          {item.description ?? '-'}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtNum(item.total_quantity)}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtNum(item.total_cartons)}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center justify-center gap-1">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => setEditingItem(item)}
-                              disabled={isPending}
-                              aria-label="Edit row"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-red-600 hover:text-red-700"
-                              onClick={() => handleDelete(item.id)}
-                              disabled={isPending}
-                              aria-label="Delete row"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
+                ) : (
+                  sectionGroups.map(({ title, rows, st }) => (
+                    <React.Fragment key={title}>
+                      <TableRow className="bg-amber-100/80 border-y border-amber-200">
+                        <TableCell colSpan={7} className="py-2 px-3 text-[11px] font-semibold text-amber-950 tracking-wide">
+                          {title}
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+                      {rows.map((item, idx) => (
+                        <TableRow key={item.id}>
+                          <TableCell className="text-center text-slate-400">{idx + 1}</TableCell>
+                          <TableCell className="font-medium text-slate-800">
+                            {item.marks ?? '-'}
+                          </TableCell>
+                          <TableCell>
+                            {item.product_name_local ?? item.description ?? '-'}
+                          </TableCell>
+                          <TableCell className="max-w-[360px] truncate text-slate-600" title={item.description ?? ''}>
+                            {item.description ?? '-'}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtNum(item.total_quantity)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtNum(item.total_cartons)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center justify-center gap-1">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={() => setEditingItem(item)}
+                                disabled={isPending}
+                                aria-label="Edit row"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-red-600 hover:text-red-700"
+                                onClick={() => handleDelete(item.id)}
+                                disabled={isPending}
+                                aria-label="Delete row"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      <TableRow className="bg-amber-50 border-b-2 border-amber-200 text-[11px] font-semibold">
+                        <TableCell colSpan={4} className="py-2 px-3 text-amber-950">
+                          {title} — {rows.length} rows
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtNum(st.qty)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtNum(st.cartons)} CTN</TableCell>
+                        <TableCell className="text-right text-[10px] font-normal text-slate-500 pr-3">
+                          {fmtNum(st.cbm)} CBM · {fmtNum(st.weight)} kg
+                          {st.amount > 0 ? ` · ¥${fmtNum(st.amount)}` : ''}
+                        </TableCell>
+                      </TableRow>
+                    </React.Fragment>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+
+        {selectedDocumentId && hasDocFooter && importMeta && (
+          <div className="mt-4 rounded-md border bg-white px-4 py-3 text-xs">
+            <p className="text-[11px] font-semibold text-slate-700 mb-2">Document footer</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-slate-700">
+              <div>
+                <span className="text-slate-400">TOTAL CARTON</span>
+                <p className="font-semibold tabular-nums">
+                  {importMeta.total_carton != null ? `${fmtNum(importMeta.total_carton)} CTN` : '-'}
+                </p>
+              </div>
+              <div>
+                <span className="text-slate-400">TOTAL CBM</span>
+                <p className="font-semibold tabular-nums">
+                  {importMeta.total_cbm != null ? `${fmtNum(importMeta.total_cbm)} CBM` : '-'}
+                </p>
+              </div>
+              <div>
+                <span className="text-slate-400">TOTAL WEIGHT</span>
+                <p className="font-semibold tabular-nums">
+                  {importMeta.total_weight_kgs != null ? `${fmtNum(importMeta.total_weight_kgs)} KGS` : '-'}
+                </p>
+              </div>
+              <div>
+                <span className="text-slate-400">TOTAL COST</span>
+                <p className="font-semibold tabular-nums">
+                  {importMeta.total_cost_rmb != null ? `¥${fmtNum(importMeta.total_cost_rmb)}` : '-'}
+                  {importMeta.total_cost_usd != null ? ` / $${fmtNum(importMeta.total_cost_usd)}` : ''}
+                </p>
+              </div>
             </div>
-          )}
-        </div>
-      </section>
+          </div>
+        )}
+      </div>
 
       <Dialog open={!!editingItem} onOpenChange={(open) => !open && setEditingItem(null)}>
         <DialogContent className="max-w-lg">

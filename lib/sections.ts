@@ -85,7 +85,12 @@ export function isStuffedContainerHeader(raw: string): boolean {
     u.includes('STUFFED INTO THIS CONTAINER') ||
     u.includes('STUFFED INTO THIS CO') ||
     compact.includes('GOODSHASBEENSTUFFEDINTOTHISCO') ||
-    compact.includes('GOODSHASBEENSTUFFEDINTOTHISCONTAINER')
+    compact.includes('GOODSHASBEENSTUFFEDINTOTHISCONTAINER') ||
+    // KM-1 style: "MMB GOODS LOAD IN THIS CONTANIER"
+    /\bGOODS\s+LOAD\s+IN\s+THIS\s+CONTAI?NIER?\b/.test(u) ||
+    compact.includes('GOODSLOADINTHISCONTAINER') ||
+    compact.includes('GOODSLOADINTHISCONTANIER') ||
+    compact.includes('MMBGOODSLOAD')
   )
 }
 

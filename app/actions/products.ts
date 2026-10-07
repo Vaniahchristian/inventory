@@ -671,7 +671,7 @@ export async function getDocumentImportMeta(documentId: string): Promise<Documen
     () =>
       supabase
         .from('documents')
-        .select('id, source_file_name, client_name, client_id, container_no, document_type')
+        .select('id, source_file_name, client_name, client_id, container_no, document_type, raw_extraction')
         .eq('id', documentId)
         .maybeSingle(),
     'getDocumentImportMeta.doc'
@@ -699,17 +699,33 @@ export async function getDocumentImportMeta(documentId: string): Promise<Documen
   const lower = name.toLowerCase()
   const source_file_type: 'pdf' | 'excel_or_csv' = lower.endsWith('.pdf') ? 'pdf' : 'excel_or_csv'
 
+  // Prefer document_totals; fall back to raw_extraction.footer_totals (CSV/manual backfills).
+  const rawFt =
+    doc.raw_extraction &&
+    typeof doc.raw_extraction === 'object' &&
+    !Array.isArray(doc.raw_extraction) &&
+    (doc.raw_extraction as Record<string, unknown>).footer_totals &&
+    typeof (doc.raw_extraction as Record<string, unknown>).footer_totals === 'object'
+      ? ((doc.raw_extraction as Record<string, unknown>).footer_totals as Record<string, unknown>)
+      : null
+  const numOrNull = (v: unknown) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null)
+  const footerCartons = totals?.total_cartons != null ? Number(totals.total_cartons) : numOrNull(rawFt?.total_cartons)
+  const footerCbm = totals?.total_cbm != null ? Number(totals.total_cbm) : numOrNull(rawFt?.total_cbm)
+  const footerWeight = totals?.total_weight_kg != null ? Number(totals.total_weight_kg) : numOrNull(rawFt?.total_weight_kg)
+  const footerRmb = totals?.total_amount_rmb != null ? Number(totals.total_amount_rmb) : numOrNull(rawFt?.total_amount_rmb)
+  const footerUsd = totals?.total_amount_usd != null ? Number(totals.total_amount_usd) : numOrNull(rawFt?.total_amount_usd)
+
   const meta: ImportMeta = {
     source_file_name: name || 'document',
     source_file_type,
     document_type: doc.document_type as ImportMeta['document_type'],
     client_details: doc.client_name ?? doc.client_id ?? null,
     container_no: doc.container_no ?? null,
-    total_weight_kgs: totals?.total_weight_kg != null ? Number(totals.total_weight_kg) : null,
-    total_cbm: totals?.total_cbm != null ? Number(totals.total_cbm) : null,
-    total_carton: totals?.total_cartons != null ? Number(totals.total_cartons) : null,
-    total_cost_rmb: totals?.total_amount_rmb != null ? Number(totals.total_amount_rmb) : null,
-    total_cost_usd: totals?.total_amount_usd != null ? Number(totals.total_amount_usd) : null,
+    total_weight_kgs: footerWeight,
+    total_cbm: footerCbm,
+    total_carton: footerCartons,
+    total_cost_rmb: footerRmb,
+    total_cost_usd: footerUsd,
     payment_date: null,
     payment_usd: null,
     goods_balance_usd: null,

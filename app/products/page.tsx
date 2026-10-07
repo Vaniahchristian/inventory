@@ -5,6 +5,7 @@ import {
   getDocumentItemsPageStats,
   getDocumentFooterRowsForList,
   getDocumentItemDocuments,
+  getDocumentImportMeta,
   getLatestImportMeta,
 } from '@/app/actions/products'
 import type { DocumentItemsListFilters } from '@/lib/products-list'
@@ -35,7 +36,8 @@ export default async function ProductsPage({
     listStats,
     footerRows,
     productDocuments,
-    importMeta,
+    latestMeta,
+    selectedDocMeta,
     globalStats,
     docScopeStats,
   ] = await Promise.all([
@@ -44,9 +46,12 @@ export default async function ProductsPage({
     getDocumentFooterRowsForList(filters),
     getDocumentItemDocuments(),
     getLatestImportMeta(),
+    doc !== 'all' ? getDocumentImportMeta(doc) : Promise.resolve(null),
     getDocumentItemsPageStats({}),
     docOnlyFilters ? getDocumentItemsPageStats(docOnlyFilters) : Promise.resolve(null),
   ])
+
+  const importMeta = selectedDocMeta?.meta ?? latestMeta
 
   return (
     <ProductsClient

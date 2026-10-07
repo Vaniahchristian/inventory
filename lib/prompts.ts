@@ -17,12 +17,18 @@ export function detectDocType(lines: string[]): DocType {
 
 export function detectDocTypeFromFilename(filename: string): DocType {
   const base = filename.toLowerCase().split(/[/\\]/).pop() ?? filename.toLowerCase()
+  // Prefer explicit sales-order names; bare "sales" alone is too weak (packing lists
+  // are often misnamed sales.csv while still having MARKS / T.CTN layout).
   const salesSignals =
     base.includes('销售单') ||
     base.includes('送货单') ||
     /\bsales[_-]?order\b/i.test(base) ||
-    base.includes('sales')
+    /\bsales[_-]?(note|invoice|delivery)\b/i.test(base)
   if (salesSignals) return 'sales_order'
+  if (base.includes('sales') && !/\b(manifest|container|ms[-_]?\d)/i.test(base)) {
+    // Ambiguous — let content detection decide (unknown here).
+    return 'unknown'
+  }
   return 'container_manifest'
 }
 

@@ -96,7 +96,7 @@ function productTableColumnCount(layout: ProductTableLayout): number {
     case 'manifest':
       return 22 // no DEL, CUS, Unit, 品名, Mat
     case 'sales':
-      return 24 // no Marks, Shop, Box
+      return 26 // Marks + Shop + sales fields; no Box
     default:
       return 27
   }
@@ -109,7 +109,7 @@ function subtotalLabelColSpan(layout: ProductTableLayout): number {
     case 'manifest':
       return 8 // # … through Packing (4 lead + desc + pack)
     case 'sales':
-      return 11 // # … through Packing
+      return 13 // # … through Packing (Marks · Shop · DEL · CUS · Item · Src …)
     default:
       return 13
   }
@@ -119,6 +119,8 @@ function ProductLeadHeaders({ layout }: { layout: ProductTableLayout }) {
   if (layout === 'sales') {
     return (
       <>
+        <th className="p-2 font-medium min-w-[120px]">Marks</th>
+        <th className="p-2 font-medium min-w-[80px]">Shop</th>
         <th className="p-2 font-medium min-w-[72px]">DEL</th>
         <th className="p-2 font-medium min-w-[72px]">CUS</th>
         <th className="p-2 font-medium w-14">Item</th>
@@ -153,6 +155,8 @@ function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTable
   if (layout === 'sales') {
     return (
       <>
+        <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
+        <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
         <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
         <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.customer_item_ref ?? '-'}</td>
         <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
@@ -409,11 +413,19 @@ function isSpuriousSectionBannerLabel(label: string): boolean {
   const s = label.replace(/\s+/g, ' ').trim()
   if (!s) return false
   const upper = s.toUpperCase()
-  // Real section titles only — never treat these as spurious
+  // Known / plausible section titles — never treat as spurious (titles change per file)
   if (/\bNEW\s+ORDERS?\b/.test(upper)) return false
   if (/\bBEFORE\s+GOODS\b/.test(upper)) return false
-  if (/\bGOODS\s+LEFT\s+IN\s+SANCARGO\b/.test(upper)) return false
+  if (/\bGOODS\s+LEFT\b/.test(upper)) return false
   if (/\bGOODS\s+STUFFED\b/.test(upper) || /\bSTUFFED\s+INTO\s+THIS\s+CO/.test(upper)) return false
+  if (/\bGOODS\s+LOAD\b/.test(upper) || /\bLOAD\s+IN\s+THIS\s+CONTA/.test(upper)) return false
+  if (/\bREPACK/.test(upper)) return false
+  if (/^SHEET\s*\d+\b/.test(upper)) return false
+  // Short heading-shaped text (2–14 words, little punctuation) is a real banner
+  const words = s.split(/\s+/).filter(Boolean)
+  if (words.length >= 2 && words.length <= 14 && !/¥|￥/.test(s) && !/\d+\.\d{2,}/.test(s)) {
+    return false
+  }
   // Product-row fingerprints mistakenly stored as labels
   if (s.length >= 82) return true
   if (/¥|￥/.test(s) && (/\bCBM\b|\bKGS\b|\bCTNS?\b/i.test(s) || /\d+\s*-\s*\d+\s*$/.test(s))) return true
@@ -425,7 +437,8 @@ function cleanSectionLabel(label: string): string {
   const cleaned = label.replace(/\s+/g, ' ').trim()
   if (!cleaned) return cleaned
   const upper = cleaned.toUpperCase()
-  if (/\bNEW\s+ORDERS?\b/.test(upper)) return 'NEW ORDERS'
+  // Only normalize a few stable aliases; pass through new/changing titles as written
+  if (/\bNEW\s+ORDERS?\b/.test(upper) && wordsLen(cleaned) <= 4) return 'NEW ORDERS'
   if (/\bGOODS\s+LEFT\s+IN\s+SANCARGO\b/.test(upper)) return 'GOODS LEFT IN SANCARGO WAREHOUSE'
   if (/\bBEFORE\s+GOODS\b/.test(upper)) {
     const m = cleaned.match(/BEFORE\s+GOODS(?:\s+[A-Z0-9-]+)?/i)
@@ -437,6 +450,10 @@ function cleanSectionLabel(label: string): string {
     return 'GOODS STUFFED INTO THIS CONTAINER'
   }
   return cleaned
+}
+
+function wordsLen(s: string): number {
+  return s.split(/\s+/).filter(Boolean).length
 }
 
 function displaySectionLabel(section: string, remarks?: string | null): string {
@@ -801,11 +818,12 @@ export function ProductsClient({
 
   const groupedSections = useMemo(() => {
     const groups = new Map<string, { sectionKey: string; sectionLabel: string; rows: DocumentItem[] }>()
-    const hasNewOrdersShippedHeader = mainRows.some(row => {
+    // Any custom banner under shipped (titles change per file) means unlabeled shipped
+    // rows are the default NEW ORDERS block — keeps sections + their line totals separate.
+    const hasNamedShippedBlocks = mainRows.some(row => {
       if (canonicalSectionForGrouping(row.section) !== 'shipped') return false
       const custom = parseSectionLabelFromRemarks(row.remarks)
-      if (!custom || isSpuriousSectionBannerLabel(custom)) return false
-      return /\bNEW\s+ORDERS?\b/i.test(cleanSectionLabel(custom))
+      return !!custom && !isSpuriousSectionBannerLabel(custom)
     })
     for (const row of mainRows) {
       const sectionKey = canonicalSectionForGrouping(row.section)
@@ -813,7 +831,9 @@ export function ProductsClient({
       const hasCustom = !!custom && !isSpuriousSectionBannerLabel(custom)
       const sectionLabel = hasCustom
         ? cleanSectionLabel(custom!)
-        : (sectionKey === 'shipped' && hasNewOrdersShippedHeader ? 'NEW ORDERS' : displaySectionLabel(sectionKey, row.remarks))
+        : (sectionKey === 'shipped' && hasNamedShippedBlocks
+          ? 'NEW ORDERS'
+          : displaySectionLabel(sectionKey, row.remarks))
       const key = `${sectionKey}::${sectionLabel}`
       if (!groups.has(key)) groups.set(key, { sectionKey, sectionLabel, rows: [] })
       groups.get(key)!.rows.push(row)
@@ -1153,7 +1173,7 @@ export function ProductsClient({
               Table:{' '}
               <span className="font-medium text-slate-700">
                 {productTableLayout === 'sales'
-                  ? 'Sales / 送货单 — DEL · CUS · Unit · Name · Mat · … (Marks · Shop · Box hidden)'
+                  ? 'Sales / 送货单 — Marks · Shop · DEL · CUS · Unit · Name · Mat · … (Box hidden)'
                   : 'Container manifest — Marks · Shop · Box · … (DEL · CUS · Unit · Name · Mat hidden)'}
               </span>
             </p>
