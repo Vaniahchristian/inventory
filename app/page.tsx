@@ -50,6 +50,8 @@ export default async function DashboardPage() {
     p => (p.total_cartons ?? 0) === 0 && (p.total_quantity ?? 0) === 0
   ).length
 
+  const docNameById = new Map(documents.map(d => [d.id, d.source_file_name ?? d.id]))
+
   const recentDocs = [...documents]
     .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
     .slice(0, 8)
@@ -127,6 +129,7 @@ export default async function DashboardPage() {
                     <TableHead>Marks</TableHead>
                     <TableHead>Name</TableHead>
                     <TableHead>Shop</TableHead>
+                    <TableHead>File</TableHead>
                     <TableHead className="text-right">CTN</TableHead>
                     <TableHead className="text-right">Qty</TableHead>
                   </TableRow>
@@ -139,6 +142,19 @@ export default async function DashboardPage() {
                         {p.product_name_local ?? p.description ?? '-'}
                       </TableCell>
                       <TableCell>{p.shop ?? '-'}</TableCell>
+                      <TableCell className="max-w-[140px] truncate">
+                        {p.document_id ? (
+                          <Link
+                            href={`/management?doc=${p.document_id}`}
+                            className="text-indigo-600 hover:underline"
+                            title={docNameById.get(p.document_id) ?? undefined}
+                          >
+                            {docNameById.get(p.document_id) ?? 'Unknown file'}
+                          </Link>
+                        ) : (
+                          '-'
+                        )}
+                      </TableCell>
                       <TableCell className="text-right font-bold text-red-700">
                         {p.total_cartons ?? 0}
                       </TableCell>
