@@ -107,6 +107,12 @@ const DOCUMENT_ITEM_SELECT = [
   'remarks',
   'validation_flags',
   'created_at',
+  'original_total_quantity',
+  'original_total_cartons',
+  'original_total_cbm',
+  'original_total_weight_kg',
+  'original_total_amount_rmb',
+  'deleted_at',
   'documents(source_file_name, client_id, container_no, document_date, doc_number, created_at)',
 ].join(', ')
 
@@ -136,6 +142,7 @@ function buildDocumentFooterOrFilter(): string {
 
 function applyDocumentItemsListFilters(qb: any, filters: DocumentItemsListFilters): any {
   let q = qb
+  if (!filters.includeDeleted) q = q.is('deleted_at', null)
   if (filters.documentId) q = q.eq('document_id', filters.documentId)
   const raw = filters.search?.trim()
   if (raw) {
@@ -294,7 +301,11 @@ export async function getDocumentItemsPageStats(filters: DocumentItemsListFilter
  */
 export async function getDocumentFooterRowsForList(filters: DocumentItemsListFilters): Promise<import('@/lib/types').DocumentItem[]> {
   let qb = applyDocumentItemsListOrdering(
-    supabase.from('document_items').select(DOCUMENT_ITEM_SELECT).or(buildDocumentFooterOrFilter())
+    supabase
+      .from('document_items')
+      .select(DOCUMENT_ITEM_SELECT)
+      .or(buildDocumentFooterOrFilter())
+      .is('deleted_at', null)
   ).limit(400)
 
   if (filters.documentId) qb = qb.eq('document_id', filters.documentId)
@@ -1077,6 +1088,30 @@ export async function updateDocumentItem(id: string, formData: FormData): Promis
     'updateDocumentItem'
   )
   if (error) throw new Error(error.message)
+
+  // The change row is written by a DB trigger, so the reason is attached afterwards.
+  const note = ((formData.get('note') as string) || '').trim()
+  if (note) {
+    const { data: latest } = await withSupabaseRetry(
+      () =>
+        supabase
+          .from('document_item_changes')
+          .select('id')
+          .eq('document_item_id', id)
+          .is('note', null)
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      'updateDocumentItem.latestChange'
+    )
+    if (latest?.id != null) {
+      await withSupabaseRetry(
+        () => supabase.from('document_item_changes').update({ note }).eq('id', latest.id),
+        'updateDocumentItem.note'
+      )
+    }
+  }
+
   revalidatePath('/compiled-products')
   revalidatePath('/products')
   revalidatePath('/management')
@@ -1130,6 +1165,7 @@ export async function getDocumentItems() {
         supabase
           .from('document_items')
           .select(DOCUMENT_ITEM_SELECT)
+          .is('deleted_at', null)
           .order('line_no', { ascending: true })
           .order('id', { ascending: true })
           .range(offset, to),
@@ -1156,6 +1192,7 @@ export async function getCompiledProductsSourceItems() {
         supabase
           .from('document_items')
           .select(DOCUMENT_ITEM_SELECT)
+          .is('deleted_at', null)
           .or('section.is.null,section.neq.left_in_warehouse')
           .order('line_no', { ascending: true })
           .order('id', { ascending: true })
@@ -1180,6 +1217,7 @@ export async function getWarehouseLeftDocumentItems() {
         supabase
           .from('document_items')
           .select(DOCUMENT_ITEM_SELECT)
+          .is('deleted_at', null)
           .eq('section', 'left_in_warehouse')
           .order('line_no', { ascending: true })
           .order('id', { ascending: true })
@@ -1232,14 +1270,46 @@ export async function getDocumentItemDocuments(): Promise<ProductDocumentRef[]> 
   )
 }
 
+/** Soft delete: the row stays for the audit trail but drops out of live totals and lists. */
 export async function deleteDocumentItem(id: string): Promise<void> {
   const { error } = await withSupabaseRetry(
-    () => supabase.from('document_items').delete().eq('id', id),
+    () => supabase.from('document_items').update({ deleted_at: new Date().toISOString() }).eq('id', id),
     'deleteDocumentItem'
   )
   if (error) throw new Error(error.message)
+  revalidatePath('/compiled-products')
   revalidatePath('/products')
   revalidatePath('/management')
+  revalidatePath('/')
+}
+
+export async function restoreDocumentItem(id: string): Promise<void> {
+  const { error } = await withSupabaseRetry(
+    () => supabase.from('document_items').update({ deleted_at: null }).eq('id', id),
+    'restoreDocumentItem'
+  )
+  if (error) throw new Error(error.message)
+  revalidatePath('/compiled-products')
+  revalidatePath('/products')
+  revalidatePath('/management')
+  revalidatePath('/')
+}
+
+export async function getDocumentItemChanges(
+  documentId: string
+): Promise<import('@/lib/types').DocumentItemChange[]> {
+  const { data, error } = await withSupabaseRetry(
+    () =>
+      supabase
+        .from('document_item_changes')
+        .select('id, document_item_id, document_id, action, old_values, new_values, note, changed_at')
+        .eq('document_id', documentId)
+        .order('changed_at', { ascending: false })
+        .limit(1000),
+    'getDocumentItemChanges'
+  )
+  if (error) throw new Error(error.message)
+  return ((data ?? []) as unknown) as import('@/lib/types').DocumentItemChange[]
 }
 
 /** Deletes one document; line items cascade. Compiled `products` rows linked by source_document_id cascade (FK). */

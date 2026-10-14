@@ -162,6 +162,13 @@ export type DocumentItem = {
   remarks: string | null
   validation_flags: string[]
   created_at: string
+  /** Values frozen at import time (DB trigger); live values are the total_* fields. */
+  original_total_quantity?: number | null
+  original_total_cartons?: number | null
+  original_total_cbm?: number | null
+  original_total_weight_kg?: number | null
+  original_total_amount_rmb?: number | null
+  deleted_at?: string | null
   documents?: {
     source_file_name: string | null
     client_id: string | null
@@ -170,4 +177,15 @@ export type DocumentItem = {
     doc_number: string | null
     created_at?: string | null
   } | null
+}
+
+export type DocumentItemChange = {
+  id: number
+  document_item_id: string
+  document_id: string | null
+  action: 'update' | 'delete' | 'restore'
+  old_values: Record<string, unknown> | null
+  new_values: Record<string, unknown> | null
+  note: string | null
+  changed_at: string
 }

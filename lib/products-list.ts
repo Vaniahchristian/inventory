@@ -4,6 +4,7 @@ export const PRODUCTS_PAGE_SIZE = 150
 export type DocumentItemsListFilters = {
   search?: string
   documentId?: string
+  includeDeleted?: boolean
 }
 
 export type DocumentItemsPageStats = {

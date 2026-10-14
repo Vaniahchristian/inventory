@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import {
   getDocumentImportMeta,
+  getDocumentItemChanges,
   getDocumentItemDocuments,
   getDocumentItemsForList,
 } from '@/app/actions/products'
@@ -23,18 +24,20 @@ export default async function ManagementPage({
       ? docRaw
       : (documents[0]?.id ?? null)
 
-  const [items, footerBundle] = selectedDocumentId
+  const [items, footerBundle, changes] = selectedDocumentId
     ? await Promise.all([
-        getDocumentItemsForList({ documentId: selectedDocumentId }),
+        getDocumentItemsForList({ documentId: selectedDocumentId, includeDeleted: true }),
         getDocumentImportMeta(selectedDocumentId),
+        getDocumentItemChanges(selectedDocumentId),
       ])
-    : [[], null]
+    : [[], null, []]
 
   return (
     <div className="h-[calc(100dvh-3.25rem)] md:h-dvh">
       <ManagementClient
         documents={documents}
         items={items}
+        changes={changes}
         selectedDocumentId={selectedDocumentId}
         importMeta={footerBundle?.meta ?? null}
       />
