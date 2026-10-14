@@ -267,6 +267,30 @@ export function ManagementClient({
     for (const c of changes) m.set(c.document_item_id, (m.get(c.document_item_id) ?? 0) + 1)
     return m
   }, [changes])
+  /** changes arrive newest first, so the first hit per item is its latest change */
+  const lastChangeByItem = useMemo(() => {
+    const m = new Map<string, DocumentItemChange>()
+    for (const c of changes) if (!m.has(c.document_item_id)) m.set(c.document_item_id, c)
+    return m
+  }, [changes])
+
+  const changedProducts = useMemo(() => {
+    const hasNamed = matchedItems.some(i => !!parseSectionLabel(i.remarks))
+    return matchedItems
+      .map(item => {
+        const imp = importedTotals(item)
+        const live = item.deleted_at ? sumTotals([]) : liveTotals(item)
+        return { item, imp, live, section: sectionTitleForItem(item, hasNamed), last: lastChangeByItem.get(item.id) }
+      })
+      .filter(({ item, imp, live, last }) =>
+        !!item.deleted_at ||
+        !!last ||
+        (Object.keys(imp) as (keyof Totals)[]).some(k => Math.abs(live[k] - imp[k]) >= 0.005)
+      )
+      .sort((a, b) => String(b.last?.changed_at ?? '').localeCompare(String(a.last?.changed_at ?? '')))
+  }, [matchedItems, lastChangeByItem])
+
+  const [view, setView] = useState<'all' | 'changes'>('all')
 
   const hasDocFooter =
     !!importMeta &&
@@ -430,6 +454,92 @@ export function ManagementClient({
               : 'Select a file from the dropdown to view its rows.'}
           </div>
         ) : (
+          <>
+          <div className="mb-3 inline-flex rounded-md border bg-white p-0.5 text-xs">
+            {([
+              ['all', 'All rows'],
+              ['changes', `Changes by product (${changedProducts.length})`],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setView(key)}
+                className={`rounded px-3 py-1 ${view === key ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {view === 'changes' ? (
+            <div className="rounded-md border bg-white">
+              <Table className="text-xs table-fixed w-full">
+                <TableHeader>
+                  <TableRow className="bg-slate-50">
+                    <TableHead className="w-[11%]">Marks</TableHead>
+                    <TableHead className="w-[22%]">Name</TableHead>
+                    <TableHead className="w-[11%]">Section</TableHead>
+                    <TableHead className="w-[9%] text-right">Pieces imported</TableHead>
+                    <TableHead className="w-[8%] text-right">Current</TableHead>
+                    <TableHead className="w-[7%] text-right">Change</TableHead>
+                    <TableHead className="w-[9%] text-right">Cartons imported</TableHead>
+                    <TableHead className="w-[8%] text-right">Current</TableHead>
+                    <TableHead className="w-[7%] text-right">Change</TableHead>
+                    <TableHead className="w-[16%]">Last change</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {changedProducts.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={10} className="text-center text-slate-500 py-10">
+                        No product in this file has changed since import.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    changedProducts.map(({ item, imp, live, section, last }) => (
+                      <TableRow
+                        key={item.id}
+                        className="cursor-pointer hover:bg-slate-50"
+                        onClick={() => setHistoryFor(item.id)}
+                        title="Show history"
+                      >
+                        <TableCell className="align-top font-medium text-slate-800 whitespace-normal break-words">
+                          {item.marks ?? '-'}
+                        </TableCell>
+                        <TableCell className="align-top whitespace-normal break-words">
+                          {item.product_name_local ?? item.description ?? '-'}
+                          {item.deleted_at && (
+                            <span className="ml-1.5 rounded bg-red-50 px-1 text-[10px] text-red-600">deleted</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="align-top text-slate-500 whitespace-normal break-words">{section}</TableCell>
+                        <TableCell className="align-top text-right tabular-nums text-slate-500">{fmtNum(imp.qty)}</TableCell>
+                        <TableCell className="align-top text-right tabular-nums font-medium">{fmtNum(live.qty)}</TableCell>
+                        <TableCell className={`align-top text-right tabular-nums font-semibold ${deltaClass(live.qty - imp.qty)}`}>
+                          {fmtDelta(live.qty - imp.qty)}
+                        </TableCell>
+                        <TableCell className="align-top text-right tabular-nums text-slate-500">{fmtNum(imp.cartons)}</TableCell>
+                        <TableCell className="align-top text-right tabular-nums font-medium">{fmtNum(live.cartons)}</TableCell>
+                        <TableCell className={`align-top text-right tabular-nums font-semibold ${deltaClass(live.cartons - imp.cartons)}`}>
+                          {fmtDelta(live.cartons - imp.cartons)}
+                        </TableCell>
+                        <TableCell className="align-top text-slate-500 whitespace-normal break-words">
+                          {last ? (
+                            <>
+                              {new Date(last.changed_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                              {(changeCountByItem.get(item.id) ?? 0) > 1 && ` · ${changeCountByItem.get(item.id)} changes`}
+                              {last.note && <span className="block italic text-slate-600">“{last.note}”</span>}
+                            </>
+                          ) : (
+                            '—'
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
           <div className="rounded-md border bg-white">
             <Table className="text-xs table-fixed w-full">
               <TableHeader>
@@ -599,6 +709,8 @@ export function ManagementClient({
               </TableBody>
             </Table>
           </div>
+          )}
+          </>
         )}
 
         {selectedDocumentId && hasDocFooter && importMeta && (
