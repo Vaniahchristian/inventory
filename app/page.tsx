@@ -128,8 +128,8 @@ export default async function DashboardPage() {
                   <TableRow className="text-xs">
                     <TableHead>Marks</TableHead>
                     <TableHead>Name</TableHead>
-                    <TableHead>Shop</TableHead>
                     <TableHead>File</TableHead>
+                    <TableHead>Shop</TableHead>
                     <TableHead className="text-right">CTN</TableHead>
                     <TableHead className="text-right">Qty</TableHead>
                   </TableRow>
@@ -141,7 +141,6 @@ export default async function DashboardPage() {
                       <TableCell className="font-medium max-w-[180px] truncate">
                         {p.product_name_local ?? p.description ?? '-'}
                       </TableCell>
-                      <TableCell>{p.shop ?? '-'}</TableCell>
                       <TableCell className="max-w-[140px] truncate">
                         {p.document_id ? (
                           <Link
@@ -155,6 +154,7 @@ export default async function DashboardPage() {
                           '-'
                         )}
                       </TableCell>
+                      <TableCell>{p.shop ?? '-'}</TableCell>
                       <TableCell className="text-right font-bold text-red-700">
                         {p.total_cartons ?? 0}
                       </TableCell>
