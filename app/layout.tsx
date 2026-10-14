@@ -1,16 +1,28 @@
-import type { Metadata } from "next"
+import type { Metadata, Viewport } from "next"
 import { Geist } from "next/font/google"
 import "./globals.css"
 import { Sidebar, MobileSidebar } from "@/components/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { ImportStoreProvider } from "@/lib/import-store"
 import { ImportProgressToast } from "@/components/import-progress-toast"
+import { ServiceWorkerRegister } from "@/components/sw-register"
+import { PWA_THEME_COLOR } from "@/lib/pwa-icon"
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-geist" })
 
 export const metadata: Metadata = {
   title: "KizitoInventory",
   description: "Warehouse inventory management system",
+  applicationName: "KizitoInventory",
+  appleWebApp: {
+    capable: true,
+    title: "Inventory",
+    statusBarStyle: "black",
+  },
+}
+
+export const viewport: Viewport = {
+  themeColor: PWA_THEME_COLOR,
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -30,6 +42,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </div>
           <ImportProgressToast />
           <Toaster richColors position="top-right" />
+          <ServiceWorkerRegister />
         </ImportStoreProvider>
       </body>
     </html>
