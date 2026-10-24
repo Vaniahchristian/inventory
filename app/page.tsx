@@ -9,14 +9,6 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import {
   Package,
   FileStack,
   Boxes,
@@ -24,15 +16,43 @@ import {
   AlertTriangle,
   PackageX,
   ArrowRight,
+  Container,
 } from 'lucide-react'
 import { isFooterLikeItem } from '@/lib/document-item-filters'
 import { formatDateTime } from '@/lib/utils'
+import type { DocumentItem, ProductDocumentRef } from '@/lib/types'
 
 function fmtN(n: number, digits = 0) {
   return n.toLocaleString('en-UG', {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   })
+}
+
+/** Prefer a short container code from marks (MS-7, KM-1, MMB) when shared across the file. */
+function containerCodeFromMarks(marks: (string | null | undefined)[]): string | null {
+  const prefixes = new Map<string, number>()
+  for (const raw of marks) {
+    const m = String(raw ?? '')
+      .replace(/\n.*/, '')
+      .trim()
+      .toUpperCase()
+    const hit = m.match(/^([A-Z]{2,4})(?:-(\d+))?/)
+    if (!hit) continue
+    const key = hit[2] ? `${hit[1]}-${hit[2]}` : hit[1]
+    // Prefer family like MS-7 from MS-703-3 → take MS + first number group loosely
+    const family = m.match(/^([A-Z]{2,4}-\d+)/)?.[1] ?? hit[1]
+    prefixes.set(family, (prefixes.get(family) ?? 0) + 1)
+  }
+  if (prefixes.size === 0) return null
+  return [...prefixes.entries()].sort((a, b) => b[1] - a[1])[0]![0]
+}
+
+function containerTitle(doc: ProductDocumentRef, rows: DocumentItem[]): string {
+  const file = (doc.source_file_name ?? 'Container').trim() || 'Container'
+  const code = containerCodeFromMarks(rows.map(r => r.marks))
+  if (code && !file.toUpperCase().includes(code)) return `${code} · ${file}`
+  return file
 }
 
 export default async function DashboardPage() {
@@ -42,19 +62,37 @@ export default async function DashboardPage() {
     getDocumentItemsForList({}),
   ])
 
-  const productRows = items.filter(i => !isFooterLikeItem(i))
-  const outOfStock = productRows
-    .filter(p => (p.total_cartons ?? 0) === 0 && (p.total_quantity ?? 0) === 0)
-    .slice(0, 20)
-  const outOfStockCount = productRows.filter(
+  const productRows = items.filter(i => !isFooterLikeItem(i) && !i.deleted_at)
+  const outOfStockAll = productRows.filter(
     p => (p.total_cartons ?? 0) === 0 && (p.total_quantity ?? 0) === 0
-  ).length
+  )
+  const outOfStockCount = outOfStockAll.length
 
-  const docNameById = new Map(documents.map(d => [d.id, d.source_file_name ?? d.id]))
+  const rowsByDoc = new Map<string, DocumentItem[]>()
+  for (const row of productRows) {
+    if (!row.document_id) continue
+    if (!rowsByDoc.has(row.document_id)) rowsByDoc.set(row.document_id, [])
+    rowsByDoc.get(row.document_id)!.push(row)
+  }
 
-  const recentDocs = [...documents]
+  const containers = [...documents]
     .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
-    .slice(0, 8)
+    .map(doc => {
+      const rows = rowsByDoc.get(doc.id) ?? []
+      const oos = rows.filter(
+        p => (p.total_cartons ?? 0) === 0 && (p.total_quantity ?? 0) === 0
+      )
+      return {
+        doc,
+        rows,
+        oos,
+        title: containerTitle(doc, rows),
+        lineCount: rows.length,
+        cartonSum: rows.reduce((s, r) => s + (r.total_cartons ?? 0), 0),
+      }
+    })
+
+  const containersWithOos = containers.filter(c => c.oos.length > 0).length
 
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
   const imports7d = documents.filter(d => {
@@ -68,7 +106,7 @@ export default async function DashboardPage() {
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Dashboard</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Live view of imported packing lists and line stock
+            Containers (imported files) and what is out of stock in each
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
@@ -96,7 +134,7 @@ export default async function DashboardPage() {
           icon={Banknote}
           iconClass="text-emerald-600"
         />
-        <StatCard title="Documents" value={fmtN(documents.length)} icon={FileStack} iconClass="text-indigo-600" />
+        <StatCard title="Containers" value={fmtN(documents.length)} icon={Container} iconClass="text-indigo-600" />
         <StatCard title="Out of stock" value={fmtN(outOfStockCount)} icon={PackageX} iconClass="text-red-500" />
         <StatCard title="Imports (7d)" value={fmtN(imports7d)} icon={FileStack} iconClass="text-violet-600" />
       </div>
@@ -106,117 +144,103 @@ export default async function DashboardPage() {
         <MiniStat label="CBM" value={fmtN(stats.totals.cbm, 3)} />
         <MiniStat label="Weight (kg)" value={fmtN(stats.totals.weight, 1)} />
         <MiniStat
-          label="Sections"
-          value={`${fmtN(stats.sectionCounts.shipped)} shipped · ${fmtN(stats.sectionCounts.left_in_warehouse)} left · ${fmtN(stats.sectionCounts.repacked)} repack`}
+          label="Containers with OOS"
+          value={`${fmtN(containersWithOos)} of ${fmtN(containers.length)}`}
         />
       </div>
 
-      <div className="grid lg:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-red-500" />
-              Out of stock
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {outOfStock.length === 0 ? (
-              <p className="text-sm text-slate-500 px-4 pb-4">All line items have stock.</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow className="text-xs">
-                    <TableHead>Marks</TableHead>
-                    <TableHead>Name</TableHead>
-                    <TableHead>File</TableHead>
-                    <TableHead>Shop</TableHead>
-                    <TableHead className="text-right">CTN</TableHead>
-                    <TableHead className="text-right">Qty</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {outOfStock.map(p => (
-                    <TableRow key={p.id} className="text-xs bg-red-50">
-                      <TableCell className="font-mono">{p.marks ?? '-'}</TableCell>
-                      <TableCell className="font-medium max-w-[180px] truncate">
-                        {p.product_name_local ?? p.description ?? '-'}
-                      </TableCell>
-                      <TableCell className="max-w-[140px] truncate">
-                        {p.document_id ? (
-                          <Link
-                            href={`/management?doc=${p.document_id}`}
-                            className="text-indigo-600 hover:underline"
-                            title={docNameById.get(p.document_id) ?? undefined}
-                          >
-                            {docNameById.get(p.document_id) ?? 'Unknown file'}
-                          </Link>
-                        ) : (
-                          '-'
-                        )}
-                      </TableCell>
-                      <TableCell>{p.shop ?? '-'}</TableCell>
-                      <TableCell className="text-right font-bold text-red-700">
-                        {p.total_cartons ?? 0}
-                      </TableCell>
-                      <TableCell className="text-right">{p.total_quantity ?? 0}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+            <Container className="h-4 w-4 text-indigo-500" />
+            Containers
+            <span className="font-normal text-slate-400">
+              — each imported file, with out-of-stock lines
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 pt-0">
+          {containers.length === 0 ? (
+            <p className="text-sm text-slate-500 py-4">No containers imported yet.</p>
+          ) : (
+            containers.map(({ doc, oos, title, lineCount, cartonSum }) => (
+              <div
+                key={doc.id}
+                className={`rounded-md border ${oos.length > 0 ? 'border-red-200 bg-red-50/40' : 'bg-white'}`}
+              >
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 border-b border-inherit">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Link
+                        href={`/management?doc=${doc.id}`}
+                        className="text-sm font-semibold text-slate-900 hover:text-indigo-700 truncate max-w-[min(100%,28rem)]"
+                        title={doc.source_file_name ?? doc.id}
+                      >
+                        {title}
+                      </Link>
+                      <Badge variant="secondary" className="text-[10px] font-normal shrink-0">
+                        {doc.document_type === 'sales_order' ? 'Sales' : 'Manifest'}
+                      </Badge>
+                      {oos.length > 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-red-700">
+                          <AlertTriangle className="h-3 w-3" />
+                          {oos.length} out of stock
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-emerald-700">In stock</span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      {fmtN(lineCount)} lines · {fmtN(cartonSum)} CTN
+                      {doc.created_at ? ` · imported ${formatDateTime(doc.created_at)}` : ''}
+                    </p>
+                  </div>
+                  <Link
+                    href={`/management?doc=${doc.id}`}
+                    className="text-xs text-indigo-600 hover:underline shrink-0"
+                  >
+                    Open in Management
+                  </Link>
+                </div>
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-              <FileStack className="h-4 w-4 text-indigo-500" />
-              Recent imports
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {recentDocs.length === 0 ? (
-              <p className="text-sm text-slate-500 px-4 pb-4">No documents imported yet.</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow className="text-xs">
-                    <TableHead>File</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Imported</TableHead>
-                    <TableHead className="text-right">Open</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {recentDocs.map(doc => (
-                    <TableRow key={doc.id} className="text-xs">
-                      <TableCell className="font-medium max-w-[200px] truncate">
-                        {doc.source_file_name ?? doc.id}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="text-[10px] font-normal">
-                          {doc.document_type === 'sales_order' ? 'Sales' : 'Manifest'}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-slate-500 whitespace-nowrap">
-                        {doc.created_at ? formatDateTime(doc.created_at) : '-'}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Link
-                          href={`/management?doc=${doc.id}`}
-                          className="text-indigo-600 hover:underline"
+                {oos.length > 0 && (
+                  <div className="px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-1.5">
+                      Missing in this container
+                    </p>
+                    <ul className="space-y-1">
+                      {oos.slice(0, 6).map(p => (
+                        <li
+                          key={p.id}
+                          className="flex items-baseline gap-2 text-xs text-slate-800"
                         >
-                          Manage
-                        </Link>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+                          <span className="font-mono text-slate-700 shrink-0">
+                            {(p.marks ?? '-').replace(/\n.*/, '').trim()}
+                          </span>
+                          <span className="truncate text-slate-600">
+                            {p.product_name_local ?? p.description ?? '-'}
+                          </span>
+                          {p.shop ? (
+                            <span className="ml-auto shrink-0 text-slate-400">{p.shop}</span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                    {oos.length > 6 && (
+                      <Link
+                        href={`/management?doc=${doc.id}`}
+                        className="inline-block mt-1.5 text-[11px] text-indigo-600 hover:underline"
+                      >
+                        +{oos.length - 6} more — view all
+                      </Link>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }
