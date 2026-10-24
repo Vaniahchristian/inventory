@@ -134,16 +134,43 @@ function getCellValue(row: CompiledRow, key: FieldKey): string {
 // ── Excel export ────────────────────────────────────────────────────────────
 
 async function exportToExcel(rows: CompiledRow[], selectedFields: FieldKey[], importMeta: ImportMeta | null) {
-  const XLSX = await import('xlsx')
+  const ExcelJS = (await import('exceljs')).default
+  const { downloadArrayBuffer, fetchImageForExport } = await import('@/lib/export-with-images')
   const fieldDefs = EXPORT_FIELDS.filter(f => selectedFields.includes(f.key))
 
-  const header = ['No.', ...fieldDefs.map(f => f.label)]
-  const data = rows.map((row, i) => [
-    i + 1,
-    ...fieldDefs.map(f => getCellValue(row, f.key)),
-  ])
+  const header = ['No.', 'PHOTO', ...fieldDefs.map(f => f.label)]
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet('Compiled Products')
+  ws.addRow(header)
+  ws.getRow(1).font = { bold: true }
+  ws.columns = [
+    { width: 5 },
+    { width: 12 },
+    ...fieldDefs.map(() => ({ width: 18 })),
+  ]
 
-  const totalsRow: (string | number | null)[] = [`TOTALS (${rows.length} rows)`]
+  const IMG = 56
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!
+    const excelRow = i + 2
+    ws.addRow([
+      i + 1,
+      row.photo ?? row.image_url ?? '',
+      ...fieldDefs.map(f => getCellValue(row, f.key)),
+    ])
+    ws.getRow(excelRow).height = 48
+    const img = await fetchImageForExport(row.photo ?? row.image_url)
+    if (img) {
+      const id = wb.addImage({ buffer: img.buffer, extension: img.extension })
+      ws.addImage(id, {
+        tl: { col: 1, row: excelRow - 1 },
+        ext: { width: IMG, height: IMG },
+        editAs: 'oneCell',
+      })
+    }
+  }
+
+  const totalsRow: (string | number | null)[] = [`TOTALS (${rows.length} rows)`, '']
   for (const f of fieldDefs) {
     switch (f.key) {
       case 'cartons':          totalsRow.push(rows.reduce((s, r) => s + (r.cartons ?? 0), 0)); break
@@ -154,18 +181,26 @@ async function exportToExcel(rows: CompiledRow[], selectedFields: FieldKey[], im
       default:                 totalsRow.push(null)
     }
   }
+  ws.addRow(totalsRow)
 
-  const ws = XLSX.utils.aoa_to_sheet([header, ...data, totalsRow])
-  ws['!cols'] = [{ wch: 5 }, ...fieldDefs.map(() => ({ wch: 22 }))]
+  if (importMeta) {
+    ws.addRow([])
+    ws.addRow(['Client', importMeta.client_details ?? ''])
+    ws.addRow(['Container', importMeta.container_no ?? ''])
+  }
 
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, 'Compiled Products')
-  XLSX.writeFile(wb, `compiled_products_${Date.now()}.xlsx`)
+  const buffer = await wb.xlsx.writeBuffer()
+  downloadArrayBuffer(
+    buffer,
+    `compiled_products_${Date.now()}.xlsx`,
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  )
 }
 
 // ── PDF export ──────────────────────────────────────────────────────────────
 
-function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta: ImportMeta | null) {
+async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta: ImportMeta | null) {
+  const { photoImgHtml } = await import('@/lib/export-with-images')
   const fieldDefs = EXPORT_FIELDS.filter(f => selectedFields.includes(f.key))
 
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -174,15 +209,18 @@ function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta
     ? `Client: ${esc(importMeta.client_details ?? '-')} &nbsp;|&nbsp; Container: ${esc(importMeta.container_no ?? '-')} &nbsp;|&nbsp; ${rows.length} items`
     : `${rows.length} items`
 
-  const headerCells = ['No.', ...fieldDefs.map(f => f.label)].map(h => `<th>${esc(h)}</th>`).join('')
+  const headerCells = ['No.', 'Photo', ...fieldDefs.map(f => f.label)].map(h => `<th>${esc(h)}</th>`).join('')
 
   const bodyRows = rows.map((row, i) => {
-    const cells = [String(i + 1), ...fieldDefs.map(f => getCellValue(row, f.key))]
-      .map(c => `<td>${esc(c)}</td>`).join('')
-    return `<tr class="${i % 2 === 1 ? 'alt' : ''}">${cells}</tr>`
+    const photo = photoImgHtml(row.photo ?? row.image_url) || esc('-')
+    const rest = fieldDefs.map(f => `<td>${esc(getCellValue(row, f.key))}</td>`).join('')
+    return `<tr class="${i % 2 === 1 ? 'alt' : ''}"><td>${i + 1}</td><td>${photo}</td>${rest}</tr>`
   }).join('')
 
-  const totalCells = ['<td class="bold" style="background:#e2e8f0">TOTALS</td>']
+  const totalCells = [
+    '<td class="bold" style="background:#e2e8f0">TOTALS</td>',
+    '<td style="background:#e2e8f0"></td>',
+  ]
   for (const f of fieldDefs) {
     let val = ''
     switch (f.key) {
@@ -207,9 +245,10 @@ function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta
   p  { margin: 0 0 4mm; font-size: 7.5pt; color: #555; }
   table { border-collapse: collapse; width: 100%; table-layout: auto; }
   th { background: #1e293b; color: #fff; padding: 2px 4px; font-size: 7pt; text-align: left; white-space: nowrap; }
-  td { border: 1px solid #d1d5db; padding: 2px 4px; font-size: 7.5pt; vertical-align: top; word-break: break-word; }
+  td { border: 1px solid #d1d5db; padding: 2px 4px; font-size: 7.5pt; vertical-align: middle; word-break: break-word; }
   tr.alt td { background: #f8fafc; }
   .bold { font-weight: bold; }
+  img { max-width: 48px; max-height: 48px; }
   @media print { @page { size: A3 landscape; margin: 8mm; } }
 </style>
 </head>
@@ -572,7 +611,7 @@ export function CompiledProductsClient({
     setExportOpen(true)
   }
 
-  function runExport() {
+  async function runExport() {
     const fields = EXPORT_FIELDS.map(f => f.key).filter(k => selectedFields.has(k))
     if (fields.length === 0) return
     const rows =
@@ -581,9 +620,17 @@ export function CompiledProductsClient({
         : filteredDataRows.length < compiledRows.length
           ? filteredDataRows
           : compiledRows
-    if (exportFormat === 'excel') exportToExcel(rows, fields, exportImportMeta)
-    else exportToPdf(rows, fields, exportImportMeta)
-    setExportOpen(false)
+    const toastId = toast.loading(
+      exportFormat === 'excel' ? 'Building Excel with photos…' : 'Preparing PDF…'
+    )
+    try {
+      if (exportFormat === 'excel') await exportToExcel(rows, fields, exportImportMeta)
+      else await exportToPdf(rows, fields, exportImportMeta)
+      toast.success('Export ready', { id: toastId })
+      setExportOpen(false)
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Export failed', { id: toastId })
+    }
   }
 
   return (
