@@ -26,7 +26,25 @@ import {
   type DocumentFooterPaymentRow,
 } from '@/app/actions/products'
 import { isSectionDividerProduct, REPACKAGED_SECTION_TITLE } from '@/lib/sections'
+import { ImagePreviewThumb } from '@/components/image-preview'
 import type { Product, ImportMeta, ProductDocumentRef } from '@/lib/types'
+
+function CompiledRowPhoto({ p }: { p: Product }) {
+  return (
+    <ImagePreviewThumb
+      url={p.photo ?? p.image_url}
+      extraUrls={[p.photo2]}
+      alt={p.name ?? ''}
+      size="sm"
+      title={p.name ?? 'Product photo'}
+      empty={
+        <div className="h-8 w-8 rounded bg-slate-100 flex items-center justify-center">
+          <ImageIcon className="h-3.5 w-3.5 text-slate-300" />
+        </div>
+      }
+    />
+  )
+}
 
 type Props = {
   products: Product[]
@@ -776,13 +794,7 @@ export function CompiledProductsClient({
                       />
                     </TableCell>
                     <TableCell className="p-1">
-                      {p.image_url ? (
-                        <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
-                      ) : (
-                        <div className="h-8 w-8 rounded bg-slate-100 flex items-center justify-center">
-                          <ImageIcon className="h-3.5 w-3.5 text-slate-300" />
-                        </div>
-                      )}
+                      <CompiledRowPhoto p={p} />
                     </TableCell>
                     <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
                     <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
@@ -1044,13 +1056,7 @@ export function CompiledProductsClient({
                     <TableCell className="text-center text-slate-500 font-mono text-[10px]">{i + 1}</TableCell>
                     <TableCell className="text-center p-1 text-slate-300">—</TableCell>
                     <TableCell className="p-1">
-                      {p.image_url ? (
-                        <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
-                      ) : (
-                        <div className="h-8 w-8 rounded bg-slate-100 flex items-center justify-center">
-                          <ImageIcon className="h-3.5 w-3.5 text-slate-300" />
-                        </div>
-                      )}
+                      <CompiledRowPhoto p={p} />
                     </TableCell>
                     <TableCell className="font-medium text-slate-900 max-w-[180px] truncate">{p.name ?? '-'}</TableCell>
                     <TableCell className="text-slate-500 max-w-[160px] truncate">{p.description ?? '-'}</TableCell>
@@ -1138,13 +1144,7 @@ export function CompiledProductsClient({
                     <TableCell className="text-center text-slate-500 font-mono text-[10px]">{i + 1}</TableCell>
                     <TableCell className="text-center p-1 text-slate-300">—</TableCell>
                     <TableCell className="p-1">
-                      {p.image_url ? (
-                        <img src={p.image_url} alt={p.name ?? ''} className="h-8 w-8 rounded object-cover border border-slate-100" />
-                      ) : (
-                        <div className="h-8 w-8 rounded bg-slate-100 flex items-center justify-center">
-                          <ImageIcon className="h-3.5 w-3.5 text-slate-300" />
-                        </div>
-                      )}
+                      <CompiledRowPhoto p={p} />
                     </TableCell>
                     <TableCell className="whitespace-nowrap">
                       <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-900 bg-amber-50">

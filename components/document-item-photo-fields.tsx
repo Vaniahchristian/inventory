@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
+import { ImagePreviewThumb } from '@/components/image-preview'
 
 type SlotProps = {
   name: 'photo' | 'photo2'
@@ -27,12 +28,18 @@ function PhotoSlot({ name, label, currentUrl }: SlotProps) {
     <div className="space-y-1.5">
       <Label className="text-xs text-slate-600 block">{label}</Label>
       <div className="flex items-start gap-3">
-        <div className="h-16 w-16 shrink-0 rounded border border-slate-200 bg-slate-50 overflow-hidden flex items-center justify-center">
+        <div className="h-16 w-16 shrink-0 flex items-center justify-center">
           {shown ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={shown} alt="" className="h-full w-full object-cover" />
+            <ImagePreviewThumb
+              url={shown}
+              size="lg"
+              className="h-16 w-16"
+              title={label}
+            />
           ) : (
-            <span className="text-[10px] text-slate-400">None</span>
+            <div className="h-16 w-16 rounded border border-slate-200 bg-slate-50 flex items-center justify-center">
+              <span className="text-[10px] text-slate-400">None</span>
+            </div>
           )}
         </div>
         <div className="min-w-0 flex-1 space-y-1.5">

@@ -23,7 +23,7 @@ function mapToProduct(item: DocumentItem) {
     selling_price: 0,
     quantity: item.total_quantity ?? 0,
     reorder_level: 0,
-    image_url: null,
+    image_url: item.photo ?? null,
     packing: item.packaging,
     cartons: item.total_cartons,
     unit_cbm: item.unit_cbm,

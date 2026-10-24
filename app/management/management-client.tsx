@@ -19,6 +19,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Checkbox } from '@/components/ui/checkbox'
 import { DocumentItemPhotoFields } from '@/components/document-item-photo-fields'
+import { ImagePreviewThumb } from '@/components/image-preview'
 import {
   adjustDocumentItemCartons,
   deleteDocumentItem,
@@ -116,20 +117,15 @@ function fmtChangeValue(key: string, v: unknown): string {
 }
 
 /** Live value with the imported value struck through when they differ. */
-function RowPhoto({ url }: { url?: string | null }) {
-  if (!url) {
-    return <div className="h-10 w-10 rounded bg-slate-100 border border-slate-200" aria-hidden />
-  }
+function RowPhoto({ url, url2 }: { url?: string | null; url2?: string | null }) {
   return (
-    <a href={url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} className="block">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={url}
-        alt=""
-        className="h-10 w-10 rounded object-cover border border-slate-200 bg-white"
-        loading="lazy"
-      />
-    </a>
+    <ImagePreviewThumb
+      url={url}
+      extraUrls={[url2]}
+      size="lg"
+      title="Product photo"
+      stopPropagation
+    />
   )
 }
 
@@ -524,7 +520,7 @@ export function ManagementClient({
                         title="Show history"
                       >
                         <TableCell className="align-top">
-                          <RowPhoto url={item.photo} />
+                          <RowPhoto url={item.photo} url2={item.photo2} />
                         </TableCell>
                         <TableCell className="align-top font-medium text-slate-800 whitespace-normal break-words">
                           {item.marks ?? '-'}
@@ -605,7 +601,7 @@ export function ManagementClient({
                         >
                           <TableCell className="align-top text-center text-slate-400">{idx + 1}</TableCell>
                           <TableCell className="align-top">
-                            <RowPhoto url={item.photo} />
+                            <RowPhoto url={item.photo} url2={item.photo2} />
                           </TableCell>
                           <TableCell className="align-top font-medium text-slate-800 whitespace-normal break-words">
                             {item.marks ?? '-'}

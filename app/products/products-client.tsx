@@ -15,6 +15,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Checkbox } from '@/components/ui/checkbox'
 import { DocumentItemPhotoFields } from '@/components/document-item-photo-fields'
+import { ImagePreviewThumb } from '@/components/image-preview'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -116,25 +117,16 @@ function subtotalLabelColSpan(layout: ProductTableLayout): number {
   }
 }
 
-function ProductPhotoCell({ url }: { url?: string | null }) {
-  if (!url) {
-    return (
-      <td className="p-1.5">
-        <div className="h-9 w-9 rounded bg-slate-100 border border-slate-200" aria-hidden />
-      </td>
-    )
-  }
+function ProductPhotoCell({
+  url,
+  url2,
+}: {
+  url?: string | null
+  url2?: string | null
+}) {
   return (
     <td className="p-1.5">
-      <a href={url} target="_blank" rel="noreferrer" className="block">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={url}
-          alt=""
-          className="h-9 w-9 rounded object-cover border border-slate-200 bg-white"
-          loading="lazy"
-        />
-      </a>
+      <ImagePreviewThumb url={url} extraUrls={[url2]} size="md" title="Product photo" />
     </td>
   )
 }
@@ -182,7 +174,7 @@ function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTable
   if (layout === 'sales') {
     return (
       <>
-        <ProductPhotoCell url={p.photo} />
+        <ProductPhotoCell url={p.photo} url2={p.photo2} />
         <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
         <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
         <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
@@ -197,7 +189,7 @@ function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTable
   if (layout === 'manifest') {
     return (
       <>
-        <ProductPhotoCell url={p.photo} />
+        <ProductPhotoCell url={p.photo} url2={p.photo2} />
         <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
         <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
         <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
@@ -210,7 +202,7 @@ function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTable
   // mixed
   return (
     <>
-      <ProductPhotoCell url={p.photo} />
+      <ProductPhotoCell url={p.photo} url2={p.photo2} />
       <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
       <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
       <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
