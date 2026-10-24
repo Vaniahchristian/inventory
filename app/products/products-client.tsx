@@ -93,33 +93,57 @@ type ProductTableLayout = 'sales' | 'manifest' | 'mixed'
 function productTableColumnCount(layout: ProductTableLayout): number {
   switch (layout) {
     case 'mixed':
-      return 27
+      return 28 // +Photo
     case 'manifest':
-      return 22 // no DEL, CUS, Unit, 品名, Mat
+      return 23 // no DEL, CUS, Unit, 品名, Mat; +Photo
     case 'sales':
-      return 26 // Marks + Shop + sales fields; no Box
+      return 27 // Marks + Shop + sales fields; no Box; +Photo
     default:
-      return 27
+      return 28
   }
 }
 
 function subtotalLabelColSpan(layout: ProductTableLayout): number {
   switch (layout) {
     case 'mixed':
-      return 13 // # … through Packing
+      return 14 // # … through Packing (+Photo)
     case 'manifest':
-      return 8 // # … through Packing (4 lead + desc + pack)
+      return 9 // # … through Packing (+Photo)
     case 'sales':
-      return 13 // # … through Packing (Marks · Shop · DEL · CUS · Item · Src …)
+      return 14 // # … through Packing (+Photo)
     default:
-      return 13
+      return 14
   }
+}
+
+function ProductPhotoCell({ url }: { url?: string | null }) {
+  if (!url) {
+    return (
+      <td className="p-1.5">
+        <div className="h-9 w-9 rounded bg-slate-100 border border-slate-200" aria-hidden />
+      </td>
+    )
+  }
+  return (
+    <td className="p-1.5">
+      <a href={url} target="_blank" rel="noreferrer" className="block">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={url}
+          alt=""
+          className="h-9 w-9 rounded object-cover border border-slate-200 bg-white"
+          loading="lazy"
+        />
+      </a>
+    </td>
+  )
 }
 
 function ProductLeadHeaders({ layout }: { layout: ProductTableLayout }) {
   if (layout === 'sales') {
     return (
       <>
+        <th className="p-2 font-medium w-12">Photo</th>
         <th className="p-2 font-medium min-w-[120px]">Marks</th>
         <th className="p-2 font-medium min-w-[80px]">Shop</th>
         <th className="p-2 font-medium min-w-[72px]">DEL</th>
@@ -132,6 +156,7 @@ function ProductLeadHeaders({ layout }: { layout: ProductTableLayout }) {
   if (layout === 'manifest') {
     return (
       <>
+        <th className="p-2 font-medium w-12">Photo</th>
         <th className="p-2 font-medium min-w-[120px]">Marks</th>
         <th className="p-2 font-medium min-w-[80px]">Shop</th>
         <th className="p-2 font-medium w-14">Item</th>
@@ -142,6 +167,7 @@ function ProductLeadHeaders({ layout }: { layout: ProductTableLayout }) {
   // mixed
   return (
     <>
+      <th className="p-2 font-medium w-12">Photo</th>
       <th className="p-2 font-medium min-w-[120px]">Marks</th>
       <th className="p-2 font-medium min-w-[80px]">Shop</th>
       <th className="p-2 font-medium w-14">Item</th>
@@ -156,6 +182,7 @@ function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTable
   if (layout === 'sales') {
     return (
       <>
+        <ProductPhotoCell url={p.photo} />
         <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
         <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
         <td className="p-2 font-mono text-[11px] max-w-[72px] truncate">{p.delivery_no ?? '-'}</td>
@@ -170,6 +197,7 @@ function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTable
   if (layout === 'manifest') {
     return (
       <>
+        <ProductPhotoCell url={p.photo} />
         <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
         <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
         <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
@@ -182,6 +210,7 @@ function ProductLeadCells({ p, layout }: { p: DocumentItem; layout: ProductTable
   // mixed
   return (
     <>
+      <ProductPhotoCell url={p.photo} />
       <td className="p-2 font-mono whitespace-nowrap text-slate-800">{p.marks ?? '-'}</td>
       <td className="p-2 max-w-[100px] truncate text-slate-600">{p.shop ?? '-'}</td>
       <td className="p-2 tabular-nums">{p.item_code ?? '-'}</td>
