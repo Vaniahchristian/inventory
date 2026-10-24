@@ -14,6 +14,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Checkbox } from '@/components/ui/checkbox'
+import { DocumentItemPhotoFields } from '@/components/document-item-photo-fields'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -1771,6 +1772,11 @@ export function ProductsClient({
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Unit Price ¥" name="unit_price_rmb" type="number" step="0.01" defaultValue={String(editingItem.unit_price_rmb ?? '')} />
               </div>
+              <DocumentItemPhotoFields
+                key={editingItem.id}
+                photo={editingItem.photo}
+                photo2={editingItem.photo2}
+              />
               <DialogFooter>
                 <Button type="button" variant="outline" size="sm" onClick={() => setEditingItem(null)}>Cancel</Button>
                 <Button type="submit" size="sm" disabled={isPending}>Save Changes</Button>

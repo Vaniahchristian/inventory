@@ -1059,6 +1059,18 @@ export async function updateDocumentItemSection(id: string, section: string): Pr
   await updateDocumentItemsSection([id], section)
 }
 
+async function uploadDocumentItemPhoto(id: string, slot: 'photo' | 'photo2', file: File): Promise<string> {
+  const rawExt = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '')
+  const ext = rawExt === 'jpg' ? 'jpeg' : rawExt || 'jpeg'
+  const path = `manifest/edits/${id}/${slot}-${Date.now()}.${ext}`
+  const { error: upErr } = await supabase.storage
+    .from('product-images')
+    .upload(path, file, { upsert: true, contentType: file.type || `image/${ext}` })
+  if (upErr) throw new Error(upErr.message)
+  const { data: pub } = supabase.storage.from('product-images').getPublicUrl(path)
+  return pub.publicUrl
+}
+
 export async function updateDocumentItem(id: string, formData: FormData): Promise<void> {
   const update: Record<string, unknown> = {
     marks: ((formData.get('marks') as string) || '').trim() || null,
@@ -1083,6 +1095,17 @@ export async function updateDocumentItem(id: string, formData: FormData): Promis
     total_weight_kg: numOrNull(formData.get('total_weight_kg')),
     unit_price_rmb: numOrNull(formData.get('unit_price_rmb')),
     total_amount_rmb: numOrNull(formData.get('total_amount_rmb')),
+  }
+
+  for (const slot of ['photo', 'photo2'] as const) {
+    if (formData.get(`clear_${slot}`) === '1') {
+      update[slot] = null
+      continue
+    }
+    const file = formData.get(slot)
+    if (file instanceof File && file.size > 0) {
+      update[slot] = await uploadDocumentItemPhoto(id, slot, file)
+    }
   }
 
   const { error } = await withSupabaseRetry(

@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Checkbox } from '@/components/ui/checkbox'
+import { DocumentItemPhotoFields } from '@/components/document-item-photo-fields'
 import {
   adjustDocumentItemCartons,
   deleteDocumentItem,
@@ -47,6 +48,8 @@ const FIELD_LABELS: Record<string, string> = {
   total_cbm: 'CBM',
   total_weight_kg: 'Weight (kg)',
   total_amount_rmb: 'Amount (¥)',
+  photo: 'Photo',
+  photo2: 'Photo 2',
   deleted_at: 'Deleted',
 }
 
@@ -839,6 +842,11 @@ export function ManagementClient({
                   />
                 </div>
               </div>
+              <DocumentItemPhotoFields
+                key={editingItem.id}
+                photo={editingItem.photo}
+                photo2={editingItem.photo2}
+              />
               <div>
                 <Label className="text-xs text-slate-600 mb-1 block">Reason (optional)</Label>
                 <Input
