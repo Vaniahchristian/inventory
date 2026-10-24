@@ -113,6 +113,23 @@ function fmtChangeValue(key: string, v: unknown): string {
 }
 
 /** Live value with the imported value struck through when they differ. */
+function RowPhoto({ url }: { url?: string | null }) {
+  if (!url) {
+    return <div className="h-10 w-10 rounded bg-slate-100 border border-slate-200" aria-hidden />
+  }
+  return (
+    <a href={url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} className="block">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={url}
+        alt=""
+        className="h-10 w-10 rounded object-cover border border-slate-200 bg-white"
+        loading="lazy"
+      />
+    </a>
+  )
+}
+
 function AuditValue({ current, original }: { current: number; original: number }) {
   const delta = current - original
   if (Math.abs(delta) < 0.005) return <>{fmtNum(current)}</>
@@ -475,22 +492,23 @@ export function ManagementClient({
               <Table className="text-xs table-fixed w-full">
                 <TableHeader>
                   <TableRow className="bg-slate-50">
-                    <TableHead className="w-[11%]">Marks</TableHead>
-                    <TableHead className="w-[22%]">Name</TableHead>
-                    <TableHead className="w-[11%]">Section</TableHead>
+                    <TableHead className="w-14">Photo</TableHead>
+                    <TableHead className="w-[10%]">Marks</TableHead>
+                    <TableHead className="w-[20%]">Name</TableHead>
+                    <TableHead className="w-[10%]">Section</TableHead>
                     <TableHead className="w-[9%] text-right">Pieces imported</TableHead>
                     <TableHead className="w-[8%] text-right">Current</TableHead>
                     <TableHead className="w-[7%] text-right">Change</TableHead>
                     <TableHead className="w-[9%] text-right">Cartons imported</TableHead>
                     <TableHead className="w-[8%] text-right">Current</TableHead>
                     <TableHead className="w-[7%] text-right">Change</TableHead>
-                    <TableHead className="w-[16%]">Last change</TableHead>
+                    <TableHead className="w-[14%]">Last change</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {changedProducts.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={10} className="text-center text-slate-500 py-10">
+                      <TableCell colSpan={11} className="text-center text-slate-500 py-10">
                         No product in this file has changed since import.
                       </TableCell>
                     </TableRow>
@@ -502,6 +520,9 @@ export function ManagementClient({
                         onClick={() => setHistoryFor(item.id)}
                         title="Show history"
                       >
+                        <TableCell className="align-top">
+                          <RowPhoto url={item.photo} />
+                        </TableCell>
                         <TableCell className="align-top font-medium text-slate-800 whitespace-normal break-words">
                           {item.marks ?? '-'}
                         </TableCell>
@@ -545,9 +566,10 @@ export function ManagementClient({
               <TableHeader>
                 <TableRow className="bg-slate-50">
                   <TableHead className="w-10 text-center">#</TableHead>
+                  <TableHead className="w-14">Photo</TableHead>
                   <TableHead className="w-[12%]">Marks</TableHead>
-                  <TableHead className="w-[34%]">Name</TableHead>
-                  <TableHead className="w-[30%]">Description</TableHead>
+                  <TableHead className="w-[28%]">Name</TableHead>
+                  <TableHead className="w-[26%]">Description</TableHead>
                   <TableHead className="w-20 text-right">Pieces</TableHead>
                   <TableHead className="w-20 text-right">Cartons</TableHead>
                   <TableHead className="w-24 text-center">Actions</TableHead>
@@ -556,7 +578,7 @@ export function ManagementClient({
               <TableBody>
                 {visibleItems.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center text-slate-500 py-10">
+                    <TableCell colSpan={8} className="text-center text-slate-500 py-10">
                       No rows for this file.
                     </TableCell>
                   </TableRow>
@@ -564,7 +586,7 @@ export function ManagementClient({
                   sectionGroups.map(({ title, rows, liveCount, st, orig }) => (
                     <React.Fragment key={title}>
                       <TableRow className="bg-amber-100/80 border-y border-amber-200">
-                        <TableCell colSpan={7} className="py-2 px-3 text-[11px] font-semibold text-amber-950 tracking-wide">
+                        <TableCell colSpan={8} className="py-2 px-3 text-[11px] font-semibold text-amber-950 tracking-wide">
                           {title}
                         </TableCell>
                       </TableRow>
@@ -579,6 +601,9 @@ export function ManagementClient({
                           className={deleted ? 'bg-slate-50 text-slate-400 [&_td]:line-through' : undefined}
                         >
                           <TableCell className="align-top text-center text-slate-400">{idx + 1}</TableCell>
+                          <TableCell className="align-top">
+                            <RowPhoto url={item.photo} />
+                          </TableCell>
                           <TableCell className="align-top font-medium text-slate-800 whitespace-normal break-words">
                             {item.marks ?? '-'}
                           </TableCell>
@@ -683,7 +708,7 @@ export function ManagementClient({
                         )
                       })}
                       <TableRow className="bg-amber-50 border-b-2 border-amber-200 text-[11px] font-semibold">
-                        <TableCell colSpan={4} className="py-2 px-3 text-amber-950">
+                        <TableCell colSpan={5} className="py-2 px-3 text-amber-950">
                           {title} — {liveCount} row{liveCount === 1 ? '' : 's'}
                           <span className="ml-3 font-normal text-slate-600">
                             Imported {fmtNum(orig.cartons)} CTN · Current {fmtNum(st.cartons)} CTN ·{' '}

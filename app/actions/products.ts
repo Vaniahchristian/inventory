@@ -107,6 +107,8 @@ const DOCUMENT_ITEM_SELECT = [
   'remarks',
   'validation_flags',
   'created_at',
+  'photo',
+  'photo2',
   'original_total_quantity',
   'original_total_cartons',
   'original_total_cbm',

@@ -162,6 +162,8 @@ export type DocumentItem = {
   remarks: string | null
   validation_flags: string[]
   created_at: string
+  photo?: string | null
+  photo2?: string | null
   /** Values frozen at import time (DB trigger); live values are the total_* fields. */
   original_total_quantity?: number | null
   original_total_cartons?: number | null
