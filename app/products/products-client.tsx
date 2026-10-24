@@ -1754,59 +1754,61 @@ export function ProductsClient({
       )}
 
       <Dialog open={!!editingItem} onOpenChange={(open) => !open && setEditingItem(null)}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[min(85vh,720px)] max-w-2xl flex-col gap-3 overflow-hidden">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Edit Product Row</DialogTitle>
           </DialogHeader>
           {editingItem && (
-            <form action={handleSaveItemEdit} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Marks" name="marks" defaultValue={editingItem.marks ?? ''} />
-                <Field label="Item No" name="item_code" defaultValue={editingItem.item_code ?? ''} />
+            <form action={handleSaveItemEdit} className="flex min-h-0 flex-1 flex-col gap-3">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain pr-1">
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Marks" name="marks" defaultValue={editingItem.marks ?? ''} />
+                  <Field label="Item No" name="item_code" defaultValue={editingItem.item_code ?? ''} />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Src ITEM NO" name="source_item_no" defaultValue={editingItem.source_item_no ?? ''} />
+                  <Field label="DEL NO" name="delivery_no" defaultValue={editingItem.delivery_no ?? ''} />
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <Field label="CUS NO" name="customer_item_ref" defaultValue={editingItem.customer_item_ref ?? ''} />
+                  <Field label="Unit" name="unit" defaultValue={editingItem.unit ?? ''} />
+                  <Field label="Material" name="material" defaultValue={editingItem.material ?? ''} />
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                  <Field label="Name" name="product_name_local" defaultValue={editingItem.product_name_local ?? ''} />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Shop" name="shop" defaultValue={editingItem.shop ?? ''} />
+                  <Field label="Packing" name="packaging" defaultValue={editingItem.packaging ?? ''} />
+                </div>
+                <div>
+                  <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
+                  <Textarea name="description" rows={2} defaultValue={editingItem.description ?? ''} className="text-sm resize-none" />
+                </div>
+                <div className="grid grid-cols-5 gap-3">
+                  <Field label="CTN" name="total_cartons" type="number" defaultValue={String(editingItem.total_cartons ?? '')} />
+                  <Field label="Qty" name="total_quantity" type="number" defaultValue={String(editingItem.total_quantity ?? '')} />
+                  <Field label="U.CBM" name="unit_cbm" type="number" step="0.0001" defaultValue={String(editingItem.unit_cbm ?? '')} />
+                  <Field label="T.CBM" name="total_cbm" type="number" step="0.0001" defaultValue={String(editingItem.total_cbm ?? '')} />
+                  <Field label="Amount ¥" name="total_amount_rmb" type="number" step="0.01" defaultValue={String(editingItem.total_amount_rmb ?? '')} />
+                </div>
+                <div className="grid grid-cols-5 gap-3">
+                  <Field label="L (cm)" name="dim_l_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_l_cm ?? '')} />
+                  <Field label="W (cm)" name="dim_w_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_w_cm ?? '')} />
+                  <Field label="H (cm)" name="dim_h_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_h_cm ?? '')} />
+                  <Field label="U.Wkg" name="unit_weight_kg" type="number" step="0.001" defaultValue={String(editingItem.unit_weight_kg ?? '')} />
+                  <Field label="T.Wkg" name="total_weight_kg" type="number" step="0.001" defaultValue={String(editingItem.total_weight_kg ?? '')} />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Unit Price ¥" name="unit_price_rmb" type="number" step="0.01" defaultValue={String(editingItem.unit_price_rmb ?? '')} />
+                </div>
+                <DocumentItemPhotoFields
+                  key={editingItem.id}
+                  photo={editingItem.photo}
+                  photo2={editingItem.photo2}
+                />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Src ITEM NO" name="source_item_no" defaultValue={editingItem.source_item_no ?? ''} />
-                <Field label="DEL NO" name="delivery_no" defaultValue={editingItem.delivery_no ?? ''} />
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                <Field label="CUS NO" name="customer_item_ref" defaultValue={editingItem.customer_item_ref ?? ''} />
-                <Field label="Unit" name="unit" defaultValue={editingItem.unit ?? ''} />
-                <Field label="Material" name="material" defaultValue={editingItem.material ?? ''} />
-              </div>
-              <div className="grid grid-cols-1 gap-3">
-                <Field label="Name" name="product_name_local" defaultValue={editingItem.product_name_local ?? ''} />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Shop" name="shop" defaultValue={editingItem.shop ?? ''} />
-                <Field label="Packing" name="packaging" defaultValue={editingItem.packaging ?? ''} />
-              </div>
-              <div>
-                <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
-                <Textarea name="description" rows={2} defaultValue={editingItem.description ?? ''} className="text-sm resize-none" />
-              </div>
-              <div className="grid grid-cols-5 gap-3">
-                <Field label="CTN" name="total_cartons" type="number" defaultValue={String(editingItem.total_cartons ?? '')} />
-                <Field label="Qty" name="total_quantity" type="number" defaultValue={String(editingItem.total_quantity ?? '')} />
-                <Field label="U.CBM" name="unit_cbm" type="number" step="0.0001" defaultValue={String(editingItem.unit_cbm ?? '')} />
-                <Field label="T.CBM" name="total_cbm" type="number" step="0.0001" defaultValue={String(editingItem.total_cbm ?? '')} />
-                <Field label="Amount ¥" name="total_amount_rmb" type="number" step="0.01" defaultValue={String(editingItem.total_amount_rmb ?? '')} />
-              </div>
-              <div className="grid grid-cols-5 gap-3">
-                <Field label="L (cm)" name="dim_l_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_l_cm ?? '')} />
-                <Field label="W (cm)" name="dim_w_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_w_cm ?? '')} />
-                <Field label="H (cm)" name="dim_h_cm" type="number" step="0.1" defaultValue={String(editingItem.dim_h_cm ?? '')} />
-                <Field label="U.Wkg" name="unit_weight_kg" type="number" step="0.001" defaultValue={String(editingItem.unit_weight_kg ?? '')} />
-                <Field label="T.Wkg" name="total_weight_kg" type="number" step="0.001" defaultValue={String(editingItem.total_weight_kg ?? '')} />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Unit Price ¥" name="unit_price_rmb" type="number" step="0.01" defaultValue={String(editingItem.unit_price_rmb ?? '')} />
-              </div>
-              <DocumentItemPhotoFields
-                key={editingItem.id}
-                photo={editingItem.photo}
-                photo2={editingItem.photo2}
-              />
-              <DialogFooter>
+              <DialogFooter className="shrink-0 border-t border-slate-100 pt-3">
                 <Button type="button" variant="outline" size="sm" onClick={() => setEditingItem(null)}>Cancel</Button>
                 <Button type="submit" size="sm" disabled={isPending}>Save Changes</Button>
               </DialogFooter>

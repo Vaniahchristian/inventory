@@ -776,12 +776,12 @@ export function ManagementClient({
       </div>
 
       <Dialog open={!!editingItem} onOpenChange={(open) => !open && setEditingItem(null)}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[min(85vh,640px)] max-w-lg flex-col gap-3 overflow-hidden">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Edit Row</DialogTitle>
           </DialogHeader>
           {editingItem && (
-            <form action={handleSave} className="space-y-3">
+            <form action={handleSave} className="flex min-h-0 flex-1 flex-col gap-3">
               {/* Preserve other fields so updateDocumentItem does not null them out */}
               <input type="hidden" name="item_code" value={editingItem.item_code ?? ''} />
               <input type="hidden" name="source_item_no" value={editingItem.source_item_no ?? ''} />
@@ -801,61 +801,63 @@ export function ManagementClient({
               <input type="hidden" name="unit_price_rmb" value={editingItem.unit_price_rmb ?? ''} />
               <input type="hidden" name="total_amount_rmb" value={editingItem.total_amount_rmb ?? ''} />
 
-              <div>
-                <Label className="text-xs text-slate-600 mb-1 block">Marks</Label>
-                <Input name="marks" defaultValue={editingItem.marks ?? ''} className="h-8 text-sm" />
-              </div>
-              <div>
-                <Label className="text-xs text-slate-600 mb-1 block">Name</Label>
-                <Input
-                  name="product_name_local"
-                  defaultValue={editingItem.product_name_local ?? ''}
-                  className="h-8 text-sm"
-                />
-              </div>
-              <div>
-                <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
-                <Textarea
-                  name="description"
-                  rows={3}
-                  defaultValue={editingItem.description ?? ''}
-                  className="text-sm resize-none"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain pr-1">
                 <div>
-                  <Label className="text-xs text-slate-600 mb-1 block">Pieces</Label>
+                  <Label className="text-xs text-slate-600 mb-1 block">Marks</Label>
+                  <Input name="marks" defaultValue={editingItem.marks ?? ''} className="h-8 text-sm" />
+                </div>
+                <div>
+                  <Label className="text-xs text-slate-600 mb-1 block">Name</Label>
                   <Input
-                    name="total_quantity"
-                    type="number"
-                    defaultValue={String(editingItem.total_quantity ?? '')}
+                    name="product_name_local"
+                    defaultValue={editingItem.product_name_local ?? ''}
                     className="h-8 text-sm"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-slate-600 mb-1 block">Cartons</Label>
+                  <Label className="text-xs text-slate-600 mb-1 block">Description</Label>
+                  <Textarea
+                    name="description"
+                    rows={3}
+                    defaultValue={editingItem.description ?? ''}
+                    className="text-sm resize-none"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs text-slate-600 mb-1 block">Pieces</Label>
+                    <Input
+                      name="total_quantity"
+                      type="number"
+                      defaultValue={String(editingItem.total_quantity ?? '')}
+                      className="h-8 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs text-slate-600 mb-1 block">Cartons</Label>
+                    <Input
+                      name="total_cartons"
+                      type="number"
+                      defaultValue={String(editingItem.total_cartons ?? '')}
+                      className="h-8 text-sm"
+                    />
+                  </div>
+                </div>
+                <DocumentItemPhotoFields
+                  key={editingItem.id}
+                  photo={editingItem.photo}
+                  photo2={editingItem.photo2}
+                />
+                <div>
+                  <Label className="text-xs text-slate-600 mb-1 block">Reason (optional)</Label>
                   <Input
-                    name="total_cartons"
-                    type="number"
-                    defaultValue={String(editingItem.total_cartons ?? '')}
+                    name="note"
+                    placeholder="e.g. 2 cartons damaged on arrival"
                     className="h-8 text-sm"
                   />
                 </div>
               </div>
-              <DocumentItemPhotoFields
-                key={editingItem.id}
-                photo={editingItem.photo}
-                photo2={editingItem.photo2}
-              />
-              <div>
-                <Label className="text-xs text-slate-600 mb-1 block">Reason (optional)</Label>
-                <Input
-                  name="note"
-                  placeholder="e.g. 2 cartons damaged on arrival"
-                  className="h-8 text-sm"
-                />
-              </div>
-              <DialogFooter>
+              <DialogFooter className="shrink-0 border-t border-slate-100 pt-3">
                 <Button type="button" variant="outline" size="sm" onClick={() => setEditingItem(null)}>
                   Cancel
                 </Button>
