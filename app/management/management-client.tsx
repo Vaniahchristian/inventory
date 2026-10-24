@@ -491,21 +491,21 @@ export function ManagementClient({
             ))}
           </div>
           {view === 'changes' ? (
-            <div className="rounded-md border bg-white">
-              <Table className="text-xs table-fixed w-full">
+            <div className="rounded-md border bg-white overflow-x-auto">
+              <Table className="text-xs w-full">
                 <TableHeader>
                   <TableRow className="bg-slate-50">
                     <TableHead className="w-14">Photo</TableHead>
-                    <TableHead className="w-[10%]">Marks</TableHead>
-                    <TableHead className="w-[20%]">Name</TableHead>
-                    <TableHead className="w-[10%]">Section</TableHead>
-                    <TableHead className="w-[9%] text-right">Pieces imported</TableHead>
-                    <TableHead className="w-[8%] text-right">Current</TableHead>
-                    <TableHead className="w-[7%] text-right">Change</TableHead>
-                    <TableHead className="w-[9%] text-right">Cartons imported</TableHead>
-                    <TableHead className="w-[8%] text-right">Current</TableHead>
-                    <TableHead className="w-[7%] text-right">Change</TableHead>
-                    <TableHead className="w-[14%]">Last change</TableHead>
+                    <TableHead className="w-[9rem]">Marks</TableHead>
+                    <TableHead className="min-w-[12rem] w-full">Name</TableHead>
+                    <TableHead className="whitespace-nowrap">Section</TableHead>
+                    <TableHead className="text-right whitespace-nowrap">Pieces imported</TableHead>
+                    <TableHead className="text-right whitespace-nowrap">Current</TableHead>
+                    <TableHead className="text-right whitespace-nowrap">Change</TableHead>
+                    <TableHead className="text-right whitespace-nowrap">Cartons imported</TableHead>
+                    <TableHead className="text-right whitespace-nowrap">Current</TableHead>
+                    <TableHead className="text-right whitespace-nowrap">Change</TableHead>
+                    <TableHead className="min-w-[10rem] whitespace-nowrap">Last change</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -564,18 +564,18 @@ export function ManagementClient({
               </Table>
             </div>
           ) : (
-          <div className="rounded-md border bg-white">
-            <Table className="text-xs table-fixed w-full">
+          <div className="rounded-md border bg-white overflow-x-auto">
+            <Table className="text-xs w-full">
               <TableHeader>
                 <TableRow className="bg-slate-50">
                   <TableHead className="w-10 text-center">#</TableHead>
                   <TableHead className="w-14">Photo</TableHead>
-                  <TableHead className="w-[12%]">Marks</TableHead>
-                  <TableHead className="w-[28%]">Name</TableHead>
-                  <TableHead className="w-[26%]">Description</TableHead>
-                  <TableHead className="w-20 text-right">Pieces</TableHead>
-                  <TableHead className="w-20 text-right">Cartons</TableHead>
-                  <TableHead className="w-24 text-center">Actions</TableHead>
+                  <TableHead className="w-[9rem]">Marks</TableHead>
+                  <TableHead className="min-w-[12rem]">Name</TableHead>
+                  <TableHead className="min-w-[14rem] w-full">Description</TableHead>
+                  <TableHead className="w-20 text-right whitespace-nowrap">Pieces</TableHead>
+                  <TableHead className="w-28 text-right whitespace-nowrap">Cartons</TableHead>
+                  <TableHead className="w-28 text-center whitespace-nowrap">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
