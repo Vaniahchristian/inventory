@@ -545,10 +545,10 @@ function SectionPicker({
 
 async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
   const ExcelJS = (await import('exceljs')).default
-  const { downloadArrayBuffer, fetchImageForExport } = await import('@/lib/export-with-images')
+  const { downloadArrayBuffer } = await import('@/lib/export-with-images')
 
   const header = [
-    'No.', 'PHOTO', 'PHOTO2', 'Marks', 'Shop', 'Item No', 'Src ITEM', 'DEL', 'CUS', 'Unit', '品名', 'Material',
+    'No.', 'Marks', 'Shop', 'Item No', 'Src ITEM', 'DEL', 'CUS', 'Unit', '品名', 'Material',
     'Description', 'Packing', 'CTN', 'Qty', 'L', 'W', 'H', 'U.CBM', 'T.CBM', 'U.Wkg', 'T.Wkg',
     'U.Price (RMB)', 'Amount (RMB)', 'Section',
   ]
@@ -557,9 +557,8 @@ async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
   const ws = wb.addWorksheet('Products')
   ws.addRow(header)
   ws.getRow(1).font = { bold: true }
-  ws.columns = header.map((h, idx) => ({
-    header: h,
-    width: idx === 0 ? 5 : idx === 1 || idx === 2 ? 12 : 14,
+  ws.columns = header.map((_, idx) => ({
+    width: idx === 0 ? 5 : 14,
   }))
 
   const totalCtn = rows.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
@@ -568,14 +567,10 @@ async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
   const totalWkg = rows.reduce((s, p) => s + (p.total_weight_kg ?? 0), 0)
   const totalAmount = rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
 
-  const IMG = 56
   for (let i = 0; i < rows.length; i++) {
     const p = rows[i]!
-    const excelRow = i + 2
     ws.addRow([
       i + 1,
-      p.photo ?? '',
-      p.photo2 ?? '',
       p.marks ?? '-',
       p.shop ?? '-',
       p.item_code ?? '-',
@@ -600,33 +595,11 @@ async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
       p.total_amount_rmb ?? null,
       p.section,
     ])
-    ws.getRow(excelRow).height = 48
-
-    const [img1, img2] = await Promise.all([
-      fetchImageForExport(p.photo),
-      fetchImageForExport(p.photo2),
-    ])
-    if (img1) {
-      const id = wb.addImage({ buffer: img1.buffer, extension: img1.extension })
-      ws.addImage(id, {
-        tl: { col: 1, row: excelRow - 1 },
-        ext: { width: IMG, height: IMG },
-        editAs: 'oneCell',
-      })
-    }
-    if (img2) {
-      const id = wb.addImage({ buffer: img2.buffer, extension: img2.extension })
-      ws.addImage(id, {
-        tl: { col: 2, row: excelRow - 1 },
-        ext: { width: IMG, height: IMG },
-        editAs: 'oneCell',
-      })
-    }
   }
 
   ws.addRow([
     `TOTALS (${rows.length} rows)`,
-    '', '', '', '', '', '', '', '', '', '', '', '',
+    '', '', '', '', '', '', '', '', '', '',
     totalCtn,
     totalQty,
     null, null, null, null,
@@ -647,7 +620,6 @@ async function exportDocumentItemsToExcel(rows: DocumentItem[]) {
 }
 
 async function exportDocumentItemsToPdf(rows: DocumentItem[]) {
-  const { photoImgHtml } = await import('@/lib/export-with-images')
   const esc = (s: unknown) => String(s ?? '-').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
   const totalCtn = rows.reduce((s, p) => s + (p.total_cartons ?? 0), 0)
@@ -657,16 +629,14 @@ async function exportDocumentItemsToPdf(rows: DocumentItem[]) {
   const totalAmount = rows.reduce((s, p) => s + (p.total_amount_rmb ?? 0), 0)
 
   const headers = [
-    'No.', 'Photo', 'Marks', 'Shop', 'Item No', 'Src', 'DEL', 'CUS', 'Unit', '品名', 'Mat',
+    'No.', 'Marks', 'Shop', 'Item No', 'Src', 'DEL', 'CUS', 'Unit', '品名', 'Mat',
     'Description', 'Packing', 'CTN', 'Qty', 'T.CBM', 'T.Wkg', 'Amount (RMB)', 'Section',
   ]
   const headerRow = headers.map(h => `<th>${esc(h)}</th>`).join('')
 
   const bodyRows = rows.map((p, i) => {
-    const photoCell = photoImgHtml(p.photo) || photoImgHtml(p.photo2) || esc('-')
     const cells = [
       String(i + 1),
-      null as unknown as string,
       p.marks,
       p.shop,
       p.item_code,
@@ -685,14 +655,12 @@ async function exportDocumentItemsToPdf(rows: DocumentItem[]) {
       p.total_amount_rmb != null ? p.total_amount_rmb.toLocaleString() : '-',
       p.section,
     ]
-    const tds = cells
-      .map((c, idx) => (idx === 1 ? `<td>${photoCell}</td>` : `<td>${esc(c)}</td>`))
-      .join('')
+    const tds = cells.map(c => `<td>${esc(c)}</td>`).join('')
     return `<tr class="${i % 2 === 1 ? 'alt' : ''}">${tds}</tr>`
   }).join('')
 
   const totalsRow = [
-    `<td class="bold" colspan="13">TOTALS — ${rows.length} rows</td>`,
+    `<td class="bold" colspan="12">TOTALS — ${rows.length} rows</td>`,
     `<td class="bold">${totalCtn.toLocaleString()}</td>`,
     `<td class="bold">${totalQty.toLocaleString()}</td>`,
     `<td class="bold">${totalCbm.toFixed(4)}</td>`,
@@ -717,7 +685,6 @@ async function exportDocumentItemsToPdf(rows: DocumentItem[]) {
   tr.alt td { background: #f8fafc; }
   tr.totals td { background: #e2e8f0; }
   .bold { font-weight: bold; }
-  img { max-width: 48px; max-height: 48px; }
   @media print { @page { size: A3 landscape; margin: 8mm; } }
 </style>
 </head>
@@ -1113,7 +1080,7 @@ export function ProductsClient({
       toast.info('No rows to export')
       return
     }
-    const toastId = toast.loading(format === 'excel' ? 'Building Excel with photos…' : 'Preparing PDF…')
+    const toastId = toast.loading(format === 'excel' ? 'Building Excel…' : 'Preparing PDF…')
     try {
       if (format === 'excel') await exportDocumentItemsToExcel(rows)
       else await exportDocumentItemsToPdf(rows)

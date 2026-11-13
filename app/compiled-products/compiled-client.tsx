@@ -153,42 +153,28 @@ function getCellValue(row: CompiledRow, key: FieldKey): string {
 
 async function exportToExcel(rows: CompiledRow[], selectedFields: FieldKey[], importMeta: ImportMeta | null) {
   const ExcelJS = (await import('exceljs')).default
-  const { downloadArrayBuffer, fetchImageForExport } = await import('@/lib/export-with-images')
+  const { downloadArrayBuffer } = await import('@/lib/export-with-images')
   const fieldDefs = EXPORT_FIELDS.filter(f => selectedFields.includes(f.key))
 
-  const header = ['No.', 'PHOTO', ...fieldDefs.map(f => f.label)]
+  const header = ['No.', ...fieldDefs.map(f => f.label)]
   const wb = new ExcelJS.Workbook()
   const ws = wb.addWorksheet('Compiled Products')
   ws.addRow(header)
   ws.getRow(1).font = { bold: true }
   ws.columns = [
     { width: 5 },
-    { width: 12 },
     ...fieldDefs.map(() => ({ width: 18 })),
   ]
 
-  const IMG = 56
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!
-    const excelRow = i + 2
     ws.addRow([
       i + 1,
-      row.photo ?? row.image_url ?? '',
       ...fieldDefs.map(f => getCellValue(row, f.key)),
     ])
-    ws.getRow(excelRow).height = 48
-    const img = await fetchImageForExport(row.photo ?? row.image_url)
-    if (img) {
-      const id = wb.addImage({ buffer: img.buffer, extension: img.extension })
-      ws.addImage(id, {
-        tl: { col: 1, row: excelRow - 1 },
-        ext: { width: IMG, height: IMG },
-        editAs: 'oneCell',
-      })
-    }
   }
 
-  const totalsRow: (string | number | null)[] = [`TOTALS (${rows.length} rows)`, '']
+  const totalsRow: (string | number | null)[] = [`TOTALS (${rows.length} rows)`]
   for (const f of fieldDefs) {
     switch (f.key) {
       case 'cartons':          totalsRow.push(rows.reduce((s, r) => s + (r.cartons ?? 0), 0)); break
@@ -218,7 +204,6 @@ async function exportToExcel(rows: CompiledRow[], selectedFields: FieldKey[], im
 // ── PDF export ──────────────────────────────────────────────────────────────
 
 async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], importMeta: ImportMeta | null) {
-  const { photoImgHtml } = await import('@/lib/export-with-images')
   const fieldDefs = EXPORT_FIELDS.filter(f => selectedFields.includes(f.key))
 
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -227,17 +212,15 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
     ? `Client: ${esc(importMeta.client_details ?? '-')} &nbsp;|&nbsp; Container: ${esc(importMeta.container_no ?? '-')} &nbsp;|&nbsp; ${rows.length} items`
     : `${rows.length} items`
 
-  const headerCells = ['No.', 'Photo', ...fieldDefs.map(f => f.label)].map(h => `<th>${esc(h)}</th>`).join('')
+  const headerCells = ['No.', ...fieldDefs.map(f => f.label)].map(h => `<th>${esc(h)}</th>`).join('')
 
   const bodyRows = rows.map((row, i) => {
-    const photo = photoImgHtml(row.photo ?? row.image_url) || esc('-')
     const rest = fieldDefs.map(f => `<td>${esc(getCellValue(row, f.key))}</td>`).join('')
-    return `<tr class="${i % 2 === 1 ? 'alt' : ''}"><td>${i + 1}</td><td>${photo}</td>${rest}</tr>`
+    return `<tr class="${i % 2 === 1 ? 'alt' : ''}"><td>${i + 1}</td>${rest}</tr>`
   }).join('')
 
   const totalCells = [
     '<td class="bold" style="background:#e2e8f0">TOTALS</td>',
-    '<td style="background:#e2e8f0"></td>',
   ]
   for (const f of fieldDefs) {
     let val = ''
@@ -266,7 +249,6 @@ async function exportToPdf(rows: CompiledRow[], selectedFields: FieldKey[], impo
   td { border: 1px solid #d1d5db; padding: 2px 4px; font-size: 7.5pt; vertical-align: middle; word-break: break-word; }
   tr.alt td { background: #f8fafc; }
   .bold { font-weight: bold; }
-  img { max-width: 48px; max-height: 48px; }
   @media print { @page { size: A3 landscape; margin: 8mm; } }
 </style>
 </head>
@@ -639,7 +621,7 @@ export function CompiledProductsClient({
           ? filteredDataRows
           : compiledRows
     const toastId = toast.loading(
-      exportFormat === 'excel' ? 'Building Excel with photos…' : 'Preparing PDF…'
+      exportFormat === 'excel' ? 'Building Excel…' : 'Preparing PDF…'
     )
     try {
       if (exportFormat === 'excel') await exportToExcel(rows, fields, exportImportMeta)
